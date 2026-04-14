@@ -10,16 +10,16 @@ from typing import Callable, Optional
 
 # FTC brand palette
 C = {
-    "bg":           "#4e4e4c",
-    "surface":      "#3a3a38",
-    "input_bg":     "#2e2e2c",
+    "bg":           "#0d0d0d",
+    "surface":      "#1a1a1a",
+    "input_bg":     "#141414",
     "text":         "#ffffff",
-    "subtext":      "#dadada",
+    "subtext":      "#777777",
     "accent":       "#f39200",
-    "accent_hover": "#d98200",
-    "error":        "#ff6b6b",
-    "success":      "#a6e3a1",
-    "divider":      "#6e6e6c",
+    "accent_hover": "#e08200",
+    "error":        "#ff5555",
+    "success":      "#4ade80",
+    "divider":      "#2d2d2d",
 }
 
 WINDOW_W = 400

@@ -1,43 +1,56 @@
 """
 FTC Whisper — Main application window.
 
-Login panel  : shown before authentication.
-Dashboard    : shown once authenticated — three tabs:
-                 Home    status indicator + user info
-                 Hotkey  click-to-record a new hotkey shortcut
-                 History scrollable transcription log from Supabase
+Dashboard: Home / Hotkey / History tabs.
+Dark theme with rounded-corner cards via Canvas.
 """
 
 import threading
 import tkinter as tk
 from datetime import datetime
 from typing import Callable, Optional
+import ctypes
 
+# ── Dark colour palette ───────────────────────────────────────────────────────
 C = {
-    "bg":            "#4e4e4c",
-    "surface":       "#3a3a38",
-    "surface_hover": "#444442",
-    "input_bg":      "#2e2e2c",
-    "text":          "#ffffff",
-    "subtext":       "#dadada",
-    "accent":        "#f39200",
-    "accent_hover":  "#d98200",
-    "error":         "#ff6b6b",
-    "success":       "#a6e3a1",
-    "divider":       "#6e6e6c",
-    "scrollbar":     "#5a5a58",
+    "bg":            "#0d0d0d",   # near-black window background
+    "surface":       "#1a1a1a",   # card surface
+    "surface_hover": "#242424",   # card hover / active
+    "input_bg":      "#141414",   # entry fields
+    "text":          "#ffffff",   # primary text
+    "subtext":       "#777777",   # secondary / hint text
+    "accent":        "#f39200",   # FTC orange
+    "accent_hover":  "#e08200",   # darker orange
+    "accent_dim":    "#3d2600",   # very muted orange (badge bg)
+    "error":         "#ff5555",
+    "success":       "#4ade80",
+    "divider":       "#1f1f1f",   # hairline separator
+    "border":        "#2d2d2d",   # card border
+    "scrollbar":     "#2d2d2d",
 }
 
 WINDOW_W = 420
-LOGIN_H  = 520
-DASH_H   = 520
+DASH_H   = 560
+
+
+# ── Rounded card helper ───────────────────────────────────────────────────────
+
+def _rr(canvas, x1, y1, x2, y2, r, **kw):
+    """Draw a smooth rounded rectangle on a Canvas."""
+    pts = (
+        x1+r, y1,   x2-r, y1,   x2,   y1,
+        x2,   y1+r, x2,   y2-r, x2,   y2,
+        x2-r, y2,   x1+r, y2,   x1,   y2,
+        x1,   y2-r, x1,   y1+r, x1,   y1,
+    )
+    return canvas.create_polygon(pts, smooth=True, **kw)
 
 
 class AppWindow:
     _STATUS = {
-        "idle":       ("● Ready",         "#a6e3a1"),
-        "recording":  ("● Recording…",    "#ff6b6b"),
-        "processing": ("● Transcribing…", "#f39200"),
+        "idle":       ("● Ready",         C["success"]),
+        "recording":  ("● Recording…",    "#ff5555"),
+        "processing": ("⚙ Transcribing…", C["accent"]),
     }
 
     def __init__(
@@ -60,15 +73,12 @@ class AppWindow:
         self._db               = db
         self._hotkey           = hotkey.upper()
         self._root: Optional[tk.Tk] = None
-        self._login_mode = "login"
 
         # Hotkey recorder state
         self._recording_hotkey = False
         self._pending_hotkey: Optional[str] = None
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    # ── Public API ────────────────────────────────────────────────────────────
 
     def run(self) -> None:
         self._root = tk.Tk()
@@ -76,7 +86,8 @@ class AppWindow:
         self._root.configure(bg=C["bg"])
         self._root.resizable(False, False)
         self._root.protocol("WM_DELETE_WINDOW", self._hide)
-        print("[DEBUG] AppWindow UI setup finished")
+
+        self._apply_dark_titlebar()
 
         self._build_header()
 
@@ -101,12 +112,25 @@ class AppWindow:
             text, color = self._STATUS.get(state, ("● Ready", C["success"]))
             self._root.after(0, lambda: self._status_lbl.configure(text=text, fg=color))
 
-    # ------------------------------------------------------------------
-    # Shared header
-    # ------------------------------------------------------------------
+    # ── Windows dark title bar ────────────────────────────────────────────────
+
+    def _apply_dark_titlebar(self) -> None:
+        try:
+            DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+            hwnd = ctypes.windll.user32.GetParent(self._root.winfo_id())
+            if not hwnd:
+                hwnd = self._root.winfo_id()
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                ctypes.byref(ctypes.c_int(1)), ctypes.sizeof(ctypes.c_int),
+            )
+        except Exception:
+            pass
+
+    # ── Header ────────────────────────────────────────────────────────────────
 
     def _build_header(self) -> None:
-        header = tk.Frame(self._root, bg=C["bg"], pady=18)
+        header = tk.Frame(self._root, bg=C["bg"], pady=20)
         header.pack(fill="x")
 
         from logo_cache import get_logo_photo
@@ -121,153 +145,44 @@ class AppWindow:
                 font=("Segoe UI", 22, "bold"),
             ).pack()
 
-        tk.Frame(self._root, bg=C["divider"], height=1).pack(fill="x", padx=24)
+        # Hairline divider
+        tk.Frame(self._root, bg=C["divider"], height=1).pack(fill="x")
 
-    # ------------------------------------------------------------------
-    # Login panel
-    # ------------------------------------------------------------------
-
-    def _build_login(self, parent: tk.Frame) -> None:
-        tabs = tk.Frame(parent, bg=C["surface"])
-        tabs.pack(fill="x", padx=24, pady=(14, 0))
-
-        self._tab_signin = self._make_tab(tabs, "Sign In",
-                                          lambda: self._switch_login_mode("login"))
-        self._tab_signup = self._make_tab(tabs, "Create Account",
-                                          lambda: self._switch_login_mode("signup"))
-        self._tab_signin.pack(side="left", expand=True, fill="x")
-        self._tab_signup.pack(side="left", expand=True, fill="x")
-
-        card = tk.Frame(parent, bg=C["surface"], padx=22, pady=16)
-        card.pack(fill="both", expand=True, padx=24, pady=(0, 22))
-
-        self._email_var = tk.StringVar()
-        self._pass_var  = tk.StringVar()
-
-        self._flabel(card, "Email")
-        self._email_entry = self._entry(card, self._email_var)
-        self._email_entry.pack(fill="x", pady=(4, 12))
-
-        self._flabel(card, "Password")
-        self._pass_entry = self._entry(card, self._pass_var, show="•")
-        self._pass_entry.pack(fill="x", pady=(4, 16))
-
-        self._login_status_var = tk.StringVar(value="")
-        self._login_status_lbl = tk.Label(
-            card, textvariable=self._login_status_var,
-            bg=C["surface"], fg=C["error"],
-            font=("Segoe UI", 10), wraplength=340,
-        )
-        self._login_status_lbl.pack(pady=(0, 8))
-
-        self._submit_btn = tk.Label(
-            card, text="Sign In",
-            fg=C["bg"], bg=C["accent"],
-            font=("Segoe UI", 12, "bold"),
-            padx=16, pady=10,
-            cursor="hand2",
-        )
-        self._submit_btn.bind("<Button-1>", lambda _e: self._submit())
-        self._submit_btn.bind("<Enter>",    lambda _e: self._submit_btn.configure(bg=C["accent_hover"]))
-        self._submit_btn.bind("<Leave>",    lambda _e: self._submit_btn.configure(bg=C["accent"]))
-        self._submit_btn.pack(fill="x")
-        self._submit_busy = False
-
-        self._root.bind("<Return>", lambda _e: self._on_return())
-        self._switch_login_mode("login")
-
-    def _show_login(self) -> None:
-        self._dash_frame.pack_forget()
-        self._login_frame.pack(fill="both", expand=True)
-        self._resize(WINDOW_W, LOGIN_H)
-
-    def _switch_login_mode(self, mode: str) -> None:
-        self._login_mode = mode
-        if mode == "login":
-            self._tab_signin.configure(fg=C["accent"])
-            self._tab_signup.configure(fg=C["subtext"])
-            self._submit_btn.configure(text="Sign In")
-        else:
-            self._tab_signin.configure(fg=C["subtext"])
-            self._tab_signup.configure(fg=C["accent"])
-            self._submit_btn.configure(text="Create Account")
-        self._login_status_var.set("")
-
-    def _on_return(self) -> None:
-        if self._login_frame.winfo_ismapped():
-            self._submit()
-
-    def _submit(self) -> None:
-        print("[DEBUG] _submit called", flush=True)
-        if getattr(self, "_submit_busy", False):
-            return
-        email    = self._email_var.get().strip()
-        password = self._pass_var.get()
-
-        if not email or not password:
-            self._set_login_status("Please enter your email and password.", error=True)
-            return
-        if len(password) < 6:
-            self._set_login_status("Password must be at least 6 characters.", error=True)
-            return
-
-        self._submit_busy = True
-        self._submit_btn.configure(bg=C["divider"], cursor="")
-        self._set_login_status("Connecting…", error=False)
-
-        def _run():
-            if self._login_mode == "login":
-                ok, msg = self._auth.sign_in(email, password)
-            else:
-                ok, msg = self._auth.sign_up(email, password)
-            self._root.after(0, self._handle_auth_result, ok, msg)
-
-        threading.Thread(target=_run, daemon=True).start()
-
-    def _handle_auth_result(self, ok: bool, msg: str) -> None:
-        self._submit_busy = False
-        self._submit_btn.configure(bg=C["accent"], cursor="hand2")
-        if ok:
-            # Both auto-confirmed signup and sign-in land here
-            self._set_login_status("Welcome!", error=False)
-            self._root.after(400, self._on_login_success)
-        else:
-            self._set_login_status(msg, error=True)
-
-    def _fire_authenticated(self) -> None:
-        """Called via after() when a saved session is restored at startup."""
-        threading.Thread(
-            target=self._on_authenticated, args=(self._auth,), daemon=True
-        ).start()
-
-    def _on_login_success(self) -> None:
-        self._show_dashboard()
-        threading.Thread(
-            target=self._on_authenticated, args=(self._auth,), daemon=True
-        ).start()
-
-    def _set_login_status(self, msg: str, error: bool = True) -> None:
-        self._login_status_var.set(msg)
-        self._login_status_lbl.configure(fg=C["error"] if error else C["success"])
-
-    # ------------------------------------------------------------------
-    # Dashboard shell (tab bar + content switcher + footer)
-    # ------------------------------------------------------------------
+    # ── Dashboard shell ───────────────────────────────────────────────────────
 
     def _build_dashboard(self, parent: tk.Frame) -> None:
-        # ── Tab bar ───────────────────────────────────────────────────
-        tab_bar = tk.Frame(parent, bg=C["surface"])
-        tab_bar.pack(fill="x", padx=24, pady=(12, 0))
+        # Tab bar with underline indicator
+        tab_bar = tk.Frame(parent, bg=C["bg"])
+        tab_bar.pack(fill="x", padx=20, pady=(14, 0))
 
         self._dash_tabs = {}
-        for name, label in [("home", "Home"), ("hotkey", "Hotkey"), ("history", "History")]:
-            t = self._make_tab(tab_bar, label, lambda n=name: self._switch_dash_tab(n))
-            t.pack(side="left", expand=True, fill="x")
-            self._dash_tabs[name] = t
+        self._tab_indicators = {}
 
-        # ── Content frames ────────────────────────────────────────────
+        for name, label in [("home", "Home"), ("hotkey", "Hotkey"), ("history", "History")]:
+            col = tk.Frame(tab_bar, bg=C["bg"])
+            col.pack(side="left", expand=True, fill="x")
+
+            btn = tk.Label(
+                col, text=label,
+                fg=C["subtext"], bg=C["bg"],
+                font=("Segoe UI", 10), pady=8, cursor="hand2",
+            )
+            btn.pack(fill="x")
+            btn.bind("<Button-1>", lambda _e, n=name: self._switch_dash_tab(n))
+            btn.bind("<Enter>",    lambda _e, b=btn: b.configure(fg=C["text"]) if b.cget("fg") != C["accent"] else None)
+            btn.bind("<Leave>",    lambda _e, b=btn, n=name: b.configure(fg=C["accent"] if self._dash_tabs.get(n) and b.cget("fg") == C["text"] else b.cget("fg")))
+
+            ind = tk.Frame(col, bg=C["bg"], height=2)
+            ind.pack(fill="x")
+
+            self._dash_tabs[name] = btn
+            self._tab_indicators[name] = ind
+
+        tk.Frame(parent, bg=C["divider"], height=1).pack(fill="x", padx=0)
+
+        # Content area
         self._dash_content = tk.Frame(parent, bg=C["bg"])
-        self._dash_content.pack(fill="both", expand=True, padx=24, pady=(0, 0))
+        self._dash_content.pack(fill="both", expand=True, pady=(10, 0))
 
         self._home_frame    = tk.Frame(self._dash_content, bg=C["bg"])
         self._hotkey_frame  = tk.Frame(self._dash_content, bg=C["bg"])
@@ -277,7 +192,7 @@ class AppWindow:
         self._build_hotkey_tab(self._hotkey_frame)
         self._build_history_tab(self._history_frame)
 
-        # ── Footer ────────────────────────────────────────────────────
+        # Footer
         footer = tk.Frame(parent, bg=C["bg"], padx=24, pady=10)
         footer.pack(fill="x", side="bottom")
 
@@ -291,7 +206,7 @@ class AppWindow:
         self._ghost_btn(footer, "Quit",     self._do_quit).pack(side="right", padx=(8, 0))
         self._ghost_btn(footer, "Sign Out", self._do_sign_out).pack(side="right")
 
-        tk.Frame(parent, bg=C["divider"], height=1).pack(fill="x", padx=24, before=footer)
+        tk.Frame(parent, bg=C["divider"], height=1).pack(fill="x", before=footer)
 
         self._switch_dash_tab("home")
 
@@ -299,12 +214,15 @@ class AppWindow:
         for n, frame in [("home",    self._home_frame),
                          ("hotkey",  self._hotkey_frame),
                          ("history", self._history_frame)]:
-            if n == name:
-                frame.pack(fill="both", expand=True, pady=(8, 0))
+            active = (n == name)
+            if active:
+                frame.pack(fill="both", expand=True)
                 self._dash_tabs[n].configure(fg=C["accent"])
+                self._tab_indicators[n].configure(bg=C["accent"])
             else:
                 frame.pack_forget()
                 self._dash_tabs[n].configure(fg=C["subtext"])
+                self._tab_indicators[n].configure(bg=C["bg"])
 
         if name == "history":
             self._load_history()
@@ -315,49 +233,53 @@ class AppWindow:
         if hasattr(self, "_email_display"):
             self._email_display.configure(text=self._auth.user_email or "")
 
-    # ------------------------------------------------------------------
-    # Home tab
-    # ------------------------------------------------------------------
+    # ── Home tab ──────────────────────────────────────────────────────────────
 
     def _build_home_tab(self, parent: tk.Frame) -> None:
         # Status card
-        sc = tk.Frame(parent, bg=C["surface"], padx=16, pady=14)
-        sc.pack(fill="x", pady=(0, 10))
-
+        sc = self._card(parent, margin=(0, 8))
         self._status_lbl = tk.Label(
             sc, text="● Ready",
             fg=C["success"], bg=C["surface"],
-            font=("Segoe UI", 13, "bold"), anchor="w",
+            font=("Segoe UI", 17, "bold"), anchor="w",
         )
         self._status_lbl.pack(fill="x")
 
-        hint_text = (f"Hold  {self._hotkey}  to dictate"
-                     if self._hotkey else "Set a hotkey in the Hotkey tab")
-        self._hotkey_hint = tk.Label(
-            sc, text=hint_text,
-            fg=C["subtext"], bg=C["surface"],
-            font=("Segoe UI", 10), anchor="w",
-        )
-        self._hotkey_hint.pack(fill="x", pady=(4, 0))
+        tk.Frame(sc, bg=C["border"], height=1).pack(fill="x", pady=(10, 10))
 
-        # Info card
-        ic = tk.Frame(parent, bg=C["surface"], padx=16, pady=12)
-        ic.pack(fill="x")
+        hint_row = tk.Frame(sc, bg=C["surface"])
+        hint_row.pack(fill="x")
+
+        # Hotkey pill
+        pill_bg = tk.Frame(hint_row, bg=C["accent_dim"], padx=8, pady=3)
+        pill_bg.pack(side="left")
+        hint_text = self._hotkey if self._hotkey else "—"
+        self._home_hotkey_lbl = tk.Label(
+            pill_bg, text=hint_text,
+            fg=C["accent"], bg=C["accent_dim"],
+            font=("Segoe UI", 10, "bold"),
+        )
+        self._home_hotkey_lbl.pack()
 
         tk.Label(
-            ic, text="Hold your hotkey to start recording. Release to transcribe.",
+            hint_row, text=" hold to dictate",
             fg=C["subtext"], bg=C["surface"],
-            font=("Segoe UI", 9), wraplength=340, justify="left", anchor="w",
+            font=("Segoe UI", 10),
+        ).pack(side="left")
+
+        # Instructions card
+        ic = self._card(parent, margin=(0, 0))
+        tk.Label(
+            ic, text="Hold the hotkey and speak.\nRelease to transcribe into your cursor.",
+            fg=C["subtext"], bg=C["surface"],
+            font=("Segoe UI", 10), justify="left", anchor="w",
         ).pack(fill="x")
 
-    # ------------------------------------------------------------------
-    # Hotkey tab
-    # ------------------------------------------------------------------
+    # ── Hotkey tab ────────────────────────────────────────────────────────────
 
     def _build_hotkey_tab(self, parent: tk.Frame) -> None:
-        # Current hotkey display
-        cur = tk.Frame(parent, bg=C["surface"], padx=16, pady=14)
-        cur.pack(fill="x", pady=(0, 10))
+        # Current shortcut card
+        cur = self._card(parent, margin=(0, 8))
 
         tk.Label(cur, text="Current shortcut",
                  fg=C["subtext"], bg=C["surface"],
@@ -367,19 +289,18 @@ class AppWindow:
         self._hotkey_display_lbl = tk.Label(
             cur, textvariable=self._hotkey_display_var,
             fg=C["accent"], bg=C["surface"],
-            font=("Segoe UI", 16, "bold"), anchor="w",
+            font=("Segoe UI", 22, "bold"), anchor="w",
         )
         self._hotkey_display_lbl.pack(fill="x", pady=(4, 0))
 
         # Recorder card
-        rec = tk.Frame(parent, bg=C["surface"], padx=16, pady=14)
-        rec.pack(fill="x")
+        rec = self._card(parent, margin=(0, 0))
 
         self._hotkey_record_msg = tk.Label(
             rec,
-            text="Click  Change Shortcut  then press any key or combination (e.g. F9, Alt+V).",
+            text="Click  Change Shortcut  then press any key\nor combination (e.g. F9, Alt+V).",
             fg=C["subtext"], bg=C["surface"],
-            font=("Segoe UI", 9), wraplength=340, justify="left", anchor="w",
+            font=("Segoe UI", 9), justify="left", anchor="w",
         )
         self._hotkey_record_msg.pack(fill="x", pady=(0, 12))
 
@@ -392,11 +313,10 @@ class AppWindow:
 
         self._save_btn = tk.Label(
             btn_row, text="Save",
-            fg=C["bg"], bg=C["divider"],
+            fg=C["subtext"], bg=C["border"],
             font=("Segoe UI", 10, "bold"), padx=14, pady=8,
         )
         self._save_btn.pack(side="left")
-        # Save is disabled until a valid combo is recorded
 
     def _toggle_hotkey_recording(self) -> None:
         if self._recording_hotkey:
@@ -407,9 +327,9 @@ class AppWindow:
     def _start_hotkey_recording(self) -> None:
         self._recording_hotkey = True
         self._pending_hotkey = None
-        self._record_btn.configure(text="Cancel", bg=C["error"])
+        self._record_btn.configure(text="Cancel", bg=C["error"], fg=C["text"])
         self._hotkey_record_msg.configure(
-            text="Press your new key or combination now… (Escape to cancel)",
+            text="Press your new key or combination…\n(Escape to cancel)",
             fg=C["accent"],
         )
         self._hotkey_display_var.set("…")
@@ -417,59 +337,50 @@ class AppWindow:
         self._root.bind("<KeyPress>",   self._on_hk_keypress)
         self._root.bind("<KeyRelease>", self._on_hk_keyrelease)
 
-    # tkinter state bitmask for modifiers (Windows)
     _TK_CTRL  = 0x0004
     _TK_ALT   = 0x20000
     _TK_SHIFT = 0x0001
 
     def _on_hk_keypress(self, event) -> str:
         keysym = event.keysym.lower()
-
-        # Escape cancels
         if keysym == "escape":
             self._stop_hotkey_recording(cancelled=True)
             return "break"
-
-        # Ignore pure modifier keypresses — wait for a base key
         if keysym in ("control_l", "control_r", "alt_l", "alt_r",
                       "shift_l", "shift_r", "super_l", "super_r", "meta_l", "meta_r"):
             return "break"
-
-        # Build modifier prefix from event.state (reliable on Windows)
         mods = []
         if event.state & self._TK_CTRL:  mods.append("ctrl")
         if event.state & self._TK_ALT:   mods.append("alt")
         if event.state & self._TK_SHIFT: mods.append("shift")
-
         base = self._norm_keysym(keysym)
         combo = "+".join(mods + [base]) if mods else base
-
         self._pending_hotkey = combo
         self._hotkey_display_var.set(combo.upper())
-        # Small delay so the user can see the key before recording stops
         self._root.after(300, lambda: self._stop_hotkey_recording(cancelled=False))
         return "break"
 
     def _on_hk_keyrelease(self, event) -> None:
-        pass  # everything handled in keypress
+        pass
 
     def _stop_hotkey_recording(self, cancelled: bool) -> None:
         self._recording_hotkey = False
         self._root.unbind("<KeyPress>")
         self._root.unbind("<KeyRelease>")
-        self._record_btn.configure(text="Change Shortcut", bg=C["surface"], cursor="hand2")
+        self._record_btn.configure(text="Change Shortcut",
+                                   bg=C["surface"], fg=C["text"], cursor="hand2")
 
         if cancelled or not self._pending_hotkey:
-            self._hotkey_display_var.set(self._hotkey)
+            self._hotkey_display_var.set(self._hotkey or "—")
             self._hotkey_record_msg.configure(
-                text="Click  Change Shortcut  then press any key or combination (e.g. F9, Alt+V).",
+                text="Click  Change Shortcut  then press any key\nor combination (e.g. F9, Alt+V).",
                 fg=C["subtext"],
             )
-            self._save_btn.configure(bg=C["divider"], cursor="", fg=C["bg"])
+            self._save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
         else:
             self._hotkey_display_var.set(self._pending_hotkey.upper())
             self._hotkey_record_msg.configure(
-                text=f"New shortcut: {self._pending_hotkey.upper()} — click Save to apply.",
+                text=f"New shortcut: {self._pending_hotkey.upper()}\nClick Save to apply.",
                 fg=C["success"],
             )
             self._save_btn.configure(bg=C["accent"], cursor="hand2", fg=C["bg"])
@@ -483,13 +394,10 @@ class AppWindow:
         new_hotkey = self._pending_hotkey
         self._hotkey = new_hotkey.upper()
         self._hotkey_display_var.set(self._hotkey or "—")
-        if hasattr(self, "_hotkey_hint"):
-            self._hotkey_hint.configure(
-                text=f"Hold  {self._hotkey}  to dictate" if self._hotkey
-                     else "Set a hotkey in the Hotkey tab"
-            )
+        if hasattr(self, "_home_hotkey_lbl"):
+            self._home_hotkey_lbl.configure(text=self._hotkey or "—")
         self._pending_hotkey = None
-        self._save_btn.configure(bg=C["divider"], cursor="", fg=C["bg"])
+        self._save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
         self._save_btn.unbind("<Button-1>")
         self._hotkey_record_msg.configure(
             text=f"Shortcut updated to {self._hotkey}.",
@@ -501,40 +409,54 @@ class AppWindow:
 
     @staticmethod
     def _norm_keysym(keysym: str) -> str:
-        """Normalise a tkinter keysym to a hotkey_manager-compatible key name."""
         _MAP = {
             "return": "enter", "prior": "pageup", "next": "pagedown",
             "caps_lock": "caps lock", "escape": "esc",
         }
-        k = keysym.lower()
-        return _MAP.get(k, k)
+        return _MAP.get(keysym.lower(), keysym.lower())
 
-    # ------------------------------------------------------------------
-    # History tab
-    # ------------------------------------------------------------------
+    # ── History tab ───────────────────────────────────────────────────────────
 
     def _build_history_tab(self, parent: tk.Frame) -> None:
         top = tk.Frame(parent, bg=C["bg"])
-        top.pack(fill="x", pady=(0, 6))
+        top.pack(fill="x", padx=20, pady=(0, 8))
 
         tk.Label(top, text="Recent transcriptions",
                  fg=C["subtext"], bg=C["bg"],
                  font=("Segoe UI", 9)).pack(side="left")
 
         self._ghost_btn(top, "↻ Refresh", self._load_history).pack(side="right")
-        self._ghost_btn(top, "✕ Clear All", self._confirm_clear_history).pack(side="right", padx=(0, 8))
+        self._ghost_btn(top, "✕ Clear",   self._confirm_clear_history).pack(side="right", padx=(0, 8))
 
-        # Scrollable text area
-        wrap = tk.Frame(parent, bg=C["surface"])
-        wrap.pack(fill="both", expand=True)
+        # Scrollable area inside a rounded card
+        wrap_canvas = tk.Canvas(parent, bg=C["bg"], highlightthickness=0, bd=0)
+        wrap_canvas.pack(fill="both", expand=True, padx=20, pady=(0, 8))
 
-        sb = tk.Scrollbar(wrap, bg=C["surface"], troughcolor=C["bg"],
+        def _draw_wrap(_event=None):
+            wrap_canvas.update_idletasks()
+            cw = wrap_canvas.winfo_width()
+            ch = wrap_canvas.winfo_height()
+            if cw < 2 or ch < 2:
+                return
+            wrap_canvas.delete("bg")
+            _rr(wrap_canvas, 0, 0, cw-1, ch-1, 10,
+                fill=C["surface"], outline=C["border"], tags="bg")
+            wrap_canvas.tag_lower("bg")
+
+        wrap_canvas.bind("<Configure>", _draw_wrap)
+
+        inner_wrap = tk.Frame(wrap_canvas, bg=C["surface"])
+        wrap_canvas.create_window(1, 1, window=inner_wrap, anchor="nw")
+        inner_wrap.bind("<Configure>", lambda e: wrap_canvas.configure(
+            scrollregion=wrap_canvas.bbox("all")))
+
+        sb = tk.Scrollbar(inner_wrap, bg=C["surface"], troughcolor=C["bg"],
                           activebackground=C["scrollbar"])
         self._history_text = tk.Text(
-            wrap,
+            inner_wrap,
             bg=C["surface"], fg=C["text"],
             font=("Segoe UI", 10), wrap=tk.WORD,
-            relief="flat", bd=6,
+            relief="flat", bd=8,
             state=tk.DISABLED, cursor="arrow",
             yscrollcommand=sb.set,
             selectbackground=C["surface_hover"],
@@ -544,14 +466,19 @@ class AppWindow:
         sb.pack(side="right", fill="y")
         self._history_text.pack(side="left", fill="both", expand=True)
 
-        self._history_text.tag_configure(
-            "ts",   foreground=C["subtext"], font=("Segoe UI", 8))
-        self._history_text.tag_configure(
-            "body", foreground=C["text"],    font=("Segoe UI", 10))
-        self._history_text.tag_configure(
-            "sep",  foreground=C["divider"], font=("Segoe UI", 6))
-        self._history_text.tag_configure(
-            "dim",  foreground=C["subtext"], font=("Segoe UI", 10, "italic"))
+        self._history_text.tag_configure("ts",   foreground=C["subtext"], font=("Segoe UI", 8))
+        self._history_text.tag_configure("body", foreground=C["text"],    font=("Segoe UI", 10))
+        self._history_text.tag_configure("sep",  foreground=C["border"],  font=("Segoe UI", 6))
+        self._history_text.tag_configure("dim",  foreground=C["subtext"], font=("Segoe UI", 10, "italic"))
+
+        # Make the inner_wrap fill the canvas
+        def _resize_inner(_event=None):
+            wrap_canvas.update_idletasks()
+            cw = wrap_canvas.winfo_width()
+            if cw > 2:
+                wrap_canvas.itemconfigure(wrap_canvas.find_withtag("all")[0] if wrap_canvas.find_withtag("all") else 1,
+                                          width=cw - 2)
+        wrap_canvas.bind("<Configure>", lambda e: (_draw_wrap(e), _resize_inner(e)))
 
     def _load_history(self) -> None:
         self._history_write("Loading…\n", "dim")
@@ -571,7 +498,6 @@ class AppWindow:
             t.insert(tk.END, "No transcriptions yet.\n", "dim")
         else:
             for item in items:
-                # Timestamp
                 raw_ts = item.get("created_at", "")
                 try:
                     dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
@@ -580,7 +506,6 @@ class AppWindow:
                     ts = raw_ts[:16]
 
                 text = item.get("refined_text") or item.get("transcribed_text", "")
-
                 t.insert(tk.END, f"{ts}\n", "ts")
                 t.insert(tk.END, f"{text}\n", "body")
                 t.insert(tk.END, "─" * 44 + "\n", "sep")
@@ -588,7 +513,6 @@ class AppWindow:
         t.configure(state=tk.DISABLED)
 
     def _confirm_clear_history(self) -> None:
-        """Show an inline confirmation before wiping history."""
         self._history_write("Delete all history? ", "dim")
         t = self._history_text
         t.configure(state=tk.NORMAL)
@@ -597,16 +521,12 @@ class AppWindow:
             self._history_write("Clearing…\n", "dim")
             threading.Thread(target=self._clear_history, daemon=True).start()
 
-        def _cancel():
-            self._load_history()
-
-        # Inline Yes / No labels inside the text widget
         yes = tk.Label(t, text=" Yes, delete all ", fg=C["bg"], bg=C["error"],
                        font=("Segoe UI", 9, "bold"), cursor="hand2")
         yes.bind("<Button-1>", lambda _e: _do())
         no = tk.Label(t, text=" Cancel ", fg=C["subtext"], bg=C["surface"],
                       font=("Segoe UI", 9), cursor="hand2")
-        no.bind("<Button-1>", lambda _e: _cancel())
+        no.bind("<Button-1>", lambda _e: self._load_history())
         t.window_create(tk.END, window=yes)
         t.insert(tk.END, "  ")
         t.window_create(tk.END, window=no)
@@ -624,9 +544,12 @@ class AppWindow:
         t.insert(tk.END, text, tag)
         t.configure(state=tk.DISABLED)
 
-    # ------------------------------------------------------------------
-    # Footer / common actions
-    # ------------------------------------------------------------------
+    # ── Auth callbacks ────────────────────────────────────────────────────────
+
+    def _fire_authenticated(self) -> None:
+        threading.Thread(
+            target=self._on_authenticated, args=(self._auth,), daemon=True
+        ).start()
 
     def _do_sign_out(self) -> None:
         self._on_sign_out()
@@ -646,58 +569,47 @@ class AppWindow:
         y  = (sh - h) // 2
         self._root.geometry(f"{w}x{h}+{x}+{y}")
 
-    # ------------------------------------------------------------------
-    # Widget helpers
-    # ------------------------------------------------------------------
+    # ── Rounded card ─────────────────────────────────────────────────────────
 
-    def _make_tab(self, parent, text, cmd) -> tk.Label:
-        lbl = tk.Label(
-            parent, text=text,
-            fg=C["subtext"], bg=C["surface"],
-            font=("Segoe UI", 10), padx=10, pady=8, cursor="hand2",
-        )
-        lbl.bind("<Button-1>", lambda _e: cmd())
-        return lbl
+    def _card(self, parent: tk.Frame, inner_pad=(18, 14),
+              radius: int = 10, margin=(0, 8)) -> tk.Frame:
+        """Return an inner Frame sitting inside a rounded-corner Canvas card."""
+        cv = tk.Canvas(parent, bg=C["bg"], highlightthickness=0, bd=0)
+        cv.pack(fill="x", padx=20, pady=margin)
+        px, py = inner_pad
+        inner = tk.Frame(cv, bg=C["surface"])
+        wid = cv.create_window(px, py, window=inner, anchor="nw")
 
-    def _flabel(self, parent, text) -> tk.Label:
-        lbl = tk.Label(
-            parent, text=text,
-            fg=C["subtext"], bg=C["surface"],
-            font=("Segoe UI", 10), anchor="w",
-        )
-        lbl.pack(fill="x")
-        return lbl
+        def sync(_=None):
+            cv.update_idletasks()
+            cw = cv.winfo_width()
+            fh = inner.winfo_reqheight()
+            if cw < 2:
+                return
+            ch = fh + 2 * py
+            cv.configure(height=ch)
+            cv.coords(wid, px, py)
+            cv.itemconfigure(wid, width=max(1, cw - 2 * px))
+            cv.delete("bg")
+            _rr(cv, 0, 0, cw - 1, ch - 1, radius,
+                fill=C["surface"], outline=C["border"], tags="bg")
+            cv.tag_lower("bg")
 
-    def _entry(self, parent, var, show="") -> tk.Entry:
-        return tk.Entry(
-            parent, textvariable=var, show=show,
-            bg=C["input_bg"], fg=C["text"],
-            insertbackground=C["text"],
-            relief="flat", font=("Segoe UI", 11), bd=0,
-        )
+        cv.bind("<Configure>", sync)
+        inner.bind("<Configure>", sync)
+        return inner
 
-    def _accent_btn(self, parent, text, cmd) -> tk.Button:
-        btn = tk.Button(
-            parent, text=text,
-            fg=C["bg"], bg=C["accent"],
-            font=("Segoe UI", 12, "bold"),
-            padx=16, pady=2, cursor="hand2",
-            relief="flat", activebackground=C["accent"],
-            activeforeground=C["bg"],
-            command=cmd,
-            highlightthickness=0
-        )
-        return btn
+    # ── Widget helpers ────────────────────────────────────────────────────────
 
     def _surface_btn(self, parent, text, cmd) -> tk.Label:
         btn = tk.Label(
             parent, text=text,
-            fg=C["text"], bg=C["surface"],
+            fg=C["text"], bg=C["surface_hover"],
             font=("Segoe UI", 10), padx=12, pady=8, cursor="hand2",
         )
         btn.bind("<Button-1>", lambda _e: cmd())
-        btn.bind("<Enter>",    lambda _e: btn.configure(bg=C["surface_hover"]))
-        btn.bind("<Leave>",    lambda _e: btn.configure(bg=C["surface"]))
+        btn.bind("<Enter>",    lambda _e: btn.configure(bg=C["accent"], fg=C["bg"]))
+        btn.bind("<Leave>",    lambda _e: btn.configure(bg=C["surface_hover"], fg=C["text"]))
         return btn
 
     def _ghost_btn(self, parent, text, cmd) -> tk.Label:

@@ -1,8 +1,10 @@
 """
-Floating UI popup with three modes:
-  - status:     small pill during recording / transcribing
-  - icon:       small clickable pencil badge near the cursor after injection
-  - refinement: full AI refinement panel (triggered by clicking the icon)
+Floating UI popup — dark redesign with rounded window shape.
+
+Three modes:
+  status     — pill shown during recording / transcribing
+  icon       — small FTC badge near cursor after injection
+  refinement — full AI refinement panel
 """
 
 import ctypes
@@ -11,7 +13,7 @@ import threading
 import tkinter as tk
 from typing import Callable, Optional
 
-# ctypes structs at module level — avoids re-defining classes on every call
+# ctypes structs
 class _POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
@@ -24,19 +26,33 @@ class _MONITORINFO(ctypes.Structure):
                 ("rcMonitor", _RECT), ("rcWork", _RECT),
                 ("dwFlags", ctypes.wintypes.DWORD)]
 
-# FTC brand palette
+# Dark palette (matches app_window.py)
 C = {
-    "bg":           "#4e4e4c",
-    "surface":      "#3a3a38",
-    "hover":        "#5e5e5c",
+    "bg":           "#0d0d0d",
+    "surface":      "#1a1a1a",
+    "hover":        "#282828",
     "text":         "#ffffff",
-    "subtext":      "#dadada",
+    "subtext":      "#777777",
     "accent":       "#f39200",
-    "accent_hover": "#d98200",
-    "divider":      "#6e6e6c",
-    "btn_bg":       "#3a3a38",
-    "btn_hover":    "#5e5e5c",
+    "accent_hover": "#e08200",
+    "accent_dim":   "#3d2600",
+    "divider":      "#2d2d2d",
+    "error":        "#ff5555",
+    "success":      "#4ade80",
+    "btn_bg":       "#242424",
+    "btn_hover":    "#333333",
 }
+
+POPUP_RADIUS = 14   # window-level corner radius
+
+
+def _apply_popup_corners(hwnd: int, w: int, h: int, r: int = POPUP_RADIUS) -> None:
+    """Clip the popup window to a rounded rectangle using GDI SetWindowRgn."""
+    try:
+        hRgn = ctypes.windll.gdi32.CreateRoundRectRgn(0, 0, w + 1, h + 1, r * 2, r * 2)
+        ctypes.windll.user32.SetWindowRgn(hwnd, hRgn, True)
+    except Exception:
+        pass
 
 
 class FloatingPopup:
@@ -54,11 +70,10 @@ class FloatingPopup:
         self._ai_refiner = None
         self._original_text: str = ""
         self._current_result: Optional[str] = None
-        self._ai_busy: bool = False  # Prevents stacked concurrent API calls
+        self._ai_busy: bool = False
+        self._popup_hwnd: int = 0
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    # ── Public API ─────────────────────────────────────────────────────────────
 
     def set_ai_refiner(self, refiner) -> None:
         self._ai_refiner = refiner
@@ -69,7 +84,6 @@ class FloatingPopup:
             self.root.after(0, self._enter_status_mode, text)
 
     def show_cursor_icon(self, text: str, on_replace: Callable[[str], None], hwnd: int = 0) -> None:
-        """Show the small pencil icon near the cursor. Full panel opens on click."""
         self._on_replace = on_replace
         self._target_hwnd = hwnd
         self._original_text = text
@@ -84,76 +98,82 @@ class FloatingPopup:
 
     @property
     def is_user_facing(self) -> bool:
-        """True while the icon or refinement panel is visible (user may be interacting)."""
         return self._mode in ("icon", "refinement")
 
-    # ------------------------------------------------------------------
-    # Tkinter setup
-    # ------------------------------------------------------------------
+    # ── Tkinter setup ──────────────────────────────────────────────────────────
 
     def _run_tk(self) -> None:
         self.root = tk.Tk()
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
-        self.root.attributes("-alpha", 0.96)
-        self.root.attributes("-toolwindow", True)  # no taskbar entry, no focus steal
+        self.root.attributes("-alpha", 0.97)
+        self.root.attributes("-toolwindow", True)
         self.root.configure(bg=C["bg"])
+        self.root.withdraw()
+
+        # Cache the HWND after the window is realized
+        self.root.update_idletasks()
+        self._popup_hwnd = self.root.winfo_id()
 
         self._build_status_frame()
         self._build_icon_frame()
         self._build_refinement_frame()
 
-        self.root.withdraw()
+        # Apply rounded corners whenever popup resizes
+        self.root.bind("<Configure>", self._on_popup_configure)
+
         self._ready.set()
         self.root.mainloop()
 
+    def _on_popup_configure(self, event) -> None:
+        if event.widget is self.root:
+            self.root.update_idletasks()
+            w = self.root.winfo_width()
+            h = self.root.winfo_height()
+            if w > 4 and h > 4 and self._popup_hwnd:
+                _apply_popup_corners(self._popup_hwnd, w, h)
+
     def _build_status_frame(self) -> None:
-        self._status_frame = tk.Frame(self.root, bg=C["bg"], padx=22, pady=12)
+        self._status_frame = tk.Frame(self.root, bg=C["bg"], padx=18, pady=10)
         self._status_label = tk.Label(
             self._status_frame,
             text="",
             fg=C["subtext"],
             bg=C["bg"],
-            font=("Segoe UI", 13, "bold"),
+            font=("Segoe UI", 12, "bold"),
         )
         self._status_label.pack()
 
     def _build_icon_frame(self) -> None:
-        """Small FTC-branded badge near cursor — click to open refinement panel."""
-        bg = C["bg"]
-        self._icon_frame = tk.Frame(self.root, bg=bg, padx=6, pady=4)
+        self._icon_frame = tk.Frame(self.root, bg=C["bg"], padx=8, pady=6)
 
         from logo_cache import get_logo_photo
-        self._icon_photo = get_logo_photo(self.root, bg, max_w=72, max_h=28)
+        self._icon_photo = get_logo_photo(self.root, C["bg"], max_w=68, max_h=26)
 
         if self._icon_photo:
-            lbl = tk.Label(self._icon_frame, image=self._icon_photo, bg=bg, cursor="hand2")
+            lbl = tk.Label(self._icon_frame, image=self._icon_photo,
+                           bg=C["bg"], cursor="hand2")
         else:
             lbl = tk.Label(
-                self._icon_frame,
-                text="FTC",
-                fg=C["accent"],
-                bg=bg,
-                font=("Segoe UI", 9, "bold"),
-                cursor="hand2",
+                self._icon_frame, text="FTC",
+                fg=C["accent"], bg=C["bg"],
+                font=("Segoe UI", 9, "bold"), cursor="hand2",
             )
         lbl.pack(side="left", padx=(0, 2))
 
-        # Divider between logo and X
         tk.Frame(self._icon_frame, bg=C["divider"], width=1).pack(
             side="left", fill="y", padx=(2, 4))
 
-        # ✕ dismiss button — stop event propagation so it doesn't open the panel
         close = tk.Label(
             self._icon_frame, text="✕",
-            fg=C["subtext"], bg=bg,
+            fg=C["subtext"], bg=C["bg"],
             font=("Segoe UI", 9, "bold"), cursor="hand2", padx=3,
         )
         close.pack(side="left")
 
         def _close_click(_e):
             self.root.after(0, self._do_hide)
-            return "break"  # stop propagation — prevents _expand_to_panel from firing
+            return "break"
 
         close.bind("<Button-1>", _close_click)
         close.bind("<Enter>", lambda _e: close.configure(fg=C["accent"]))
@@ -167,29 +187,29 @@ class FloatingPopup:
         self._space_hook = None
 
     def _build_refinement_frame(self) -> None:
-        f = tk.Frame(self.root, bg=C["bg"], padx=18, pady=14)
+        f = tk.Frame(self.root, bg=C["bg"], padx=16, pady=14)
         self._refine_frame = f
 
-        # Top row: badge + AI buttons + close
+        # Top row: inserted badge + AI buttons + close
         top = tk.Frame(f, bg=C["bg"])
-        top.pack(fill="x", pady=(0, 8))
+        top.pack(fill="x", pady=(0, 10))
 
         tk.Label(
             top, text="  ✓ Inserted  ",
             fg=C["bg"], bg=C["accent"],
             font=("Segoe UI", 9, "bold"),
             padx=4, pady=3,
-        ).pack(side="left", padx=(0, 12))
+        ).pack(side="left", padx=(0, 10))
 
         for label, mode in [
-            ("✉  Email",      "email"),
-            ("🎩 Formal",     "formal"),
-            ("💬 Casual",     "casual"),
-            ("✨ Fix",        "punctuation"),
-            ("✂  Short",     "concise"),
+            ("✉ Email",      "email"),
+            ("🎩 Formal",    "formal"),
+            ("💬 Casual",    "casual"),
+            ("✨ Fix",       "punctuation"),
+            ("✂ Short",     "concise"),
             ("⚡ Optimise",  "prompt_optimiser"),
         ]:
-            self._btn(top, label, lambda m=mode: self._run_ai(m)).pack(side="left", padx=(0, 5))
+            self._btn(top, label, lambda m=mode: self._run_ai(m)).pack(side="left", padx=(0, 4))
 
         close = tk.Label(
             top, text="✕",
@@ -201,7 +221,6 @@ class FloatingPopup:
         close.bind("<Enter>", lambda _e: close.configure(fg=C["accent"]))
         close.bind("<Leave>", lambda _e: close.configure(fg=C["subtext"]))
 
-        # AI loading indicator
         self._ai_status = tk.Label(
             f, text="",
             fg=C["accent"], bg=C["bg"],
@@ -209,7 +228,7 @@ class FloatingPopup:
         )
         self._ai_status.pack(anchor="w")
 
-        # Result area — hidden until AI responds
+        # Result area
         self._result_frame = tk.Frame(f, bg=C["bg"])
 
         tk.Frame(self._result_frame, bg=C["divider"], height=1).pack(fill="x", pady=(4, 8))
@@ -244,16 +263,14 @@ class FloatingPopup:
             parent, text=text,
             fg=C["subtext"], bg=C["btn_bg"],
             font=("Segoe UI", 10),
-            padx=9, pady=5, cursor="hand2",
+            padx=8, pady=5, cursor="hand2",
         )
         b.bind("<Button-1>", lambda _e: command())
         b.bind("<Enter>", lambda _e: b.configure(fg=C["accent"], bg=C["btn_hover"]))
         b.bind("<Leave>", lambda _e: b.configure(fg=C["subtext"], bg=C["btn_bg"]))
         return b
 
-    # ------------------------------------------------------------------
-    # Mode transitions
-    # ------------------------------------------------------------------
+    # ── Mode transitions ───────────────────────────────────────────────────────
 
     def _hide_all_frames(self) -> None:
         for frame in (self._status_frame, self._icon_frame, self._refine_frame):
@@ -289,7 +306,6 @@ class FloatingPopup:
         self.root.lift()
 
     def _register_space_dismiss(self) -> None:
-        """Dismiss the icon when the user presses Space (lets the key through)."""
         try:
             import keyboard as kb
             self._unregister_space_dismiss()
@@ -317,9 +333,7 @@ class FloatingPopup:
         self._hide_all_frames()
         self.root.withdraw()
 
-    # ------------------------------------------------------------------
-    # Actions
-    # ------------------------------------------------------------------
+    # ── Actions ────────────────────────────────────────────────────────────────
 
     def _do_replace(self) -> None:
         if self._current_result and self._on_replace:
@@ -327,9 +341,7 @@ class FloatingPopup:
             self._do_hide()
             threading.Thread(target=self._on_replace, args=(result,), daemon=True).start()
 
-    # ------------------------------------------------------------------
-    # AI refinement
-    # ------------------------------------------------------------------
+    # ── AI refinement ──────────────────────────────────────────────────────────
 
     def _run_ai(self, mode: str) -> None:
         if not self._ai_refiner or not self._ai_refiner.is_available:
@@ -337,7 +349,6 @@ class FloatingPopup:
             return
         if self._ai_busy:
             return
-
         self._ai_busy = True
         self._ai_status.configure(text=f"✦  Refining ({mode})…")
         self._result_frame.pack_forget()
@@ -358,9 +369,7 @@ class FloatingPopup:
         self._result_frame.pack(fill="x")
         self._reposition(self._cursor_x, self._cursor_y)
 
-    # ------------------------------------------------------------------
-    # Positioning
-    # ------------------------------------------------------------------
+    # ── Positioning ────────────────────────────────────────────────────────────
 
     @staticmethod
     def _get_cursor_pos() -> tuple[int, int]:
@@ -372,7 +381,6 @@ class FloatingPopup:
             return 0, 0
 
     def _get_monitor_workarea(self, x: int = 0, y: int = 0) -> tuple[int, int, int, int]:
-        """Work area (excludes taskbar) of the monitor containing the active window."""
         try:
             MONITOR_DEFAULTTONEAREST = 2
             if self._target_hwnd:
@@ -394,10 +402,9 @@ class FloatingPopup:
         self.root.update_idletasks()
         w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
         left, top, right, bottom = self._get_monitor_workarea(cx, cy)
-        # Only use cursor position if it was successfully determined
         if near_cursor and cx > 0 and cy > 0:
             x = max(left, min(cx + 10, right - w))
-            y = max(top, min(cy - h - 12, bottom - h))
+            y = max(top,  min(cy - h - 12, bottom - h))
         else:
             x = left + (right - left - w) // 2
             y = bottom - h - 130
