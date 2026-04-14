@@ -1,0 +1,31 @@
+# Virtual environment
+venv/
+
+# Claude Code session data
+.claude/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# SENSITIVE — never commit real credentials or session tokens
+config.json
+.session
+
+# Runtime / generated files
+.ftc_pid
+logo.ico
+app_log.txt
+app_err.txt
+app_log_test.txt
+debug_log.txt
+startup_debug.txt
+startup_test.txt
+
+# Build / packaging artefacts
+build/
+dist/
+*.spec
+*.egg-info/
