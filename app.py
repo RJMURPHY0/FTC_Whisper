@@ -171,6 +171,9 @@ class WhisperFlowApp:
                 print(f"[App] Recording started, target hwnd={self._recording_hwnd:#x}")
             except Exception:
                 self._recording_hwnd = 0
+            # Streaming injection state — reset each recording session
+            self._injected_text = ""          # text already typed into cursor during streaming
+            self._streaming_lock = threading.Lock()
             self.recorder.start()
             self.feedback.recording_started()
             threading.Thread(target=self._streaming_loop, daemon=True).start()
@@ -180,9 +183,9 @@ class WhisperFlowApp:
             self.hotkey_manager.set_idle()
 
     def _streaming_loop(self) -> None:
-        """Show a live preview while recording. Uses non-blocking transcribe so it
-        never delays the final transcription when the hotkey is released."""
-        INTERVAL = 2.0
+        """Inject partial transcription into the cursor every ~1.5 s while recording.
+        Uses non-blocking transcribe so it never delays the final pass."""
+        INTERVAL = 1.5
         MIN_SAMPLES = int(self.config.sample_rate * 1.5)
         while self.recorder.is_recording:
             time.sleep(INTERVAL)
@@ -192,14 +195,28 @@ class WhisperFlowApp:
             if audio is None or len(audio) < MIN_SAMPLES:
                 continue
             try:
-                # blocking=False — skips immediately if final transcription has the lock
                 partial = self.transcriber.transcribe(
                     audio, self.config.sample_rate, blocking=False)
-                if partial.strip():
-                    preview = partial.strip()[:80]
-                    self.popup.show_status(f"💬 {preview}", hwnd=self._recording_hwnd)
-            except Exception:
-                pass
+                if not partial or not partial.strip():
+                    continue
+                partial = partial.strip() + " "   # trailing space before next word
+
+                with self._streaming_lock:
+                    if not self.recorder.is_recording:
+                        break   # final transcription is now running — let it handle the rest
+                    already = self._injected_text
+                    if partial.startswith(already) and len(partial) > len(already):
+                        new_part = partial[len(already):]
+                        self._focus_window(self._recording_hwnd, short=True)
+                        ok = self.injector.inject(new_part)
+                        if ok:
+                            self._injected_text = partial
+                            print(f"[App] Streamed +{len(new_part)} chars")
+                    # If Whisper changed earlier words we skip the stream update
+                    # and let the final transcription do a clean overwrite.
+
+            except Exception as e:
+                print(f"[App] Streaming error (non-fatal): {e}")
 
     def _on_stop_recording(self) -> None:
         try:
@@ -223,9 +240,37 @@ class WhisperFlowApp:
                 return
 
             hwnd = self._recording_hwnd
-            print(f"[App] Focusing hwnd={hwnd:#x} then injecting...")
+            final = text.strip()
+
+            # Read and clear the streaming state (streaming loop is done by now)
+            with self._streaming_lock:
+                injected = self._injected_text
+                self._injected_text = ""
+
             self._focus_window(hwnd)
-            result = self.injector.inject(text)
+
+            if not injected:
+                # Nothing was streamed — inject the whole transcription
+                print(f"[App] Injecting full text ({len(final)} chars)")
+                result = self.injector.inject(final)
+            elif final.startswith(injected.rstrip()):
+                # Whisper's final agrees with what was streamed; inject just the tail
+                suffix = final[len(injected.rstrip()):]
+                if suffix:
+                    print(f"[App] Injecting suffix ({len(suffix)} chars)")
+                    result = self.injector.inject(suffix)
+                else:
+                    print("[App] Streaming already complete — nothing to append")
+                    result = True
+            else:
+                # Whisper changed earlier words — erase streamed text and re-inject
+                print(f"[App] Correcting stream: erasing {len(injected)} chars, re-injecting")
+                import keyboard as kb
+                for _ in range(len(injected)):
+                    kb.send("backspace")
+                time.sleep(0.05)
+                result = self.injector.inject(final)
+
             print(f"[App] Inject result: {result}")
             self.feedback.transcription_complete(text)
             self.hotkey_manager.set_idle()
@@ -268,20 +313,26 @@ class WhisperFlowApp:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _focus_window(self, hwnd: int) -> None:
+    def _focus_window(self, hwnd: int, short: bool = False) -> bool:
+        """Bring hwnd to the foreground so injected keystrokes land there.
+        short=True uses a shorter settle delay (streaming calls).
+        Returns True if the window is confirmed foreground after the call."""
         if not hwnd:
-            return
+            return False
         try:
             u32      = ctypes.windll.user32
             kernel32 = ctypes.windll.kernel32
 
-            # Only restore if the window is actually minimised — avoids
-            # the un-maximise / flicker that SW_RESTORE causes on normal windows.
-            SW_SHOWNOACTIVATE = 4
+            # Only restore if minimised — avoids un-maximise flicker.
             WS_MINIMIZE = 0x20000000
             style = u32.GetWindowLongW(hwnd, -16)  # GWL_STYLE
             if style & WS_MINIMIZE:
-                u32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
+                u32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
+
+            # AllowSetForegroundWindow unlocks the focus lock for the target process
+            pid = ctypes.wintypes.DWORD()
+            u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            u32.AllowSetForegroundWindow(pid.value)
 
             # AttachThreadInput bypasses Windows focus-steal restrictions.
             fg_hwnd = u32.GetForegroundWindow()
@@ -298,9 +349,15 @@ class WhisperFlowApp:
             if attached:
                 u32.AttachThreadInput(our_tid, fg_tid, False)
 
-            time.sleep(0.15)
+            time.sleep(0.08 if short else 0.18)
+
+            actual = u32.GetForegroundWindow()
+            if actual != hwnd:
+                print(f"[App] Focus warning: expected {hwnd:#x}, got {actual:#x}")
+            return actual == hwnd
         except Exception as e:
             print(f"[App] Focus failed: {e}")
+            return False
 
     def _replace_text(self, new_text: str, hwnd: int, original_text: str = "") -> None:
         import keyboard as kb

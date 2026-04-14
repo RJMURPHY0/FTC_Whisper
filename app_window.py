@@ -331,8 +331,10 @@ class AppWindow:
         )
         self._status_lbl.pack(fill="x")
 
+        hint_text = (f"Hold  {self._hotkey}  to dictate"
+                     if self._hotkey else "Set a hotkey in the Hotkey tab")
         self._hotkey_hint = tk.Label(
-            sc, text=f"Hold  {self._hotkey}  to dictate",
+            sc, text=hint_text,
             fg=C["subtext"], bg=C["surface"],
             font=("Segoe UI", 10), anchor="w",
         )
@@ -361,10 +363,13 @@ class AppWindow:
                  fg=C["subtext"], bg=C["surface"],
                  font=("Segoe UI", 9), anchor="w").pack(fill="x")
 
-        self._hotkey_display_var = tk.StringVar(value=self._hotkey)
-        tk.Label(cur, textvariable=self._hotkey_display_var,
-                 fg=C["accent"], bg=C["surface"],
-                 font=("Segoe UI", 16, "bold"), anchor="w").pack(fill="x", pady=(4, 0))
+        self._hotkey_display_var = tk.StringVar(value=self._hotkey or "—")
+        self._hotkey_display_lbl = tk.Label(
+            cur, textvariable=self._hotkey_display_var,
+            fg=C["accent"], bg=C["surface"],
+            font=("Segoe UI", 16, "bold"), anchor="w",
+        )
+        self._hotkey_display_lbl.pack(fill="x", pady=(4, 0))
 
         # Recorder card
         rec = tk.Frame(parent, bg=C["surface"], padx=16, pady=14)
@@ -477,9 +482,12 @@ class AppWindow:
             return
         new_hotkey = self._pending_hotkey
         self._hotkey = new_hotkey.upper()
-        self._hotkey_display_var.set(self._hotkey)
+        self._hotkey_display_var.set(self._hotkey or "—")
         if hasattr(self, "_hotkey_hint"):
-            self._hotkey_hint.configure(text=f"Hold  {self._hotkey}  to dictate")
+            self._hotkey_hint.configure(
+                text=f"Hold  {self._hotkey}  to dictate" if self._hotkey
+                     else "Set a hotkey in the Hotkey tab"
+            )
         self._pending_hotkey = None
         self._save_btn.configure(bg=C["divider"], cursor="", fg=C["bg"])
         self._save_btn.unbind("<Button-1>")
