@@ -95,11 +95,10 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    upx_exclude=['vcruntime140.dll', 'ucrtbase.dll'],
+    upx=False,              # UPX disabled — packed exes trigger SmartScreen/AV false positives
     runtime_tmpdir=None,
     console=False,          # no black console window
     disable_windowed_traceback=False,
     icon=os.path.join(APP_DIR, 'logo.ico'),
-    version=None,
+    version=os.path.join(APP_DIR, 'version_info.txt'),
 )
