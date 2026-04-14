@@ -1,13 +1,6 @@
 # FTC Whisper
 
-<div align="center">
-
-## ⬇️ [Download FTC Whisper for Windows](https://github.com/RJMURPHY0/FTC---Whisper/releases/latest/download/FTC-Whisper-Setup.exe)
-
-**No Python, no setup — just download and run.**  
-Windows 10/11 · 64-bit · 112 MB
-
-</div>
+> **Install: [https://github.com/RJMURPHY0/FTC---Whisper/releases/latest/download/FTC-Whisper-Setup.exe](https://github.com/RJMURPHY0/FTC---Whisper/releases/latest/download/FTC-Whisper-Setup.exe)**
 
 ---
 
