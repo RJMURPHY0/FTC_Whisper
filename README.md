@@ -1,5 +1,16 @@
 # FTC Whisper
 
+<div align="center">
+
+## ⬇️ [Download FTC Whisper for Windows](https://github.com/RJMURPHY0/FTC---Whisper/releases/latest/download/FTC-Whisper-Setup.exe)
+
+**No Python, no setup — just download and run.**  
+Windows 10/11 · 64-bit · 112 MB
+
+</div>
+
+---
+
 Hold a hotkey, speak, release — your words appear wherever your cursor is.
 
 Built for Windows. Transcription runs **fully locally** using [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — no audio ever leaves your machine. Cloud features (AI refinement, history sync) are optional.
@@ -20,20 +31,19 @@ Built for Windows. Transcription runs **fully locally** using [faster-whisper](h
 
 ## Installation
 
-### Requirements
-- Windows 10 or 11 (64-bit)
-- [Python 3.10 or newer](https://www.python.org/downloads/) — tick **Add Python to PATH** during install
-- A microphone
+### Option 1 — Single exe (recommended, no Python needed)
 
-### Steps
+1. [**Download FTC-Whisper-Setup.exe**](https://github.com/RJMURPHY0/FTC---Whisper/releases/latest/download/FTC-Whisper-Setup.exe)
+2. Double-click it — if Windows shows a SmartScreen warning, click **More info → Run anyway**
+3. The app starts immediately in your system tray
 
-1. Download this repo — click **Code → Download ZIP** and extract it, or:
-   ```
-   git clone https://github.com/RJMURPHY0/FTC---Whisper.git
-   ```
+### Option 2 — Run from source (developers)
+
+Requires [Python 3.10+](https://www.python.org/downloads/) with **Add to PATH** ticked.
+
+1. Download or clone this repo
 2. Double-click **`install.bat`**
-3. Wait for dependencies to install (first run downloads the Whisper model, ~150 MB)
-4. Double-click **FTC Whisper** on your desktop
+3. Double-click the **FTC Whisper** shortcut on your desktop
 
 ---
 

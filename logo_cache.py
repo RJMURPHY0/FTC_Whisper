@@ -7,12 +7,13 @@ Tk root, which is required by tkinter.
 """
 
 import os
+import sys
 import threading
-from typing import Optional
 
 _pil_image = None
 _lock = threading.Lock()
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# In a frozen PyInstaller exe, data files are extracted to sys._MEIPASS
+_BASE_DIR = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
 
 
 def _load_pil():

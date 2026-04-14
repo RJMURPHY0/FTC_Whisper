@@ -24,8 +24,7 @@ debug_log.txt
 startup_debug.txt
 startup_test.txt
 
-# Build / packaging artefacts
+# Build / packaging artefacts (outputs only — ftc_whisper.spec is kept)
 build/
 dist/
-*.spec
 *.egg-info/

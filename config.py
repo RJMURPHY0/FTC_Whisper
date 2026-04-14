@@ -1,23 +1,40 @@
 """
-Configuration management for the Wispr Flow clone.
+Configuration management for FTC Whisper.
 Loads/saves settings from a JSON file with sensible defaults.
+
+When running as a PyInstaller bundle:
+  - Bundled defaults live in sys._MEIPASS/config.json
+  - User config (writable, persists settings changes) lives next to the .exe
+  - On first run the bundled defaults are copied to the user location
 """
 
 import json
 import os
+import shutil
 import sys
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 
 def get_config_path() -> str:
-    """Get the path to config.json, handling both dev and PyInstaller contexts."""
+    """Return the writable config path (next to .exe when frozen, next to script otherwise)."""
     if getattr(sys, 'frozen', False):
-        # Running as a PyInstaller bundle — config lives next to the .exe
         base = os.path.dirname(sys.executable)
     else:
         base = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base, "config.json")
+
+
+def _bootstrap_config() -> None:
+    """Frozen builds only: copy bundled defaults to the writable location on first run."""
+    if not getattr(sys, 'frozen', False):
+        return
+    user_cfg = get_config_path()
+    if not os.path.exists(user_cfg):
+        bundled = os.path.join(sys._MEIPASS, "config.json")
+        if os.path.exists(bundled):
+            shutil.copy(bundled, user_cfg)
+            print(f"[Config] Extracted default config to {user_cfg}")
 
 
 @dataclass
@@ -51,6 +68,7 @@ class Config:
     @classmethod
     def load(cls, path: Optional[str] = None) -> "Config":
         """Load config from JSON, falling back to defaults for missing keys."""
+        _bootstrap_config()
         path = path or get_config_path()
         config = cls()
         config._config_path = path
