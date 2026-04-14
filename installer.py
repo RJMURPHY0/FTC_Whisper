@@ -39,15 +39,31 @@ def setup_config() -> None:
 
 
 def create_icon() -> str:
-    """Convert logo.png → logo.ico. Returns path to .ico or empty string."""
+    """Convert logo.png → logo.ico with black background and correct aspect ratio."""
     logo_png = os.path.join(APP_DIR, "logo.png")
     if not os.path.exists(logo_png):
         print("  [WARN] logo.png not found — shortcut will use default icon.")
         return ""
     try:
         from PIL import Image
-        img = Image.open(logo_png).convert("RGBA")
-        img.save(LOGO_ICO, format="ICO", sizes=[(256, 256), (64, 64), (32, 32), (16, 16)])
+        src = Image.open(logo_png).convert("RGBA")
+
+        frames = []
+        for size in (256, 64, 32, 16):
+            # Fit logo inside the square preserving aspect ratio (no stretching)
+            thumb = src.copy()
+            thumb.thumbnail((size, size), Image.LANCZOS)
+            # Composite onto a solid black square (no transparent bleed-through)
+            canvas = Image.new("RGB", (size, size), (0, 0, 0))
+            offset = ((size - thumb.width) // 2, (size - thumb.height) // 2)
+            canvas.paste(thumb, offset, mask=thumb.split()[3])
+            frames.append(canvas)
+
+        frames[0].save(
+            LOGO_ICO, format="ICO",
+            append_images=frames[1:],
+            sizes=[(f.width, f.height) for f in frames],
+        )
         print("  [OK] logo.ico created.")
         return LOGO_ICO
     except Exception as e:
