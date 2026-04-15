@@ -183,15 +183,17 @@ class WhisperFlowApp:
             self.hotkey_manager.set_idle()
 
     def _streaming_loop(self) -> None:
-        """Inject partial transcription into the cursor every ~1.5 s while recording.
-        Uses non-blocking transcribe so it never delays the final pass."""
-        INTERVAL = 1.5
-        MIN_SAMPLES = int(self.config.sample_rate * 1.5)
+        """Inject partial transcription into the cursor every ~1 s while recording.
+        Uses non-blocking transcribe so it never delays the final pass.
+        No focus call needed — RegisterHotKey leaves the target window focused."""
+        INTERVAL = 1.0
+        MIN_SAMPLES = int(self.config.sample_rate * 1.0)
         while self.recorder.is_recording:
             time.sleep(INTERVAL)
             if not self.recorder.is_recording:
                 break
-            audio = self.recorder.get_current_audio()
+            # Short rolling window — faster Whisper inference, less drift
+            audio = self.recorder.get_current_audio(max_seconds=4.0)
             if audio is None or len(audio) < MIN_SAMPLES:
                 continue
             try:
@@ -207,8 +209,9 @@ class WhisperFlowApp:
                     already = self._injected_text
                     if partial.startswith(already) and len(partial) > len(already):
                         new_part = partial[len(already):]
-                        self._focus_window(self._recording_hwnd, short=True)
-                        ok = self.injector.inject(new_part)
+                        # Target window stays focused during hold-to-talk; no focus
+                        # switch needed here — avoids the 80ms settle delay per word
+                        ok = self.injector.inject_immediate(new_part)
                         if ok:
                             self._injected_text = partial
                             print(f"[App] Streamed +{len(new_part)} chars")
@@ -229,8 +232,14 @@ class WhisperFlowApp:
                 self.feedback.error_occurred("Recording too short")
                 return
 
-            print(f"[App] Transcribing {len(audio)} samples...")
-            text = self.transcriber.transcribe(audio, self.config.sample_rate)
+            # Cap to last 30 s — streaming handles earlier text; this keeps
+            # the final Whisper pass fast even for minutes-long recordings.
+            MAX_FINAL_SECS = 30.0
+            max_samples = int(self.config.sample_rate * MAX_FINAL_SECS)
+            final_audio = audio[-max_samples:] if len(audio) > max_samples else audio
+            print(f"[App] Transcribing {len(final_audio)} samples "
+                  f"({len(final_audio)/self.config.sample_rate:.1f}s)...")
+            text = self.transcriber.transcribe(final_audio, self.config.sample_rate)
             print(f"[App] Transcription: '{text}'")
 
             if not text.strip():
@@ -278,6 +287,7 @@ class WhisperFlowApp:
 
             self.popup.show_cursor_icon(
                 text,
+                on_insert=lambda t=text, h=hwnd: self._insert_text(t, h),
                 on_replace=lambda new_text, t=text: self._replace_text(new_text, hwnd, t),
                 hwnd=hwnd,
             )
@@ -358,6 +368,12 @@ class WhisperFlowApp:
         except Exception as e:
             print(f"[App] Focus failed: {e}")
             return False
+
+    def _insert_text(self, text: str, hwnd: int) -> None:
+        """Manual insert fallback — focuses the target window and injects the full text."""
+        self._focus_window(hwnd)
+        self.injector.inject(text)
+        print(f"[App] Manual insert: {len(text)} chars")
 
     def _replace_text(self, new_text: str, hwnd: int, original_text: str = "") -> None:
         import keyboard as kb

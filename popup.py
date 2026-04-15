@@ -63,6 +63,7 @@ class FloatingPopup:
         self._ready.wait()
 
         self._mode: Optional[str] = None
+        self._on_insert: Optional[Callable] = None
         self._on_replace: Optional[Callable] = None
         self._target_hwnd: int = 0
         self._cursor_x: int = 0
@@ -83,7 +84,9 @@ class FloatingPopup:
         if self.root:
             self.root.after(0, self._enter_status_mode, text)
 
-    def show_cursor_icon(self, text: str, on_replace: Callable[[str], None], hwnd: int = 0) -> None:
+    def show_cursor_icon(self, text: str, on_insert: Callable = None,
+                         on_replace: Callable[[str], None] = None, hwnd: int = 0) -> None:
+        self._on_insert = on_insert
         self._on_replace = on_replace
         self._target_hwnd = hwnd
         self._original_text = text
@@ -199,7 +202,19 @@ class FloatingPopup:
             fg=C["bg"], bg=C["accent"],
             font=("Segoe UI", 9, "bold"),
             padx=4, pady=3,
-        ).pack(side="left", padx=(0, 10))
+        ).pack(side="left", padx=(0, 6))
+
+        # Insert button — manual fallback if auto-inject missed
+        insert_btn = tk.Label(
+            top, text="  ↓ Insert  ",
+            fg=C["text"], bg=C["btn_bg"],
+            font=("Segoe UI", 9, "bold"),
+            padx=6, pady=3, cursor="hand2",
+        )
+        insert_btn.pack(side="left", padx=(0, 10))
+        insert_btn.bind("<Button-1>", lambda _e: self._do_insert())
+        insert_btn.bind("<Enter>", lambda _e: insert_btn.configure(bg=C["accent"], fg=C["bg"]))
+        insert_btn.bind("<Leave>", lambda _e: insert_btn.configure(bg=C["btn_bg"], fg=C["text"]))
 
         for label, mode in [
             ("✉ Email",      "email"),
@@ -334,6 +349,13 @@ class FloatingPopup:
         self.root.withdraw()
 
     # ── Actions ────────────────────────────────────────────────────────────────
+
+    def _do_insert(self) -> None:
+        """Manual insert — re-injects the original transcribed text at cursor."""
+        if self._on_insert:
+            cb = self._on_insert
+            self._do_hide()
+            threading.Thread(target=cb, daemon=True).start()
 
     def _do_replace(self) -> None:
         if self._current_result and self._on_replace:
