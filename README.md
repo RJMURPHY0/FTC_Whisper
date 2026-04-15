@@ -2,6 +2,8 @@
 
 
 > **Install V1:  https://github.com/RJMURPHY0/FTC---Whisper/releases/latest/download/FTC-Whisper-Setup.exe
+>
+> 
 > **Install V2: [https://github.com/RJMURPHY0/FTC_Whisper/releases/latest/download/FTC-Whisper-Setup.exe](https://github.com/RJMURPHY0/FTC_Whisper/releases/latest/download/FTC-Whisper-Setup.exe)**
 
 ---
