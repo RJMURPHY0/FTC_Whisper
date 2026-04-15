@@ -15,50 +15,61 @@ import time
 import tkinter as tk
 from typing import Callable, Optional
 
+
 # ctypes structs
 class _POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
+
 class _RECT(ctypes.Structure):
-    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
-                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+    _fields_ = [
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
+    ]
+
 
 class _MONITORINFO(ctypes.Structure):
-    _fields_ = [("cbSize", ctypes.wintypes.DWORD),
-                ("rcMonitor", _RECT), ("rcWork", _RECT),
-                ("dwFlags", ctypes.wintypes.DWORD)]
+    _fields_ = [
+        ("cbSize", ctypes.wintypes.DWORD),
+        ("rcMonitor", _RECT),
+        ("rcWork", _RECT),
+        ("dwFlags", ctypes.wintypes.DWORD),
+    ]
+
 
 # ── Popup palette (light grey floating pill) ──────────────────────────────────
 # The main app window stays dark; the small floating popups use a softer look.
 CP = {
-    "bg":           "#2b2b2b",   # dark-ish grey pill background
-    "bg_light":     "#3a3a3a",   # slightly lighter for icon/refinement
-    "text":         "#ffffff",
-    "subtext":      "#aaaaaa",
-    "accent":       "#f39200",   # FTC orange
+    "bg": "#2b2b2b",  # dark-ish grey pill background
+    "bg_light": "#3a3a3a",  # slightly lighter for icon/refinement
+    "text": "#ffffff",
+    "subtext": "#aaaaaa",
+    "accent": "#f39200",  # FTC orange
     "accent_hover": "#e08200",
-    "divider":      "#4a4a4a",
-    "btn_bg":       "#444444",
-    "btn_hover":    "#555555",
-    "bar_idle":     "#666666",   # waveform bar — not speaking
-    "bar_active":   "#f39200",   # waveform bar — speaking (FTC orange)
-    "error":        "#ff5555",
-    "success":      "#4ade80",
+    "divider": "#4a4a4a",
+    "btn_bg": "#444444",
+    "btn_hover": "#555555",
+    "bar_idle": "#666666",  # waveform bar — not speaking
+    "bar_active": "#f39200",  # waveform bar — speaking (FTC orange)
+    "error": "#ff5555",
+    "success": "#4ade80",
 }
 
 # Keep the dark-theme names aliased so refinement frame code is consistent
 C = CP
 
-POPUP_RADIUS = 16   # window-level corner radius
+POPUP_RADIUS = 16  # window-level corner radius
 
 # Waveform config
-NUM_BARS    = 12
-BAR_W       = 4
-BAR_GAP     = 3
-BAR_MAX_H   = 28
-BAR_MIN_H   = 4
-CANVAS_W    = NUM_BARS * (BAR_W + BAR_GAP) - BAR_GAP
-CANVAS_H    = BAR_MAX_H + 2
+NUM_BARS = 12
+BAR_W = 4
+BAR_GAP = 3
+BAR_MAX_H = 28
+BAR_MIN_H = 4
+CANVAS_W = NUM_BARS * (BAR_W + BAR_GAP) - BAR_GAP
+CANVAS_H = BAR_MAX_H + 2
 
 
 def _apply_popup_corners(hwnd: int, w: int, h: int, r: int = POPUP_RADIUS) -> None:
@@ -86,11 +97,12 @@ class FloatingPopup:
         self._ai_refiner = None
         self._original_text: str = ""
         self._current_result: Optional[str] = None
+        self._inserted_ok: bool = True
         self._ai_busy: bool = False
         self._popup_hwnd: int = 0
 
         # Waveform state
-        self._mic_level: float = 0.0        # 0.0–1.0, updated by audio thread
+        self._mic_level: float = 0.0  # 0.0–1.0, updated by audio thread
         self._waveform_running: bool = False
         self._bar_phases = [i * (2 * math.pi / NUM_BARS) for i in range(NUM_BARS)]
 
@@ -103,8 +115,14 @@ class FloatingPopup:
     def set_ai_refiner(self, refiner) -> None:
         self._ai_refiner = refiner
 
-    def show_status(self, text: str, hwnd: int = 0, recording: bool = False,
-                    cursor_x: int = 0, cursor_y: int = 0) -> None:
+    def show_status(
+        self,
+        text: str,
+        hwnd: int = 0,
+        recording: bool = False,
+        cursor_x: int = 0,
+        cursor_y: int = 0,
+    ) -> None:
         self._target_hwnd = hwnd
         # Store cursor position so popup appears on the correct monitor
         if cursor_x or cursor_y:
@@ -115,12 +133,19 @@ class FloatingPopup:
             # Use lambda — avoids tkinter after() quirks with boolean positional args
             self.root.after(0, lambda: self._enter_status_mode(text, recording))
 
-    def show_cursor_icon(self, text: str, on_insert: Callable = None,
-                         on_replace: Callable[[str], None] = None,
-                         hwnd: int = 0,
-                         cursor_x: int = 0, cursor_y: int = 0) -> None:
+    def show_cursor_icon(
+        self,
+        text: str,
+        on_insert: Callable = None,
+        on_replace: Callable[[str], None] = None,
+        inserted: bool = True,
+        hwnd: int = 0,
+        cursor_x: int = 0,
+        cursor_y: int = 0,
+    ) -> None:
         self._on_insert = on_insert
         self._on_replace = on_replace
+        self._inserted_ok = inserted
         self._target_hwnd = hwnd
         self._original_text = text
         self._current_result = None
@@ -185,16 +210,21 @@ class FloatingPopup:
         # Timer label  e.g. "01:16.2"
         self._timer_var = tk.StringVar(value="")
         self._timer_lbl = tk.Label(
-            f, textvariable=self._timer_var,
-            fg=CP["text"], bg=CP["bg"],
+            f,
+            textvariable=self._timer_var,
+            fg=CP["text"],
+            bg=CP["bg"],
             font=("Consolas", 13, "bold"),
         )
         # NOT packed here — packed on demand in _enter_status_mode
 
         # Waveform canvas — bars animated by microphone level
         self._wave_canvas = tk.Canvas(
-            f, width=CANVAS_W, height=CANVAS_H,
-            bg=CP["bg"], highlightthickness=0,
+            f,
+            width=CANVAS_W,
+            height=CANVAS_H,
+            bg=CP["bg"],
+            highlightthickness=0,
         )
         # NOT packed here — packed on demand in _enter_status_mode
         self._bar_ids: list[int] = []
@@ -202,8 +232,10 @@ class FloatingPopup:
 
         # Status text label  "Recording…" / "Transcribing…"
         self._status_label = tk.Label(
-            f, text="",
-            fg=CP["subtext"], bg=CP["bg"],
+            f,
+            text="",
+            fg=CP["subtext"],
+            bg=CP["bg"],
             font=("Segoe UI", 11, "bold"),
         )
         # Packed at build time — always visible in the status frame
@@ -222,8 +254,13 @@ class FloatingPopup:
             y1 = mid - BAR_MIN_H // 2
             y2 = mid + BAR_MIN_H // 2
             bid = self._wave_canvas.create_rectangle(
-                x1, y1, x2, y2,
-                fill=CP["bar_idle"], outline="", width=0,
+                x1,
+                y1,
+                x2,
+                y2,
+                fill=CP["bar_idle"],
+                outline="",
+                width=0,
             )
             self._bar_ids.append(bid)
 
@@ -263,26 +300,36 @@ class FloatingPopup:
         self._icon_frame = tk.Frame(self.root, bg=CP["bg"], padx=8, pady=6)
 
         from logo_cache import get_logo_photo
+
         self._icon_photo = get_logo_photo(self.root, CP["bg"], max_w=68, max_h=26)
 
         if self._icon_photo:
-            lbl = tk.Label(self._icon_frame, image=self._icon_photo,
-                           bg=CP["bg"], cursor="hand2")
+            lbl = tk.Label(
+                self._icon_frame, image=self._icon_photo, bg=CP["bg"], cursor="hand2"
+            )
         else:
             lbl = tk.Label(
-                self._icon_frame, text="FTC",
-                fg=CP["accent"], bg=CP["bg"],
-                font=("Segoe UI", 9, "bold"), cursor="hand2",
+                self._icon_frame,
+                text="FTC",
+                fg=CP["accent"],
+                bg=CP["bg"],
+                font=("Segoe UI", 9, "bold"),
+                cursor="hand2",
             )
         lbl.pack(side="left", padx=(0, 2))
 
         tk.Frame(self._icon_frame, bg=CP["divider"], width=1).pack(
-            side="left", fill="y", padx=(2, 4))
+            side="left", fill="y", padx=(2, 4)
+        )
 
         close = tk.Label(
-            self._icon_frame, text="✕",
-            fg=CP["subtext"], bg=CP["bg"],
-            font=("Segoe UI", 9, "bold"), cursor="hand2", padx=3,
+            self._icon_frame,
+            text="✕",
+            fg=CP["subtext"],
+            bg=CP["bg"],
+            font=("Segoe UI", 9, "bold"),
+            cursor="hand2",
+            padx=3,
         )
         close.pack(side="left")
 
@@ -296,8 +343,8 @@ class FloatingPopup:
 
         for w in (self._icon_frame, lbl):
             w.bind("<Button-1>", lambda _e: self.root.after(0, self._expand_to_panel))
-            w.bind("<Enter>",    lambda _e: self._icon_frame.configure(bg=CP["btn_bg"]))
-            w.bind("<Leave>",    lambda _e: self._icon_frame.configure(bg=CP["bg"]))
+            w.bind("<Enter>", lambda _e: self._icon_frame.configure(bg=CP["btn_bg"]))
+            w.bind("<Leave>", lambda _e: self._icon_frame.configure(bg=CP["bg"]))
 
         self._space_hook = None
 
@@ -311,39 +358,57 @@ class FloatingPopup:
         top = tk.Frame(f, bg=CP["bg"])
         top.pack(fill="x", pady=(0, 10))
 
-        tk.Label(
-            top, text="  ✓ Inserted  ",
-            fg=CP["bg"], bg=CP["accent"],
+        self._inserted_badge = tk.Label(
+            top,
+            text="  ✓ Inserted  ",
+            fg=CP["bg"],
+            bg=CP["accent"],
             font=("Segoe UI", 9, "bold"),
-            padx=4, pady=3,
-        ).pack(side="left", padx=(0, 6))
+            padx=4,
+            pady=3,
+        )
+        self._inserted_badge.pack(side="left", padx=(0, 6))
 
         # Insert button — manual fallback if auto-inject missed
         insert_btn = tk.Label(
-            top, text="  ↓ Insert  ",
-            fg=CP["text"], bg=CP["btn_bg"],
+            top,
+            text="  ↓ Insert  ",
+            fg=CP["text"],
+            bg=CP["btn_bg"],
             font=("Segoe UI", 9, "bold"),
-            padx=6, pady=3, cursor="hand2",
+            padx=6,
+            pady=3,
+            cursor="hand2",
         )
         insert_btn.pack(side="left", padx=(0, 10))
         insert_btn.bind("<Button-1>", lambda _e: self._do_insert())
-        insert_btn.bind("<Enter>", lambda _e: insert_btn.configure(bg=CP["accent"], fg=CP["bg"]))
-        insert_btn.bind("<Leave>", lambda _e: insert_btn.configure(bg=CP["btn_bg"], fg=CP["text"]))
+        insert_btn.bind(
+            "<Enter>", lambda _e: insert_btn.configure(bg=CP["accent"], fg=CP["bg"])
+        )
+        insert_btn.bind(
+            "<Leave>", lambda _e: insert_btn.configure(bg=CP["btn_bg"], fg=CP["text"])
+        )
 
         for label, mode in [
-            ("✉ Email",      "email"),
-            ("🎩 Formal",    "formal"),
-            ("💬 Casual",    "casual"),
-            ("✨ Fix",       "punctuation"),
-            ("✂ Short",     "concise"),
-            ("⚡ Optimise",  "prompt_optimiser"),
+            ("✉ Email", "email"),
+            ("🎩 Formal", "formal"),
+            ("💬 Casual", "casual"),
+            ("✨ Fix", "punctuation"),
+            ("✂ Short", "concise"),
+            ("⚡ Optimise", "prompt_optimiser"),
         ]:
-            self._btn(top, label, lambda m=mode: self._run_ai(m)).pack(side="left", padx=(0, 4))
+            self._btn(top, label, lambda m=mode: self._run_ai(m)).pack(
+                side="left", padx=(0, 4)
+            )
 
         close = tk.Label(
-            top, text="✕",
-            fg=CP["subtext"], bg=CP["bg"],
-            font=("Segoe UI", 13), cursor="hand2", padx=8,
+            top,
+            text="✕",
+            fg=CP["subtext"],
+            bg=CP["bg"],
+            font=("Segoe UI", 13),
+            cursor="hand2",
+            padx=8,
         )
         close.pack(side="right")
         close.bind("<Button-1>", lambda _e: self._do_hide())
@@ -351,8 +416,10 @@ class FloatingPopup:
         close.bind("<Leave>", lambda _e: close.configure(fg=CP["subtext"]))
 
         self._ai_status = tk.Label(
-            f, text="",
-            fg=CP["accent"], bg=CP["bg"],
+            f,
+            text="",
+            fg=CP["accent"],
+            bg=CP["bg"],
             font=("Segoe UI", 10, "italic"),
         )
         self._ai_status.pack(anchor="w")
@@ -360,14 +427,18 @@ class FloatingPopup:
         # Result area
         self._result_frame = tk.Frame(f, bg=CP["bg"])
 
-        tk.Frame(self._result_frame, bg=CP["divider"], height=1).pack(fill="x", pady=(4, 8))
+        tk.Frame(self._result_frame, bg=CP["divider"], height=1).pack(
+            fill="x", pady=(4, 8)
+        )
 
         self._result_text = tk.Label(
             self._result_frame,
             text="",
-            fg=CP["subtext"], bg=CP["bg"],
+            fg=CP["subtext"],
+            bg=CP["bg"],
             font=("Segoe UI", 12),
-            wraplength=520, justify="left",
+            wraplength=520,
+            justify="left",
         )
         self._result_text.pack(anchor="w")
 
@@ -375,10 +446,14 @@ class FloatingPopup:
         btn_row.pack(fill="x", pady=(8, 0))
 
         replace = tk.Label(
-            btn_row, text="  ↩  Replace  ",
-            fg=CP["bg"], bg=CP["accent"],
+            btn_row,
+            text="  ↩  Replace  ",
+            fg=CP["bg"],
+            bg=CP["accent"],
             font=("Segoe UI", 10, "bold"),
-            padx=10, pady=6, cursor="hand2",
+            padx=10,
+            pady=6,
+            cursor="hand2",
         )
         replace.pack(side="left")
         replace.bind("<Button-1>", lambda _e: self._do_replace())
@@ -389,10 +464,14 @@ class FloatingPopup:
 
     def _btn(self, parent: tk.Frame, text: str, command: Callable) -> tk.Label:
         b = tk.Label(
-            parent, text=text,
-            fg=CP["subtext"], bg=CP["btn_bg"],
+            parent,
+            text=text,
+            fg=CP["subtext"],
+            bg=CP["btn_bg"],
             font=("Segoe UI", 10),
-            padx=8, pady=5, cursor="hand2",
+            padx=8,
+            pady=5,
+            cursor="hand2",
         )
         b.bind("<Button-1>", lambda _e: command())
         b.bind("<Enter>", lambda _e: b.configure(fg=CP["accent"], bg=CP["btn_hover"]))
@@ -415,7 +494,7 @@ class FloatingPopup:
 
         if recording:
             # Correct order: timer | waveform | label
-            self._draw_bars_initial()           # fresh bars every session
+            self._draw_bars_initial()  # fresh bars every session
             self._timer_var.set("00:00.0")
             self._rec_start = time.time()
             self._timer_lbl.pack(side="left", before=self._status_label, padx=(0, 12))
@@ -429,7 +508,7 @@ class FloatingPopup:
 
         self._status_frame.pack()
         self._mode = "status"
-        self.root.update_idletasks()   # force canvas render before animation
+        self.root.update_idletasks()  # force canvas render before animation
         # Always position on the monitor where the cursor is
         self._reposition(self._status_cx, self._status_cy)
         self.root.deiconify()
@@ -449,8 +528,9 @@ class FloatingPopup:
                 x1 = i * (BAR_W + BAR_GAP)
                 x2 = x1 + BAR_W
                 mid = CANVAS_H // 2
-                self._wave_canvas.coords(bid, x1, mid - BAR_MIN_H // 2,
-                                         x2, mid + BAR_MIN_H // 2)
+                self._wave_canvas.coords(
+                    bid, x1, mid - BAR_MIN_H // 2, x2, mid + BAR_MIN_H // 2
+                )
                 self._wave_canvas.itemconfigure(bid, fill=CP["bar_idle"])
 
     def _enter_icon_mode(self) -> None:
@@ -463,25 +543,42 @@ class FloatingPopup:
         self._reposition(self._cursor_x, self._cursor_y, near_cursor=True)
         self.root.deiconify()
         self.root.lift()
-        self._register_space_dismiss()
+        if self._inserted_ok:
+            self._register_space_dismiss()
+        else:
+            self._unregister_space_dismiss()
 
     def _expand_to_panel(self) -> None:
         self._hide_all_frames()
         self._result_frame.pack_forget()
         self._ai_status.configure(text="")
+        self._refresh_insert_status()
         self._refine_frame.pack()
         self._mode = "refinement"
         self._reposition(self._cursor_x, self._cursor_y)
         self.root.lift()
 
+    def _refresh_insert_status(self) -> None:
+        if self._inserted_ok:
+            self._inserted_badge.configure(
+                text="  ✓ Inserted  ", fg=CP["bg"], bg=CP["accent"]
+            )
+        else:
+            self._inserted_badge.configure(
+                text="  ⚠ Not inserted  ", fg=CP["text"], bg=CP["error"]
+            )
+
     def _register_space_dismiss(self) -> None:
         try:
             import keyboard as kb
+
             self._unregister_space_dismiss()
+
             def _on_space(_e):
                 self._unregister_space_dismiss()
                 if self.root:
                     self.root.after(0, self._do_hide)
+
             self._space_hook = kb.on_press_key("space", _on_space, suppress=False)
         except Exception:
             pass
@@ -490,6 +587,7 @@ class FloatingPopup:
         if self._space_hook is not None:
             try:
                 import keyboard as kb
+
                 kb.unhook(self._space_hook)
             except Exception:
                 pass
@@ -516,13 +614,17 @@ class FloatingPopup:
         if self._current_result and self._on_replace:
             result = self._current_result
             self._do_hide()
-            threading.Thread(target=self._on_replace, args=(result,), daemon=True).start()
+            threading.Thread(
+                target=self._on_replace, args=(result,), daemon=True
+            ).start()
 
     # ── AI refinement ──────────────────────────────────────────────────────────
 
     def _run_ai(self, mode: str) -> None:
         if not self._ai_refiner or not self._ai_refiner.is_available:
-            self._ai_status.configure(text="⚠  Set ANTHROPIC_API_KEY to enable AI refinement")
+            self._ai_status.configure(
+                text="⚠  Set ANTHROPIC_API_KEY to enable AI refinement"
+            )
             return
         if self._ai_busy:
             return
@@ -557,7 +659,9 @@ class FloatingPopup:
         except Exception:
             return 0, 0
 
-    def _get_monitor_workarea(self, x: int = 0, y: int = 0) -> tuple[int, int, int, int]:
+    def _get_monitor_workarea(
+        self, x: int = 0, y: int = 0
+    ) -> tuple[int, int, int, int]:
         try:
             MONITOR_DEFAULTTONEAREST = 2
             u32 = ctypes.windll.user32
@@ -568,7 +672,9 @@ class FloatingPopup:
                 pt.x, pt.y = x, y
                 hmon = u32.MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)
             elif self._target_hwnd:
-                hmon = u32.MonitorFromWindow(self._target_hwnd, MONITOR_DEFAULTTONEAREST)
+                hmon = u32.MonitorFromWindow(
+                    self._target_hwnd, MONITOR_DEFAULTTONEAREST
+                )
             else:
                 # Last resort: monitor containing the current cursor
                 pt = _POINT()
@@ -588,7 +694,7 @@ class FloatingPopup:
         left, top, right, bottom = self._get_monitor_workarea(cx, cy)
         if near_cursor and cx > 0 and cy > 0:
             x = max(left, min(cx + 10, right - w))
-            y = max(top,  min(cy - h - 12, bottom - h))
+            y = max(top, min(cy - h - 12, bottom - h))
         else:
             x = left + (right - left - w) // 2
             y = bottom - h - 130

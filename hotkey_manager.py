@@ -24,23 +24,50 @@ _user32 = ctypes.windll.user32
 # Win32 modifier flags
 _MOD_FLAGS = {"ctrl": 0x0002, "alt": 0x0001, "shift": 0x0004, "super": 0x0008}
 _MOD_NOREPEAT = 0x4000
-_WM_HOTKEY    = 0x0312
-_WM_QUIT      = 0x0012
+_WM_HOTKEY = 0x0312
+_WM_QUIT = 0x0012
 
 # Virtual key code lookup table
 _VK_MAP: dict = {
     **{chr(c).lower(): c for c in range(ord("A"), ord("Z") + 1)},
     **{str(d): 0x30 + d for d in range(10)},
-    "f1": 0x70, "f2": 0x71, "f3": 0x72,  "f4": 0x73,
-    "f5": 0x74, "f6": 0x75, "f7": 0x76,  "f8": 0x77,
-    "f9": 0x78, "f10": 0x79, "f11": 0x7A, "f12": 0x7B,
-    "space": 0x20, "tab": 0x09, "enter": 0x0D, "esc": 0x1B,
-    "home": 0x24, "end": 0x23, "pageup": 0x21, "pagedown": 0x22,
-    "insert": 0x2D, "delete": 0x2E,
-    "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
-    "`": 0xC0, "-": 0xBD, "=": 0xBB,
-    "[": 0xDB, "]": 0xDD, "\\": 0xDC,
-    ";": 0xBA, "'": 0xDE, ",": 0xBC, ".": 0xBE, "/": 0xBF,
+    "f1": 0x70,
+    "f2": 0x71,
+    "f3": 0x72,
+    "f4": 0x73,
+    "f5": 0x74,
+    "f6": 0x75,
+    "f7": 0x76,
+    "f8": 0x77,
+    "f9": 0x78,
+    "f10": 0x79,
+    "f11": 0x7A,
+    "f12": 0x7B,
+    "space": 0x20,
+    "tab": 0x09,
+    "enter": 0x0D,
+    "esc": 0x1B,
+    "home": 0x24,
+    "end": 0x23,
+    "pageup": 0x21,
+    "pagedown": 0x22,
+    "insert": 0x2D,
+    "delete": 0x2E,
+    "up": 0x26,
+    "down": 0x28,
+    "left": 0x25,
+    "right": 0x27,
+    "`": 0xC0,
+    "-": 0xBD,
+    "=": 0xBB,
+    "[": 0xDB,
+    "]": 0xDD,
+    "\\": 0xDC,
+    ";": 0xBA,
+    "'": 0xDE,
+    ",": 0xBC,
+    ".": 0xBE,
+    "/": 0xBF,
 }
 
 
@@ -56,8 +83,8 @@ def _vk_code(key: str) -> int:
 
 
 class AppState(Enum):
-    IDLE       = "idle"
-    RECORDING  = "recording"
+    IDLE = "idle"
+    RECORDING = "recording"
     PROCESSING = "processing"
 
 
@@ -71,22 +98,23 @@ class HotkeyManager:
         on_cancel_recording: Optional[Callable] = None,
         on_state_change: Optional[Callable[[AppState], None]] = None,
     ):
-        self.hotkey              = hotkey.lower()
-        self.mode                = mode
-        self.on_start_recording  = on_start_recording
-        self.on_stop_recording   = on_stop_recording
+        self.hotkey = hotkey.lower()
+        self.mode = mode
+        self.on_start_recording = on_start_recording
+        self.on_stop_recording = on_stop_recording
         self.on_cancel_recording = on_cancel_recording
-        self.on_state_change     = on_state_change
+        self.on_state_change = on_state_change
 
-        self._state      = AppState.IDLE
-        self._lock       = threading.Lock()
+        self._state = AppState.IDLE
+        self._lock = threading.Lock()
         self._registered = False
-        self._polling    = False
+        self._polling = False
 
         # Win32 message loop state
         self._hotkey_thread_id: int = 0
         self._msg_loop_thread: Optional[threading.Thread] = None
         self._loop_ready = threading.Event()  # set once thread has registered hotkey
+        self._win32_ok = False
 
         # keyboard-library hook handles (so we unhook only ours, not everything)
         self._kb_hooks: list = []
@@ -99,11 +127,13 @@ class HotkeyManager:
 
     def _parse_hotkey(self, hotkey: str) -> None:
         parts = [p.strip() for p in hotkey.split("+")]
-        self._base_key  = parts[-1]
+        self._base_key = parts[-1]
         self._modifiers = parts[:-1]
-        self._is_combo  = len(self._modifiers) > 0
+        self._is_combo = len(self._modifiers) > 0
         self._suppress_caps = hotkey.replace(" ", "").lower() in (
-            "capslock", "caps_lock", "caps lock"
+            "capslock",
+            "caps_lock",
+            "caps lock",
         )
 
     # ------------------------------------------------------------------
@@ -141,18 +171,21 @@ class HotkeyManager:
                     self._set_state(AppState.RECORDING)
                     if self.on_start_recording:
                         threading.Thread(
-                            target=self.on_start_recording, daemon=True).start()
+                            target=self.on_start_recording, daemon=True
+                        ).start()
             elif self.mode == "toggle":
                 if self._state == AppState.IDLE:
                     self._set_state(AppState.RECORDING)
                     if self.on_start_recording:
                         threading.Thread(
-                            target=self.on_start_recording, daemon=True).start()
+                            target=self.on_start_recording, daemon=True
+                        ).start()
                 elif self._state == AppState.RECORDING:
                     self._set_state(AppState.PROCESSING)
                     if self.on_stop_recording:
                         threading.Thread(
-                            target=self.on_stop_recording, daemon=True).start()
+                            target=self.on_stop_recording, daemon=True
+                        ).start()
 
     def _on_key_up(self, _event=None) -> None:
         with self._lock:
@@ -162,15 +195,16 @@ class HotkeyManager:
                     self._set_state(AppState.IDLE)
                     if self.on_cancel_recording:
                         threading.Thread(
-                            target=self.on_cancel_recording, daemon=True).start()
+                            target=self.on_cancel_recording, daemon=True
+                        ).start()
                     if self._suppress_caps:
                         threading.Thread(
-                            target=self._toggle_caps_lock_threaded, daemon=True).start()
+                            target=self._toggle_caps_lock_threaded, daemon=True
+                        ).start()
                     return
                 self._set_state(AppState.PROCESSING)
                 if self.on_stop_recording:
-                    threading.Thread(
-                        target=self.on_stop_recording, daemon=True).start()
+                    threading.Thread(target=self.on_stop_recording, daemon=True).start()
 
     def _toggle_caps_lock_threaded(self) -> None:
         self.unregister()
@@ -183,27 +217,36 @@ class HotkeyManager:
     # Win32 RegisterHotKey path
     # ------------------------------------------------------------------
 
-    def _win32_register(self, mods: int, vk: int) -> None:
+    def _win32_register(self, mods: int, vk: int) -> bool:
         self._loop_ready.clear()
         self._hotkey_thread_id = 0
+        self._win32_ok = False
         self._msg_loop_thread = threading.Thread(
-            target=self._message_loop, args=(mods, vk),
-            daemon=True, name="hotkey-win32",
+            target=self._message_loop,
+            args=(mods, vk),
+            daemon=True,
+            name="hotkey-win32",
         )
         self._msg_loop_thread.start()
         # Wait until the thread has called RegisterHotKey (or failed)
         if not self._loop_ready.wait(timeout=3.0):
             print("[HotkeyManager] Warning: message loop did not start in time")
+            return False
+        return self._win32_ok
 
     def _message_loop(self, mods: int, vk: int) -> None:
         HOTKEY_ID = 1
         if not _user32.RegisterHotKey(None, HOTKEY_ID, mods, vk):
             err = ctypes.GetLastError()
-            print(f"[HotkeyManager] RegisterHotKey failed (error {err}) — "
-                  "is another app using this combo?")
+            print(
+                f"[HotkeyManager] RegisterHotKey failed (error {err}) — "
+                "is another app using this combo?"
+            )
+            self._win32_ok = False
             self._loop_ready.set()
             return
 
+        self._win32_ok = True
         self._hotkey_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
         self._loop_ready.set()  # Signal: ID is set, unregister() can safely post WM_QUIT
         print(f"[HotkeyManager] Win32 hotkey active (mods={mods:#x}, vk={vk:#x})")
@@ -214,10 +257,12 @@ class HotkeyManager:
                 self._on_key_down()
                 if self.mode == "hold":
                     threading.Thread(
-                        target=self._poll_release, args=(vk,), daemon=True).start()
+                        target=self._poll_release, args=(vk,), daemon=True
+                    ).start()
 
         _user32.UnregisterHotKey(None, HOTKEY_ID)
         self._hotkey_thread_id = 0
+        self._win32_ok = False
 
     def _poll_release(self, vk: int) -> None:
         self._polling = True
@@ -237,12 +282,16 @@ class HotkeyManager:
             return
 
         self._kb_hooks = []
+        registered = False
 
         if self._suppress_caps:
             self._kb_hooks.append(
-                kb.on_press_key("caps lock", self._on_key_down, suppress=True))
+                kb.on_press_key("caps lock", self._on_key_down, suppress=True)
+            )
             self._kb_hooks.append(
-                kb.on_release_key("caps lock", self._on_key_up, suppress=True))
+                kb.on_release_key("caps lock", self._on_key_up, suppress=True)
+            )
+            registered = True
 
         elif self._is_combo:
             mods = _MOD_NOREPEAT
@@ -250,24 +299,33 @@ class HotkeyManager:
                 mods |= _MOD_FLAGS.get(m, 0)
             vk = _vk_code(self._base_key)
             if vk == 0:
-                print(f"[HotkeyManager] Unknown key '{self._base_key}', "
-                      "using keyboard library (no OS-level suppression).")
+                print(
+                    f"[HotkeyManager] Unknown key '{self._base_key}', "
+                    "using keyboard library (no OS-level suppression)."
+                )
                 self._kb_hooks.append(
-                    kb.on_press_key(self._base_key, self._on_key_down))
+                    kb.on_press_key(self._base_key, self._on_key_down)
+                )
                 self._kb_hooks.append(
-                    kb.on_release_key(self._base_key, self._on_key_up))
+                    kb.on_release_key(self._base_key, self._on_key_up)
+                )
+                registered = True
             else:
-                self._win32_register(mods, vk)
+                registered = self._win32_register(mods, vk)
+                if not registered:
+                    print(
+                        "[HotkeyManager] Hotkey not active — combo was not registered."
+                    )
 
         else:
             # Single key — use keyboard library
-            self._kb_hooks.append(
-                kb.on_press_key(self._base_key, self._on_key_down))
-            self._kb_hooks.append(
-                kb.on_release_key(self._base_key, self._on_key_up))
+            self._kb_hooks.append(kb.on_press_key(self._base_key, self._on_key_down))
+            self._kb_hooks.append(kb.on_release_key(self._base_key, self._on_key_up))
+            registered = True
 
-        self._registered = True
-        print(f"[HotkeyManager] Registered '{self.hotkey}' (mode: {self.mode})")
+        self._registered = registered
+        if registered:
+            print(f"[HotkeyManager] Registered '{self.hotkey}' (mode: {self.mode})")
 
     def unregister(self) -> None:
         if not self._registered:

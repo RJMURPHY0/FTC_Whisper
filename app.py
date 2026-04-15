@@ -13,6 +13,7 @@ import os
 import sys
 import threading
 import time
+import numpy as np
 
 # Fix Windows console encoding
 # Removed stdout wrapping for clear logging
@@ -44,8 +45,8 @@ class WhisperFlowApp:
         print("  FTC Whisper — Voice-to-Text Desktop App")
         print("=" * 50)
 
-        self._auth   = auth
-        self.config  = config
+        self._auth = auth
+        self.config = config
         self._started = False
 
         # ── Core pipeline ──────────────────────────────────────────────
@@ -53,8 +54,8 @@ class WhisperFlowApp:
             model_size=config.whisper_model,
             language=config.language,
         )
-        self.recorder  = Recorder(sample_rate=config.sample_rate)
-        self.injector  = Injector(method=config.inject_method)
+        self.recorder = Recorder(sample_rate=config.sample_rate)
+        self.injector = Injector(method=config.inject_method)
 
         # ── AI + logging ───────────────────────────────────────────────
         self.ai_refiner = AIRefiner(api_key=config.anthropic_api_key)
@@ -88,6 +89,8 @@ class WhisperFlowApp:
         self.popup.set_ai_refiner(self.ai_refiner)
 
         self._recording_hwnd: int = 0
+        self._mic_loop_running = threading.Event()
+        self._mic_level_smooth = 0.0
 
         self.hotkey_manager = HotkeyManager(
             hotkey=config.hotkey,
@@ -101,8 +104,9 @@ class WhisperFlowApp:
         # ── Pre-load Whisper model immediately in background ───────────
         # Auth and model loading now run in parallel — model will be
         # ready (or close to it) by the time the user first presses the hotkey.
-        threading.Thread(target=self.transcriber.load_model,
-                         daemon=True, name="model-preload").start()
+        threading.Thread(
+            target=self.transcriber.load_model, daemon=True, name="model-preload"
+        ).start()
 
     # ------------------------------------------------------------------
     # Startup
@@ -119,7 +123,7 @@ class WhisperFlowApp:
             # _on_authenticated via after() once mainloop is running.
             pass
 
-        self.app_window.run()   # blocks on main thread
+        self.app_window.run()  # blocks on main thread
 
     def _on_authenticated(self, auth: AuthManager) -> None:
         """
@@ -206,7 +210,9 @@ class WhisperFlowApp:
             MAX_SECS = 60.0
             max_samples = int(self.config.sample_rate * MAX_SECS)
             final_audio = audio[-max_samples:] if len(audio) > max_samples else audio
-            print(f"[App] Transcribing {len(final_audio)/self.config.sample_rate:.1f}s of audio...")
+            print(
+                f"[App] Transcribing {len(final_audio) / self.config.sample_rate:.1f}s of audio..."
+            )
             text = self.transcriber.transcribe(final_audio, self.config.sample_rate)
             print(f"[App] Transcription: '{text}'")
 
@@ -216,13 +222,15 @@ class WhisperFlowApp:
                 self.feedback.error_occurred("No speech detected")
                 return
 
-            hwnd  = self._recording_hwnd
+            hwnd = self._recording_hwnd
             final = text.strip()
 
             self._focus_window(hwnd)
 
             print(f"[App] Injecting {len(final)} chars")
             result = self.injector.inject(final)
+            time.sleep(0.03)
+            caret_x, caret_y = self._get_caret_screen_pos(hwnd)
 
             print(f"[App] Inject result: {result}")
             self.feedback.transcription_complete(text)
@@ -232,15 +240,20 @@ class WhisperFlowApp:
             self.popup.show_cursor_icon(
                 text,
                 on_insert=lambda t=text, h=hwnd: self._insert_text(t, h),
-                on_replace=lambda new_text, t=text: self._replace_text(new_text, hwnd, t),
+                on_replace=lambda new_text, t=text: self._replace_text(
+                    new_text, hwnd, t
+                ),
+                inserted=result,
                 hwnd=hwnd,
-                cursor_x=getattr(self, "_rec_cursor_x", 0),
-                cursor_y=getattr(self, "_rec_cursor_y", 0),
+                cursor_x=caret_x,
+                cursor_y=caret_y,
             )
 
         except Exception as e:
             print(f"[App] Pipeline error: {e}")
-            import traceback; traceback.print_exc()
+            import traceback
+
+            traceback.print_exc()
             self.feedback.error_occurred(str(e))
             self.hotkey_manager.set_idle()
 
@@ -256,35 +269,55 @@ class WhisperFlowApp:
             self.hotkey_manager.set_idle()
 
     def _on_state_change(self, state: AppState) -> None:
-        self.app_window.update_status(state.value)  # "idle" / "recording" / "processing"
+        self.app_window.update_status(
+            state.value
+        )  # "idle" / "recording" / "processing"
         cx = getattr(self, "_rec_cursor_x", 0)
         cy = getattr(self, "_rec_cursor_y", 0)
         if state == AppState.RECORDING:
-            self.popup.show_status("Recording", hwnd=self._recording_hwnd,
-                                   recording=True, cursor_x=cx, cursor_y=cy)
+            self.popup.show_status(
+                "Recording",
+                hwnd=self._recording_hwnd,
+                recording=True,
+                cursor_x=cx,
+                cursor_y=cy,
+            )
             # Feed mic levels to the popup waveform while recording
-            threading.Thread(target=self._mic_level_loop, daemon=True).start()
+            if not self._mic_loop_running.is_set():
+                self._mic_loop_running.set()
+                threading.Thread(target=self._mic_level_loop, daemon=True).start()
         elif state == AppState.PROCESSING:
-            self.popup.show_status("Transcribing…", hwnd=self._recording_hwnd,
-                                   recording=False, cursor_x=cx, cursor_y=cy)
+            self.popup.show_status(
+                "Transcribing…",
+                hwnd=self._recording_hwnd,
+                recording=False,
+                cursor_x=cx,
+                cursor_y=cy,
+            )
         elif state == AppState.IDLE:
+            self._mic_loop_running.clear()
             if not self.popup.is_user_facing:
                 self.popup.hide()
 
     def _mic_level_loop(self) -> None:
         """Sample the recorder's audio buffer for RMS level and push to popup."""
-        import numpy as np
-        while self.recorder.is_recording:
+        while self.recorder.is_recording and self._mic_loop_running.is_set():
             try:
                 audio = self.recorder.get_current_audio(max_seconds=0.1)
                 if audio is not None and len(audio) > 0:
-                    rms = float(np.sqrt(np.mean(audio ** 2)))
-                    # Scale: typical speech RMS ~0.02–0.15 → normalise to 0–1
-                    level = min(1.0, rms / 0.08)
-                    self.popup.update_mic_level(level)
+                    rms = float(np.sqrt(np.mean(audio**2)))
+                    peak = float(np.max(np.abs(audio)))
+                    raw = max(rms * 16.0, peak * 3.0)
+                    level = min(1.0, max(0.0, (raw - 0.02) / 0.38))
+                    self._mic_level_smooth = (self._mic_level_smooth * 0.72) + (
+                        level * 0.28
+                    )
+                    self.popup.update_mic_level(self._mic_level_smooth)
             except Exception:
                 pass
             time.sleep(0.05)
+        self._mic_loop_running.clear()
+        self._mic_level_smooth = 0.0
         self.popup.update_mic_level(0.0)
 
     # ------------------------------------------------------------------
@@ -299,7 +332,7 @@ class WhisperFlowApp:
             return False
         for attempt in range(2):
             try:
-                u32      = ctypes.windll.user32
+                u32 = ctypes.windll.user32
                 kernel32 = ctypes.windll.kernel32
 
                 # Only restore if minimised — avoids un-maximise flicker.
@@ -313,7 +346,7 @@ class WhisperFlowApp:
 
                 # AttachThreadInput bypasses Windows focus-steal restrictions.
                 fg_hwnd = u32.GetForegroundWindow()
-                fg_tid  = u32.GetWindowThreadProcessId(fg_hwnd, None)
+                fg_tid = u32.GetWindowThreadProcessId(fg_hwnd, None)
                 our_tid = kernel32.GetCurrentThreadId()
 
                 attached = bool(fg_tid and fg_tid != our_tid)
@@ -332,12 +365,73 @@ class WhisperFlowApp:
                 actual = u32.GetForegroundWindow()
                 if actual == hwnd:
                     return True
-                print(f"[App] Focus attempt {attempt+1}: expected {hwnd:#x}, got {actual:#x}")
+                print(
+                    f"[App] Focus attempt {attempt + 1}: expected {hwnd:#x}, got {actual:#x}"
+                )
             except Exception as e:
-                print(f"[App] Focus error (attempt {attempt+1}): {e}")
+                print(f"[App] Focus error (attempt {attempt + 1}): {e}")
 
         print(f"[App] Focus failed after retries — injecting anyway")
         return False
+
+    def _get_caret_screen_pos(self, hwnd: int) -> tuple[int, int]:
+        """Return caret location in screen coordinates for the target UI thread."""
+        try:
+
+            class _RECT(ctypes.Structure):
+                _fields_ = [
+                    ("left", ctypes.c_long),
+                    ("top", ctypes.c_long),
+                    ("right", ctypes.c_long),
+                    ("bottom", ctypes.c_long),
+                ]
+
+            class _GUITHREADINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", ctypes.c_uint),
+                    ("flags", ctypes.c_uint),
+                    ("hwndActive", ctypes.c_void_p),
+                    ("hwndFocus", ctypes.c_void_p),
+                    ("hwndCapture", ctypes.c_void_p),
+                    ("hwndMenuOwner", ctypes.c_void_p),
+                    ("hwndMoveSize", ctypes.c_void_p),
+                    ("hwndCaret", ctypes.c_void_p),
+                    ("rcCaret", _RECT),
+                ]
+
+            u32 = ctypes.windll.user32
+            target = hwnd or u32.GetForegroundWindow()
+            if not target:
+                return self._get_cursor_pos_fallback()
+
+            tid = u32.GetWindowThreadProcessId(target, None)
+            if not tid:
+                return self._get_cursor_pos_fallback()
+
+            info = _GUITHREADINFO()
+            info.cbSize = ctypes.sizeof(_GUITHREADINFO)
+            if not u32.GetGUIThreadInfo(tid, ctypes.byref(info)):
+                return self._get_cursor_pos_fallback()
+
+            caret_hwnd = int(info.hwndCaret or info.hwndFocus or target)
+            pt = ctypes.wintypes.POINT(info.rcCaret.right, info.rcCaret.bottom)
+            if caret_hwnd:
+                u32.ClientToScreen(caret_hwnd, ctypes.byref(pt))
+
+            if pt.x or pt.y:
+                return int(pt.x), int(pt.y)
+        except Exception:
+            pass
+        return self._get_cursor_pos_fallback()
+
+    @staticmethod
+    def _get_cursor_pos_fallback() -> tuple[int, int]:
+        try:
+            pt = ctypes.wintypes.POINT()
+            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+            return int(pt.x), int(pt.y)
+        except Exception:
+            return 0, 0
 
     def _insert_text(self, text: str, hwnd: int) -> None:
         """Manual insert fallback — focuses the target window and injects the full text."""
@@ -348,6 +442,7 @@ class WhisperFlowApp:
     def _replace_text(self, new_text: str, hwnd: int, original_text: str = "") -> None:
         import keyboard as kb
         import pyperclip
+
         self._focus_window(hwnd)
         kb.send("ctrl+z")
         time.sleep(0.05)
@@ -391,6 +486,7 @@ class WhisperFlowApp:
 # Entry point
 # ------------------------------------------------------------------
 
+
 def _ensure_single_instance() -> None:
     """Kill any previous instance using a PID file, then record our own PID."""
     pid_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".ftc_pid")
@@ -425,8 +521,9 @@ def _ensure_startup_registry() -> None:
     Works for both the PyInstaller exe and the source (pythonw.exe app.py) installs.
     """
     import winreg
+
     RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    VALUE   = "FTC Whisper"
+    VALUE = "FTC Whisper"
 
     # Determine our own executable path
     if getattr(sys, "frozen", False):
@@ -435,20 +532,21 @@ def _ensure_startup_registry() -> None:
     else:
         # Source install — pythonw.exe + this script
         pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-        script  = os.path.abspath(__file__)
-        exe     = f'"{pythonw}" "{script}"'
+        script = os.path.abspath(__file__)
+        exe = f'"{pythonw}" "{script}"'
 
     cmd = f'"{exe}"' if not exe.startswith('"') else exe
 
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
-                            winreg.KEY_READ | winreg.KEY_SET_VALUE) as k:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE
+        ) as k:
             try:
                 current, _ = winreg.QueryValueEx(k, VALUE)
                 if current == cmd:
-                    return   # already set correctly
+                    return  # already set correctly
             except FileNotFoundError:
-                pass   # value doesn't exist yet
+                pass  # value doesn't exist yet
             winreg.SetValueEx(k, VALUE, 0, winreg.REG_SZ, cmd)
             print(f"[App] Startup registry key set: {cmd}")
     except Exception as e:
@@ -461,13 +559,15 @@ def main() -> None:
         _ensure_startup_registry()
         try:
             if not ctypes.windll.shell32.IsUserAnAdmin():
-                print("[App] Note: running without admin — some hotkeys may not work "
-                      "in elevated windows.")
+                print(
+                    "[App] Note: running without admin — some hotkeys may not work "
+                    "in elevated windows."
+                )
         except Exception:
             pass
 
     config = Config.load()
-    auth   = AuthManager(config.supabase_url, config.supabase_key)
+    auth = AuthManager(config.supabase_url, config.supabase_key)
 
     if not auth.try_restore_session():
         # Try silent background sign-in if credentials are in config

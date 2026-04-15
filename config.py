@@ -18,7 +18,7 @@ from typing import Optional
 
 def get_config_path() -> str:
     """Return the writable config path (next to .exe when frozen, next to script otherwise)."""
-    if getattr(sys, 'frozen', False):
+    if getattr(sys, "frozen", False):
         base = os.path.dirname(sys.executable)
     else:
         base = os.path.dirname(os.path.abspath(__file__))
@@ -27,7 +27,7 @@ def get_config_path() -> str:
 
 def _bootstrap_config() -> None:
     """Frozen builds only: copy bundled defaults to the writable location on first run."""
-    if not getattr(sys, 'frozen', False):
+    if not getattr(sys, "frozen", False):
         return
     user_cfg = get_config_path()
     if not os.path.exists(user_cfg):
@@ -40,19 +40,20 @@ def _bootstrap_config() -> None:
 @dataclass
 class Config:
     """Application configuration with defaults."""
-    hotkey: str = "caps lock"
-    mode: str = "hold"             # "hold" or "toggle"
-    whisper_model: str = "base"    # tiny, base, small, medium, large-v3
+
+    hotkey: str = "alt+v"
+    mode: str = "hold"  # "hold" or "toggle"
+    whisper_model: str = "base"  # tiny, base, small, medium, large-v3
     language: str = "en"
     sample_rate: int = 16000
     inject_method: str = "clipboard"  # "clipboard" or "keystrokes"
     sound_feedback: bool = True
     auto_start: bool = False
-    anthropic_api_key: str = ""       # Optional — enables AI text refinement
-    supabase_url: str = ""            # Optional — enables transcription logging
-    supabase_key: str = ""            # Publishable (anon) key
-    supabase_email: str = ""          # Account email for silent background auth
-    supabase_password: str = ""       # Account password for silent background auth
+    anthropic_api_key: str = ""  # Optional — enables AI text refinement
+    supabase_url: str = ""  # Optional — enables transcription logging
+    supabase_key: str = ""  # Publishable (anon) key
+    supabase_email: str = ""  # Account email for silent background auth
+    supabase_password: str = ""  # Account password for silent background auth
 
     # Derived / runtime fields (not persisted)
     _config_path: str = field(default="", repr=False)

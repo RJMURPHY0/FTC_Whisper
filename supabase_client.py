@@ -6,6 +6,7 @@ on a background thread — a Supabase outage will never block the app.
 
 import threading
 import datetime
+from queue import Queue, Full
 from typing import Optional
 
 # Table name in Supabase
@@ -19,6 +20,9 @@ class SupabaseLogger:
         self._client = None
         self._enabled = bool(url and key)
         self._user_id: Optional[str] = None
+        self._write_queue: Queue[dict] = Queue(maxsize=200)
+        self._worker_started = False
+        self._worker_lock = threading.Lock()
 
     @property
     def is_enabled(self) -> bool:
@@ -35,6 +39,7 @@ class SupabaseLogger:
     def _get_client(self):
         if self._client is None:
             from supabase import create_client
+
             self._client = create_client(self._url, self._key)
         return self._client
 
@@ -111,12 +116,12 @@ class SupabaseLogger:
         """Delete all transcription records for the current user. Returns True on success."""
         if not self._enabled:
             return False
+        if not self._user_id or self._user_id == "local":
+            print("[Supabase] Clear history skipped: no authenticated user_id")
+            return False
         try:
             q = self._get_client().table(_TABLE).delete()
-            if self._user_id and self._user_id != "local":
-                q = q.eq("user_id", self._user_id)
-            else:
-                q = q.neq("id", "00000000-0000-0000-0000-000000000000")  # delete all rows
+            q = q.eq("user_id", self._user_id)
             q.execute()
             print("[Supabase] History cleared.")
             return True
@@ -125,8 +130,41 @@ class SupabaseLogger:
             return False
 
     def _run(self, payload: dict) -> None:
-        """Insert payload in a daemon thread — never blocks the calling thread."""
-        threading.Thread(target=self._insert, args=(payload,), daemon=True).start()
+        """Queue payload for background insert without spawning unbounded threads."""
+        if not self._enabled:
+            return
+        self._ensure_worker()
+        try:
+            self._write_queue.put_nowait(payload)
+        except Full:
+            print("[Supabase] Log queue full — dropping oldest entry")
+            try:
+                _ = self._write_queue.get_nowait()
+            except Exception:
+                pass
+            try:
+                self._write_queue.put_nowait(payload)
+            except Exception:
+                print("[Supabase] Log drop persisted — queue saturated")
+
+    def _ensure_worker(self) -> None:
+        if self._worker_started:
+            return
+        with self._worker_lock:
+            if self._worker_started:
+                return
+            threading.Thread(
+                target=self._worker_loop, daemon=True, name="supabase-logger"
+            ).start()
+            self._worker_started = True
+
+    def _worker_loop(self) -> None:
+        while True:
+            payload = self._write_queue.get()
+            try:
+                self._insert(payload)
+            finally:
+                self._write_queue.task_done()
 
     def _insert(self, payload: dict) -> None:
         try:
