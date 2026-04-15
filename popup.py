@@ -1,5 +1,5 @@
 """
-Floating UI popup — dark redesign with rounded window shape.
+Floating UI popup — light grey pill with animated waveform during recording.
 
 Three modes:
   status     — pill shown during recording / transcribing
@@ -9,7 +9,9 @@ Three modes:
 
 import ctypes
 import ctypes.wintypes
+import math
 import threading
+import time
 import tkinter as tk
 from typing import Callable, Optional
 
@@ -26,24 +28,37 @@ class _MONITORINFO(ctypes.Structure):
                 ("rcMonitor", _RECT), ("rcWork", _RECT),
                 ("dwFlags", ctypes.wintypes.DWORD)]
 
-# Dark palette (matches app_window.py)
-C = {
-    "bg":           "#0d0d0d",
-    "surface":      "#1a1a1a",
-    "hover":        "#282828",
+# ── Popup palette (light grey floating pill) ──────────────────────────────────
+# The main app window stays dark; the small floating popups use a softer look.
+CP = {
+    "bg":           "#2b2b2b",   # dark-ish grey pill background
+    "bg_light":     "#3a3a3a",   # slightly lighter for icon/refinement
     "text":         "#ffffff",
-    "subtext":      "#777777",
-    "accent":       "#f39200",
+    "subtext":      "#aaaaaa",
+    "accent":       "#f39200",   # FTC orange
     "accent_hover": "#e08200",
-    "accent_dim":   "#3d2600",
-    "divider":      "#2d2d2d",
+    "divider":      "#4a4a4a",
+    "btn_bg":       "#444444",
+    "btn_hover":    "#555555",
+    "bar_idle":     "#666666",   # waveform bar — not speaking
+    "bar_active":   "#f39200",   # waveform bar — speaking (FTC orange)
     "error":        "#ff5555",
     "success":      "#4ade80",
-    "btn_bg":       "#242424",
-    "btn_hover":    "#333333",
 }
 
-POPUP_RADIUS = 14   # window-level corner radius
+# Keep the dark-theme names aliased so refinement frame code is consistent
+C = CP
+
+POPUP_RADIUS = 16   # window-level corner radius
+
+# Waveform config
+NUM_BARS    = 12
+BAR_W       = 4
+BAR_GAP     = 3
+BAR_MAX_H   = 28
+BAR_MIN_H   = 4
+CANVAS_W    = NUM_BARS * (BAR_W + BAR_GAP) - BAR_GAP
+CANVAS_H    = BAR_MAX_H + 2
 
 
 def _apply_popup_corners(hwnd: int, w: int, h: int, r: int = POPUP_RADIUS) -> None:
@@ -74,15 +89,20 @@ class FloatingPopup:
         self._ai_busy: bool = False
         self._popup_hwnd: int = 0
 
+        # Waveform state
+        self._mic_level: float = 0.0        # 0.0–1.0, updated by audio thread
+        self._waveform_running: bool = False
+        self._bar_phases = [i * (2 * math.pi / NUM_BARS) for i in range(NUM_BARS)]
+
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def set_ai_refiner(self, refiner) -> None:
         self._ai_refiner = refiner
 
-    def show_status(self, text: str, hwnd: int = 0) -> None:
+    def show_status(self, text: str, hwnd: int = 0, recording: bool = False) -> None:
         self._target_hwnd = hwnd
         if self.root:
-            self.root.after(0, self._enter_status_mode, text)
+            self.root.after(0, self._enter_status_mode, text, recording)
 
     def show_cursor_icon(self, text: str, on_insert: Callable = None,
                          on_replace: Callable[[str], None] = None, hwnd: int = 0) -> None:
@@ -94,6 +114,10 @@ class FloatingPopup:
         self._cursor_x, self._cursor_y = self._get_cursor_pos()
         if self.root:
             self.root.after(0, self._enter_icon_mode)
+
+    def update_mic_level(self, level: float) -> None:
+        """Called from the audio thread with RMS level (0.0–1.0)."""
+        self._mic_level = max(0.0, min(1.0, level))
 
     def hide(self) -> None:
         if self.root:
@@ -111,10 +135,9 @@ class FloatingPopup:
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", 0.97)
         self.root.attributes("-toolwindow", True)
-        self.root.configure(bg=C["bg"])
+        self.root.configure(bg=CP["bg"])
         self.root.withdraw()
 
-        # Cache the HWND after the window is realized
         self.root.update_idletasks()
         self._popup_hwnd = self.root.winfo_id()
 
@@ -122,7 +145,6 @@ class FloatingPopup:
         self._build_icon_frame()
         self._build_refinement_frame()
 
-        # Apply rounded corners whenever popup resizes
         self.root.bind("<Configure>", self._on_popup_configure)
 
         self._ready.set()
@@ -136,40 +158,111 @@ class FloatingPopup:
             if w > 4 and h > 4 and self._popup_hwnd:
                 _apply_popup_corners(self._popup_hwnd, w, h)
 
+    # ── Status frame (recording / transcribing pill) ───────────────────────────
+
     def _build_status_frame(self) -> None:
-        self._status_frame = tk.Frame(self.root, bg=C["bg"], padx=18, pady=10)
-        self._status_label = tk.Label(
-            self._status_frame,
-            text="",
-            fg=C["subtext"],
-            bg=C["bg"],
-            font=("Segoe UI", 12, "bold"),
+        f = tk.Frame(self.root, bg=CP["bg"], padx=14, pady=10)
+        self._status_frame = f
+
+        # Timer label  e.g. "01:16.2"
+        self._timer_var = tk.StringVar(value="")
+        self._timer_lbl = tk.Label(
+            f, textvariable=self._timer_var,
+            fg=CP["text"], bg=CP["bg"],
+            font=("Consolas", 13, "bold"),
         )
-        self._status_label.pack()
+        self._timer_lbl.pack(side="left", padx=(0, 12))
+
+        # Waveform canvas — bars animated by microphone level
+        self._wave_canvas = tk.Canvas(
+            f, width=CANVAS_W, height=CANVAS_H,
+            bg=CP["bg"], highlightthickness=0,
+        )
+        self._wave_canvas.pack(side="left", padx=(0, 12))
+        self._bar_ids: list[int] = []
+        self._draw_bars_initial()
+
+        # Status text label  "Recording…" / "Transcribing…"
+        self._status_label = tk.Label(
+            f, text="",
+            fg=CP["subtext"], bg=CP["bg"],
+            font=("Segoe UI", 11, "bold"),
+        )
+        self._status_label.pack(side="left")
+
+        # Recording start time (for timer)
+        self._rec_start: Optional[float] = None
+
+    def _draw_bars_initial(self) -> None:
+        self._wave_canvas.delete("all")
+        self._bar_ids = []
+        for i in range(NUM_BARS):
+            x1 = i * (BAR_W + BAR_GAP)
+            x2 = x1 + BAR_W
+            mid = CANVAS_H // 2
+            y1 = mid - BAR_MIN_H // 2
+            y2 = mid + BAR_MIN_H // 2
+            bid = self._wave_canvas.create_rectangle(
+                x1, y1, x2, y2,
+                fill=CP["bar_idle"], outline="", width=0,
+            )
+            self._bar_ids.append(bid)
+
+    def _animate_waveform(self) -> None:
+        """Called every 50 ms while recording — updates bar heights."""
+        if not self._waveform_running:
+            return
+
+        level = self._mic_level
+        t = time.time()
+
+        for i, bid in enumerate(self._bar_ids):
+            # Base oscillation — each bar has a different phase
+            osc = math.sin(t * 6.0 + self._bar_phases[i]) * 0.3 + 0.7
+            # Scale by microphone level; floor at minimum height
+            h = BAR_MIN_H + (BAR_MAX_H - BAR_MIN_H) * level * osc
+            h = max(BAR_MIN_H, min(BAR_MAX_H, h))
+            mid = CANVAS_H // 2
+            x1 = i * (BAR_W + BAR_GAP)
+            x2 = x1 + BAR_W
+            color = CP["bar_active"] if level > 0.05 else CP["bar_idle"]
+            self._wave_canvas.coords(bid, x1, mid - h / 2, x2, mid + h / 2)
+            self._wave_canvas.itemconfigure(bid, fill=color)
+
+        # Update timer
+        if self._rec_start is not None:
+            elapsed = time.time() - self._rec_start
+            mins = int(elapsed) // 60
+            secs = elapsed % 60
+            self._timer_var.set(f"{mins:02d}:{secs:04.1f}")
+
+        self.root.after(50, self._animate_waveform)
+
+    # ── Icon frame ─────────────────────────────────────────────────────────────
 
     def _build_icon_frame(self) -> None:
-        self._icon_frame = tk.Frame(self.root, bg=C["bg"], padx=8, pady=6)
+        self._icon_frame = tk.Frame(self.root, bg=CP["bg"], padx=8, pady=6)
 
         from logo_cache import get_logo_photo
-        self._icon_photo = get_logo_photo(self.root, C["bg"], max_w=68, max_h=26)
+        self._icon_photo = get_logo_photo(self.root, CP["bg"], max_w=68, max_h=26)
 
         if self._icon_photo:
             lbl = tk.Label(self._icon_frame, image=self._icon_photo,
-                           bg=C["bg"], cursor="hand2")
+                           bg=CP["bg"], cursor="hand2")
         else:
             lbl = tk.Label(
                 self._icon_frame, text="FTC",
-                fg=C["accent"], bg=C["bg"],
+                fg=CP["accent"], bg=CP["bg"],
                 font=("Segoe UI", 9, "bold"), cursor="hand2",
             )
         lbl.pack(side="left", padx=(0, 2))
 
-        tk.Frame(self._icon_frame, bg=C["divider"], width=1).pack(
+        tk.Frame(self._icon_frame, bg=CP["divider"], width=1).pack(
             side="left", fill="y", padx=(2, 4))
 
         close = tk.Label(
             self._icon_frame, text="✕",
-            fg=C["subtext"], bg=C["bg"],
+            fg=CP["subtext"], bg=CP["bg"],
             font=("Segoe UI", 9, "bold"), cursor="hand2", padx=3,
         )
         close.pack(side="left")
@@ -179,27 +272,29 @@ class FloatingPopup:
             return "break"
 
         close.bind("<Button-1>", _close_click)
-        close.bind("<Enter>", lambda _e: close.configure(fg=C["accent"]))
-        close.bind("<Leave>", lambda _e: close.configure(fg=C["subtext"]))
+        close.bind("<Enter>", lambda _e: close.configure(fg=CP["accent"]))
+        close.bind("<Leave>", lambda _e: close.configure(fg=CP["subtext"]))
 
         for w in (self._icon_frame, lbl):
             w.bind("<Button-1>", lambda _e: self.root.after(0, self._expand_to_panel))
-            w.bind("<Enter>",    lambda _e: self._icon_frame.configure(bg=C["hover"]))
-            w.bind("<Leave>",    lambda _e: self._icon_frame.configure(bg=C["bg"]))
+            w.bind("<Enter>",    lambda _e: self._icon_frame.configure(bg=CP["btn_bg"]))
+            w.bind("<Leave>",    lambda _e: self._icon_frame.configure(bg=CP["bg"]))
 
         self._space_hook = None
 
+    # ── Refinement frame ───────────────────────────────────────────────────────
+
     def _build_refinement_frame(self) -> None:
-        f = tk.Frame(self.root, bg=C["bg"], padx=16, pady=14)
+        f = tk.Frame(self.root, bg=CP["bg"], padx=16, pady=14)
         self._refine_frame = f
 
-        # Top row: inserted badge + AI buttons + close
-        top = tk.Frame(f, bg=C["bg"])
+        # Top row: inserted badge + Insert button + AI buttons + close
+        top = tk.Frame(f, bg=CP["bg"])
         top.pack(fill="x", pady=(0, 10))
 
         tk.Label(
             top, text="  ✓ Inserted  ",
-            fg=C["bg"], bg=C["accent"],
+            fg=CP["bg"], bg=CP["accent"],
             font=("Segoe UI", 9, "bold"),
             padx=4, pady=3,
         ).pack(side="left", padx=(0, 6))
@@ -207,14 +302,14 @@ class FloatingPopup:
         # Insert button — manual fallback if auto-inject missed
         insert_btn = tk.Label(
             top, text="  ↓ Insert  ",
-            fg=C["text"], bg=C["btn_bg"],
+            fg=CP["text"], bg=CP["btn_bg"],
             font=("Segoe UI", 9, "bold"),
             padx=6, pady=3, cursor="hand2",
         )
         insert_btn.pack(side="left", padx=(0, 10))
         insert_btn.bind("<Button-1>", lambda _e: self._do_insert())
-        insert_btn.bind("<Enter>", lambda _e: insert_btn.configure(bg=C["accent"], fg=C["bg"]))
-        insert_btn.bind("<Leave>", lambda _e: insert_btn.configure(bg=C["btn_bg"], fg=C["text"]))
+        insert_btn.bind("<Enter>", lambda _e: insert_btn.configure(bg=CP["accent"], fg=CP["bg"]))
+        insert_btn.bind("<Leave>", lambda _e: insert_btn.configure(bg=CP["btn_bg"], fg=CP["text"]))
 
         for label, mode in [
             ("✉ Email",      "email"),
@@ -228,61 +323,61 @@ class FloatingPopup:
 
         close = tk.Label(
             top, text="✕",
-            fg=C["subtext"], bg=C["bg"],
+            fg=CP["subtext"], bg=CP["bg"],
             font=("Segoe UI", 13), cursor="hand2", padx=8,
         )
         close.pack(side="right")
         close.bind("<Button-1>", lambda _e: self._do_hide())
-        close.bind("<Enter>", lambda _e: close.configure(fg=C["accent"]))
-        close.bind("<Leave>", lambda _e: close.configure(fg=C["subtext"]))
+        close.bind("<Enter>", lambda _e: close.configure(fg=CP["accent"]))
+        close.bind("<Leave>", lambda _e: close.configure(fg=CP["subtext"]))
 
         self._ai_status = tk.Label(
             f, text="",
-            fg=C["accent"], bg=C["bg"],
+            fg=CP["accent"], bg=CP["bg"],
             font=("Segoe UI", 10, "italic"),
         )
         self._ai_status.pack(anchor="w")
 
         # Result area
-        self._result_frame = tk.Frame(f, bg=C["bg"])
+        self._result_frame = tk.Frame(f, bg=CP["bg"])
 
-        tk.Frame(self._result_frame, bg=C["divider"], height=1).pack(fill="x", pady=(4, 8))
+        tk.Frame(self._result_frame, bg=CP["divider"], height=1).pack(fill="x", pady=(4, 8))
 
         self._result_text = tk.Label(
             self._result_frame,
             text="",
-            fg=C["subtext"], bg=C["bg"],
+            fg=CP["subtext"], bg=CP["bg"],
             font=("Segoe UI", 12),
             wraplength=520, justify="left",
         )
         self._result_text.pack(anchor="w")
 
-        btn_row = tk.Frame(self._result_frame, bg=C["bg"])
+        btn_row = tk.Frame(self._result_frame, bg=CP["bg"])
         btn_row.pack(fill="x", pady=(8, 0))
 
         replace = tk.Label(
             btn_row, text="  ↩  Replace  ",
-            fg=C["bg"], bg=C["accent"],
+            fg=CP["bg"], bg=CP["accent"],
             font=("Segoe UI", 10, "bold"),
             padx=10, pady=6, cursor="hand2",
         )
         replace.pack(side="left")
         replace.bind("<Button-1>", lambda _e: self._do_replace())
-        replace.bind("<Enter>", lambda _e: replace.configure(bg=C["accent_hover"]))
-        replace.bind("<Leave>", lambda _e: replace.configure(bg=C["accent"]))
+        replace.bind("<Enter>", lambda _e: replace.configure(bg=CP["accent_hover"]))
+        replace.bind("<Leave>", lambda _e: replace.configure(bg=CP["accent"]))
 
         self.root.bind("<Escape>", lambda _e: self._do_hide())
 
     def _btn(self, parent: tk.Frame, text: str, command: Callable) -> tk.Label:
         b = tk.Label(
             parent, text=text,
-            fg=C["subtext"], bg=C["btn_bg"],
+            fg=CP["subtext"], bg=CP["btn_bg"],
             font=("Segoe UI", 10),
             padx=8, pady=5, cursor="hand2",
         )
         b.bind("<Button-1>", lambda _e: command())
-        b.bind("<Enter>", lambda _e: b.configure(fg=C["accent"], bg=C["btn_hover"]))
-        b.bind("<Leave>", lambda _e: b.configure(fg=C["subtext"], bg=C["btn_bg"]))
+        b.bind("<Enter>", lambda _e: b.configure(fg=CP["accent"], bg=CP["btn_hover"]))
+        b.bind("<Leave>", lambda _e: b.configure(fg=CP["subtext"], bg=CP["btn_bg"]))
         return b
 
     # ── Mode transitions ───────────────────────────────────────────────────────
@@ -291,16 +386,48 @@ class FloatingPopup:
         for frame in (self._status_frame, self._icon_frame, self._refine_frame):
             frame.pack_forget()
 
-    def _enter_status_mode(self, text: str) -> None:
+    def _enter_status_mode(self, text: str, recording: bool = False) -> None:
+        self._stop_waveform()
         self._hide_all_frames()
         self._status_label.configure(text=text)
+
+        if recording:
+            self._timer_var.set("00:00.0")
+            self._rec_start = time.time()
+            self._timer_lbl.pack(side="left", padx=(0, 12))
+            self._wave_canvas.pack(side="left", padx=(0, 12))
+            self._start_waveform()
+        else:
+            # Transcribing — hide timer and waveform, show just the label
+            self._timer_lbl.pack_forget()
+            self._wave_canvas.pack_forget()
+            self._rec_start = None
+
         self._status_frame.pack()
         self._mode = "status"
         self._reposition()
         self.root.deiconify()
         self.root.lift()
 
+    def _start_waveform(self) -> None:
+        self._waveform_running = True
+        self._animate_waveform()
+
+    def _stop_waveform(self) -> None:
+        self._waveform_running = False
+        self._mic_level = 0.0
+        # Reset bars to idle height
+        if self._bar_ids:
+            for i, bid in enumerate(self._bar_ids):
+                x1 = i * (BAR_W + BAR_GAP)
+                x2 = x1 + BAR_W
+                mid = CANVAS_H // 2
+                self._wave_canvas.coords(bid, x1, mid - BAR_MIN_H // 2,
+                                         x2, mid + BAR_MIN_H // 2)
+                self._wave_canvas.itemconfigure(bid, fill=CP["bar_idle"])
+
     def _enter_icon_mode(self) -> None:
+        self._stop_waveform()
         self._hide_all_frames()
         self._result_frame.pack_forget()
         self._ai_status.configure(text="")
@@ -342,6 +469,7 @@ class FloatingPopup:
             self._space_hook = None
 
     def _do_hide(self) -> None:
+        self._stop_waveform()
         self._unregister_space_dismiss()
         self._mode = None
         self._ai_busy = False

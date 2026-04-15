@@ -312,12 +312,30 @@ class WhisperFlowApp:
     def _on_state_change(self, state: AppState) -> None:
         self.app_window.update_status(state.value)  # "idle" / "recording" / "processing"
         if state == AppState.RECORDING:
-            self.popup.show_status("🎙️ Recording...", hwnd=self._recording_hwnd)
+            self.popup.show_status("Recording", hwnd=self._recording_hwnd, recording=True)
+            # Feed mic levels to the popup waveform while recording
+            threading.Thread(target=self._mic_level_loop, daemon=True).start()
         elif state == AppState.PROCESSING:
-            self.popup.show_status("⚙️ Transcribing...", hwnd=self._recording_hwnd)
+            self.popup.show_status("Transcribing…", hwnd=self._recording_hwnd, recording=False)
         elif state == AppState.IDLE:
             if not self.popup.is_user_facing:
                 self.popup.hide()
+
+    def _mic_level_loop(self) -> None:
+        """Sample the recorder's audio buffer for RMS level and push to popup."""
+        import numpy as np
+        while self.recorder.is_recording:
+            try:
+                audio = self.recorder.get_current_audio(max_seconds=0.1)
+                if audio is not None and len(audio) > 0:
+                    rms = float(np.sqrt(np.mean(audio ** 2)))
+                    # Scale: typical speech RMS ~0.02–0.15 → normalise to 0–1
+                    level = min(1.0, rms / 0.08)
+                    self.popup.update_mic_level(level)
+            except Exception:
+                pass
+            time.sleep(0.05)
+        self.popup.update_mic_level(0.0)
 
     # ------------------------------------------------------------------
     # Helpers
