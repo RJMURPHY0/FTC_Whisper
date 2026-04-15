@@ -13,7 +13,6 @@ import os
 import sys
 import threading
 import time
-import numpy as np
 
 # Fix Windows console encoding
 # Removed stdout wrapping for clear logging
@@ -32,6 +31,7 @@ from ai_refiner import AIRefiner
 from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
+from login_window import LoginWindow
 
 
 class WhisperFlowApp:
@@ -48,6 +48,7 @@ class WhisperFlowApp:
         self._auth = auth
         self.config = config
         self._started = False
+        self._restart_for_reauth = False
 
         # ── Core pipeline ──────────────────────────────────────────────
         self.transcriber = Transcriber(
@@ -232,8 +233,13 @@ class WhisperFlowApp:
 
             print(f"[App] Injecting {len(final)} chars")
             result = self.injector.inject(final)
-            time.sleep(0.03)
+            time.sleep(0.10)  # let Chrome update its caret position after injection
             caret_x, caret_y = self._get_caret_screen_pos(hwnd)
+            # Chrome's omnibox rarely exposes caret via GetGUIThreadInfo; fall back
+            # to the cursor position captured at recording-start so the popup lands
+            # near where the user was actually working.
+            if not (caret_x or caret_y):
+                caret_x, caret_y = getattr(self, "_rec_cursor_x", 0), getattr(self, "_rec_cursor_y", 0)
 
             print(f"[App] Inject result: {result}")
             self.feedback.transcription_complete(text)
@@ -306,19 +312,18 @@ class WhisperFlowApp:
         """Sample the recorder's audio buffer for RMS level and push to popup."""
         while self.recorder.is_recording and self._mic_loop_running.is_set():
             try:
-                audio = self.recorder.get_current_audio(max_seconds=0.1)
-                if audio is not None and len(audio) > 0:
-                    rms = float(np.sqrt(np.mean(audio**2)))
-                    peak = float(np.max(np.abs(audio)))
-                    raw = max(rms * 16.0, peak * 3.0)
-                    level = min(1.0, max(0.0, (raw - 0.02) / 0.38))
-                    self._mic_level_smooth = (self._mic_level_smooth * 0.72) + (
-                        level * 0.28
-                    )
-                    self.popup.update_mic_level(self._mic_level_smooth)
+                rms, peak = self.recorder.get_live_levels()
+                # More sensitive gain: lower floor, higher multiplier
+                raw = max(rms * 32.0, peak * 9.0)
+                level = min(1.0, max(0.0, (raw - 0.008) / 0.38))
+                # Faster attack (0.55 new weight) so bars react quickly to speech
+                self._mic_level_smooth = (self._mic_level_smooth * 0.45) + (
+                    level * 0.55
+                )
+                self.popup.update_mic_level(self._mic_level_smooth)
             except Exception:
                 pass
-            time.sleep(0.05)
+            time.sleep(0.04)
         self._mic_loop_running.clear()
         self._mic_level_smooth = 0.0
         self.popup.update_mic_level(0.0)
@@ -465,12 +470,15 @@ class WhisperFlowApp:
     def _sign_out(self) -> None:
         print("[App] Signing out...")
         self._auth.sign_out()
+        self._restart_for_reauth = True
         self.hotkey_manager.unregister()
         if self.recorder.is_recording:
             self.recorder.stop()
+        self.db.set_user(None)
+        self.tray.set_user_email("")
         self.tray.stop()
-        # Restart fresh so the login window appears
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        if self.app_window._root:
+            self.app_window._root.after(0, self.app_window._root.destroy)
 
     def _shutdown(self) -> None:
         print("[App] Shutting down...")
@@ -572,20 +580,40 @@ def main() -> None:
     config = Config.load()
     auth = AuthManager(config.supabase_url, config.supabase_key)
 
-    if not auth.try_restore_session():
-        # Try silent background sign-in if credentials are in config
-        if config.supabase_email and config.supabase_password:
-            ok, msg = auth.sign_in(config.supabase_email, config.supabase_password)
-            if ok:
-                print(f"[App] Silent sign-in OK ({config.supabase_email})")
-            else:
-                print(f"[App] Silent sign-in failed: {msg} — running offline")
-                auth.sign_in_offline()
+    auth_enabled = bool(config.supabase_url and config.supabase_key)
+
+    while True:
+        if auth_enabled:
+            if not auth.try_restore_session():
+                # Optional silent sign-in (owner/admin convenience)
+                if config.supabase_email and config.supabase_password:
+                    ok, msg = auth.sign_in(
+                        config.supabase_email, config.supabase_password
+                    )
+                    if ok:
+                        print(f"[App] Silent sign-in OK ({config.supabase_email})")
+                    else:
+                        print(f"[App] Silent sign-in failed: {msg}")
+
+                # If still not authenticated, require explicit login/signup
+                if not auth.is_authenticated:
+                    print("[App] Showing login window...")
+                    LoginWindow(auth, on_success=lambda _auth: None).run()
+
+                if not auth.is_authenticated:
+                    print("[App] Authentication was cancelled. Exiting.")
+                    return
         else:
+            # Supabase auth disabled in config; run in local-only mode.
             auth.sign_in_offline()
 
-    app = WhisperFlowApp(auth, config)
-    app.run()
+        app = WhisperFlowApp(auth, config)
+        app.run()
+
+        if not app._restart_for_reauth:
+            break
+
+        print("[App] Signed out. Returning to login screen...")
 
 
 if __name__ == "__main__":

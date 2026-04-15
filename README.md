@@ -1,6 +1,6 @@
 # FTC Whisper
 
-> **[⬇ Install FTC Whisper](https://github.com/RJMURPHY0/FTC_Whisper/releases/latest/download/FTC-Whisper-Setup.exe)**
+> **[⬇ Install FTC Whisper](https://github.com/RJMURPHY0/FTC---Whisper/releases/latest/download/FTC-Whisper-Setup.exe)**
 
 ---
 
@@ -15,7 +15,8 @@ Built for Windows. Transcription runs **fully locally** using [faster-whisper](h
 - **Hold-to-talk or toggle mode** — hold your hotkey while speaking, release to transcribe
 - **Local Whisper transcription** — runs on CPU or GPU, no internet required
 - **AI text refinement** — rewrite as email, formal, casual, or fix punctuation (requires Anthropic API key)
-- **Floating action badge** — appears near your cursor after each transcription
+- **Floating action badge** — appears directly below your inserted text after each transcription; click to open AI refinement
+- **Live waveform** — animated bars react to your voice in real time (orange when speaking, like iPhone Voice Memos)
 - **System tray** — runs quietly in the background with status icons
 - **Transcription history** — optional sync via Supabase
 - **Works fully offline** — Supabase and Claude API are both optional
@@ -26,7 +27,7 @@ Built for Windows. Transcription runs **fully locally** using [faster-whisper](h
 
 ### Option 1 — Single exe (recommended, no Python needed)
 
-1. [**Download FTC-Whisper-Setup.exe**](https://github.com/RJMURPHY0/FTC_Whisper/releases/latest/download/FTC-Whisper-Setup.exe)
+1. [**Download FTC-Whisper-Setup.exe**](https://github.com/RJMURPHY0/FTC---Whisper/releases/latest/download/FTC-Whisper-Setup.exe)
 2. Double-click it — if Windows shows a SmartScreen warning, click **More info → Run anyway**
 3. The app starts immediately in your system tray
 
@@ -86,6 +87,22 @@ Edit **`config.json`** (in the same folder as the app) to customise settings:
 
 ---
 
+## Supabase Auth Setup (Per-user history)
+
+If you want account creation/login and user-isolated history:
+
+1. In Supabase dashboard, enable Email auth and turn on **Confirm sign up**.
+2. Set **URL Configuration** (`Site URL` and allowed redirect URLs).
+3. Run `supabase_setup.sql` in Supabase SQL Editor.
+4. Set your owner account as admin:
+   `update public.profiles set role = 'admin' where email = 'your-email@example.com';`
+5. Restart the app. If no saved session exists, it now opens the login/sign-up screen.
+
+The app will then create users via Supabase Auth, auto-create a profile row, and enforce
+row-level policies so users only see their own `transcriptions` history.
+
+---
+
 ## AI Refinement Modes
 
 After a transcription, click the badge near your cursor to open the refinement panel:
@@ -129,11 +146,20 @@ Re-install Python from [python.org](https://www.python.org/downloads/) and tick 
 **Text not appearing after transcription**  
 Make sure a text field is focused before releasing the hotkey. Some apps (e.g. games) block clipboard paste — try switching `inject_method` to `keystrokes` in `config.json`.
 
-**Waveform not reacting or wrong microphone used**  
-By default FTC Whisper uses the current Windows default input and automatically falls back across available microphones if one fails. If you want to force a specific mic, set `input_device` in `config.json` to part of the microphone name (e.g. `"USB"`) or a device index from `Recorder.get_input_devices()`.
+**A stray letter appears before the transcribed text (e.g. `vHello world`)**  
+This happens in hold mode when you release the modifier key (Alt) before the base key (V). FTC Whisper now suppresses the bare base key during recording so no stray character reaches the target window.
+
+**Waveform bars are flat / not reacting to voice**  
+The bars always animate gently even at silence. If they aren't responding to speech, check that Windows has microphone access enabled (**Settings → Privacy → Microphone**) and that the correct input device is selected as your default in Windows Sound settings. You can also force a specific mic by setting `input_device` in `config.json`.
+
+**Wrong microphone used**  
+FTC Whisper uses the current Windows default input and automatically falls back across available microphones if one fails. To force a specific mic, set `input_device` in `config.json` to part of the microphone name (e.g. `"USB"`) or a device index from `Recorder.get_input_devices()`.
+
+**Floating badge appears in the wrong place**  
+The badge anchors to the caret position after injection. In apps (like Chrome's address bar) that don't expose caret position via the accessibility API, it falls back to where your cursor was when you started recording. Make sure your cursor is near the text field before pressing the hotkey.
 
 **Outlook shows ribbon key tips when using Alt+V**  
-FTC Whisper now normalises modifier key state on hotkey release to prevent stuck Alt/menu mode in Outlook and other Office editors.
+FTC Whisper normalises modifier key state on hotkey release to prevent stuck Alt/menu mode in Outlook and other Office editors.
 
 ---
 

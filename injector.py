@@ -27,36 +27,51 @@ import time
 
 # ── Win32 constants ───────────────────────────────────────────────────────────
 
-_INPUT_KEYBOARD    = 1
+_INPUT_KEYBOARD = 1
 _KEYEVENTF_UNICODE = 0x0004
-_KEYEVENTF_KEYUP   = 0x0002
-_WM_CHAR           = 0x0102
+_KEYEVENTF_KEYUP = 0x0002
+_WM_CHAR = 0x0102
 
-# Window classes that use Chromium / Gecko rendering — need VK_PACKET
-BROWSER_CLASSES = frozenset({
-    "Chrome_WidgetWin_1",   # Chrome, Edge, Brave, Electron, VS Code
-    "MozillaWindowClass",   # Firefox
-    "MozillaDialogClass",
-})
+# Window classes that use Chromium / Gecko rendering — prefer VK_PACKET
+BROWSER_CLASSES = frozenset(
+    {
+        "Chrome_WidgetWin_1",  # Chrome, Edge, Brave, Electron, VS Code
+        "MozillaWindowClass",  # Firefox
+        "MozillaDialogClass",
+        "Chrome_RenderWidgetHostHWND",
+    }
+)
+BROWSER_CLASS_PREFIXES = (
+    "Chrome_WidgetWin_",
+    "Mozilla",
+    "CEF-",
+)
 
 # Modifier VK codes — released before final injection only
 _MODIFIERS = (
-    0x10, 0x11, 0x12,       # Shift, Ctrl, Alt
-    0x5B, 0x5C,             # LWin, RWin
-    0xA0, 0xA1,             # LShift, RShift
-    0xA2, 0xA3,             # LCtrl, RCtrl
-    0xA4, 0xA5,             # LAlt, RAlt
+    0x10,
+    0x11,
+    0x12,  # Shift, Ctrl, Alt
+    0x5B,
+    0x5C,  # LWin, RWin
+    0xA0,
+    0xA1,  # LShift, RShift
+    0xA2,
+    0xA3,  # LCtrl, RCtrl
+    0xA4,
+    0xA5,  # LAlt, RAlt
 )
 
 
 # ── Win32 SendInput structures ────────────────────────────────────────────────
 
+
 class _KbdInput(ctypes.Structure):
     _fields_ = [
-        ("wVk",         ctypes.c_ushort),
-        ("wScan",       ctypes.c_ushort),
-        ("dwFlags",     ctypes.c_ulong),
-        ("time",        ctypes.c_ulong),
+        ("wVk", ctypes.c_ushort),
+        ("wScan", ctypes.c_ushort),
+        ("dwFlags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong),
         ("dwExtraInfo", ctypes.c_uint64),
     ]
 
@@ -64,11 +79,13 @@ class _KbdInput(ctypes.Structure):
 class _Input(ctypes.Structure):
     class _U(ctypes.Union):
         _fields_ = [("ki", _KbdInput), ("_pad", ctypes.c_byte * 28)]
+
     _anonymous_ = ("_u",)
-    _fields_    = [("type", ctypes.c_ulong), ("_u", _U)]
+    _fields_ = [("type", ctypes.c_ulong), ("_u", _U)]
 
 
 # ── Window detection ──────────────────────────────────────────────────────────
+
 
 def _get_fg_class() -> str:
     """Return the Win32 class name of the current foreground window."""
@@ -80,15 +97,23 @@ def _get_fg_class() -> str:
     return buf.value
 
 
+def _is_browser_class(class_name: str) -> bool:
+    if not class_name:
+        return False
+    if class_name in BROWSER_CLASSES:
+        return True
+    return class_name.startswith(BROWSER_CLASS_PREFIXES)
+
+
 def _get_focused_child(fg_hwnd: int) -> int:
     """
     Return the focused child HWND inside the foreground window.
     Uses AttachThreadInput so GetFocus() returns the correct control
     (e.g. the text editor inside an Outlook compose window).
     """
-    u32     = ctypes.windll.user32
-    k32     = ctypes.windll.kernel32
-    fg_tid  = u32.GetWindowThreadProcessId(fg_hwnd, None)
+    u32 = ctypes.windll.user32
+    k32 = ctypes.windll.kernel32
+    fg_tid = u32.GetWindowThreadProcessId(fg_hwnd, None)
     our_tid = k32.GetCurrentThreadId()
     u32.AttachThreadInput(our_tid, fg_tid, True)
     focused = u32.GetFocus()
@@ -97,6 +122,7 @@ def _get_focused_child(fg_hwnd: int) -> int:
 
 
 # ── Injection methods ─────────────────────────────────────────────────────────
+
 
 def _post_wm_char(text: str) -> bool:
     """
@@ -109,7 +135,7 @@ def _post_wm_char(text: str) -> bool:
     - Handles surrogate pairs for emoji / extended Unicode
     """
     u32 = ctypes.windll.user32
-    fg  = u32.GetForegroundWindow()
+    fg = u32.GetForegroundWindow()
     if not fg:
         return False
     target = _get_focused_child(fg)
@@ -139,19 +165,39 @@ def _send_unicode(text: str) -> bool:
         if code > 0xFFFF:
             code -= 0x10000
             high = 0xD800 | (code >> 10)
-            low  = 0xDC00 | (code & 0x3FF)
+            low = 0xDC00 | (code & 0x3FF)
             for sc in (high, low):
-                events.append(_Input(type=_INPUT_KEYBOARD,
-                                     ki=_KbdInput(wScan=sc, dwFlags=_KEYEVENTF_UNICODE)))
-                events.append(_Input(type=_INPUT_KEYBOARD,
-                                     ki=_KbdInput(wScan=sc, dwFlags=_KEYEVENTF_UNICODE | _KEYEVENTF_KEYUP)))
+                events.append(
+                    _Input(
+                        type=_INPUT_KEYBOARD,
+                        ki=_KbdInput(wScan=sc, dwFlags=_KEYEVENTF_UNICODE),
+                    )
+                )
+                events.append(
+                    _Input(
+                        type=_INPUT_KEYBOARD,
+                        ki=_KbdInput(
+                            wScan=sc, dwFlags=_KEYEVENTF_UNICODE | _KEYEVENTF_KEYUP
+                        ),
+                    )
+                )
         else:
-            events.append(_Input(type=_INPUT_KEYBOARD,
-                                 ki=_KbdInput(wScan=code, dwFlags=_KEYEVENTF_UNICODE)))
-            events.append(_Input(type=_INPUT_KEYBOARD,
-                                 ki=_KbdInput(wScan=code, dwFlags=_KEYEVENTF_UNICODE | _KEYEVENTF_KEYUP)))
+            events.append(
+                _Input(
+                    type=_INPUT_KEYBOARD,
+                    ki=_KbdInput(wScan=code, dwFlags=_KEYEVENTF_UNICODE),
+                )
+            )
+            events.append(
+                _Input(
+                    type=_INPUT_KEYBOARD,
+                    ki=_KbdInput(
+                        wScan=code, dwFlags=_KEYEVENTF_UNICODE | _KEYEVENTF_KEYUP
+                    ),
+                )
+            )
 
-    arr  = (_Input * len(events))(*events)
+    arr = (_Input * len(events))(*events)
     sent = ctypes.windll.user32.SendInput(len(events), arr, ctypes.sizeof(_Input))
     return sent == len(events)
 
@@ -162,26 +208,28 @@ def _release_modifiers() -> None:
     Only called before the FINAL injection (after recording stops and
     hotkey keys are fully released). Never called during streaming.
     """
-    u32    = ctypes.windll.user32
+    u32 = ctypes.windll.user32
     events: list[_Input] = []
     for vk in _MODIFIERS:
         if u32.GetAsyncKeyState(vk) & 0x8000:
             inp = _Input(type=_INPUT_KEYBOARD)
-            inp.ki.wVk     = vk
+            inp.ki.wVk = vk
             inp.ki.dwFlags = _KEYEVENTF_KEYUP
             events.append(inp)
     if events:
         arr = (_Input * len(events))(*events)
         u32.SendInput(len(events), arr, ctypes.sizeof(_Input))
-        time.sleep(0.10)   # settle before injecting
+        time.sleep(0.10)  # settle before injecting
 
 
 # ── Injector class ────────────────────────────────────────────────────────────
 
+
 class Injector:
     def __init__(self, method: str = "clipboard"):
-        self.method = method   # kept for config compat
-        self._lock  = threading.Lock()
+        m = (method or "").strip().lower()
+        self.method = m if m in {"clipboard", "keystrokes", "auto"} else "clipboard"
+        self._lock = threading.Lock()
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -211,12 +259,37 @@ class Injector:
         if release_mods:
             _release_modifiers()
 
+        # Respect config-driven injection mode:
+        # - clipboard  : most universal for office/web/chat apps
+        # - keystrokes : direct Win32/SendInput path first
+        # - auto       : direct first, clipboard last
+        if self.method == "clipboard":
+            if self._clipboard_paste(text):
+                return True
+            print("[Injector] Clipboard mode fallback -> direct methods")
+            return self._direct_inject(text)
+
+        if self.method == "keystrokes":
+            if self._direct_inject(text):
+                return True
+            print("[Injector] Keystrokes mode fallback -> clipboard")
+            return self._clipboard_paste(text)
+
+        if self._direct_inject(text):
+            return True
+        print("[Injector] Auto mode fallback -> clipboard")
+        return self._clipboard_paste(text)
+
+    def _direct_inject(self, text: str) -> bool:
         cls = _get_fg_class()
 
-        if cls in BROWSER_CLASSES:
+        if _is_browser_class(cls):
             # Browsers: VK_PACKET via SendInput
             ok = _send_unicode(text)
             method = "SendInput/VK_PACKET"
+            if not ok:
+                ok = _post_wm_char(text)
+                method = "WM_CHAR (fallback)"
         else:
             # Native apps (Outlook, Word, etc.): WM_CHAR — modifier-state agnostic
             ok = _post_wm_char(text)
@@ -230,8 +303,8 @@ class Injector:
             print(f"[Injector] {len(text)} chars via {method} (class={cls!r})")
             return True
 
-        print("[Injector] All direct methods failed — trying clipboard")
-        return self._clipboard_paste(text)
+        print("[Injector] All direct methods failed")
+        return False
 
     def _clipboard_paste(self, text: str) -> bool:
         """
@@ -250,29 +323,31 @@ class Injector:
             time.sleep(0.15)
 
             VK_CTRL = 0x11
-            VK_V    = 0x56
+            VK_V = 0x56
             VK_MENU = 0x12
-            KU      = 0x0002
-            u32     = ctypes.windll.user32
+            KU = 0x0002
+            u32 = ctypes.windll.user32
 
             # Release Alt in case it's still registered
             if u32.GetAsyncKeyState(VK_MENU) & 0x8000:
                 u32.keybd_event(VK_MENU, 0, KU, 0)
                 time.sleep(0.05)
 
-            u32.keybd_event(VK_CTRL, 0, 0,  0)
-            u32.keybd_event(VK_V,    0, 0,  0)
-            u32.keybd_event(VK_V,    0, KU, 0)
+            u32.keybd_event(VK_CTRL, 0, 0, 0)
+            u32.keybd_event(VK_V, 0, 0, 0)
+            u32.keybd_event(VK_V, 0, KU, 0)
             u32.keybd_event(VK_CTRL, 0, KU, 0)
             time.sleep(0.18)
 
             if original is not None:
+
                 def _restore():
                     time.sleep(0.4)
                     try:
                         pyperclip.copy(original)
                     except Exception:
                         pass
+
                 threading.Thread(target=_restore, daemon=True).start()
 
             print(f"[Injector] Clipboard paste {len(text)} chars.")

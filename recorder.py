@@ -35,6 +35,8 @@ class Recorder:
         self._recording = False
         self._active_device_index: Optional[int] = None
         self._active_device_name: str = ""
+        self._last_rms: float = 0.0
+        self._last_peak: float = 0.0
 
     @property
     def is_recording(self) -> bool:
@@ -46,7 +48,12 @@ class Recorder:
         """Called by sounddevice for each audio chunk."""
         if status:
             print(f"[Recorder] Stream status: {status}")
+        mono = indata[:, 0] if indata.ndim > 1 else indata
+        rms = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
+        peak = float(np.max(np.abs(mono))) if mono.size else 0.0
         with self._lock:
+            self._last_rms = rms
+            self._last_peak = peak
             if self._recording:
                 self._chunks.append(indata.copy())
 
@@ -59,6 +66,8 @@ class Recorder:
         with self._lock:
             self._chunks = []
             self._recording = True
+            self._last_rms = 0.0
+            self._last_peak = 0.0
 
         try:
             self._stream = self._open_best_input_stream()
@@ -131,6 +140,11 @@ class Recorder:
                     }
                 )
         return input_devices
+
+    def get_live_levels(self) -> tuple[float, float]:
+        """Return most recent (rms, peak) levels from the stream callback."""
+        with self._lock:
+            return self._last_rms, self._last_peak
 
     def _open_best_input_stream(self) -> sd.InputStream:
         candidates = self._candidate_device_indices()

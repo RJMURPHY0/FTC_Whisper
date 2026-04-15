@@ -18,11 +18,13 @@ from typing import Optional
 # Windows DPAPI helpers — encrypt/decrypt bytes using the current user's key
 # ---------------------------------------------------------------------------
 
+
 class _BLOB(ctypes.Structure):
     _fields_ = [
         ("cbData", ctypes.wintypes.DWORD),
         ("pbData", ctypes.POINTER(ctypes.c_char)),
     ]
+
 
 _CRYPTPROTECT_UI_FORBIDDEN = 0x01
 
@@ -30,12 +32,19 @@ _CRYPTPROTECT_UI_FORBIDDEN = 0x01
 def _dpapi_encrypt(plaintext: bytes) -> bytes:
     buf_in = _BLOB(
         len(plaintext),
-        ctypes.cast(ctypes.create_string_buffer(plaintext), ctypes.POINTER(ctypes.c_char)),
+        ctypes.cast(
+            ctypes.create_string_buffer(plaintext), ctypes.POINTER(ctypes.c_char)
+        ),
     )
     buf_out = _BLOB()
     if not ctypes.windll.crypt32.CryptProtectData(
-        ctypes.byref(buf_in), None, None, None, None,
-        _CRYPTPROTECT_UI_FORBIDDEN, ctypes.byref(buf_out),
+        ctypes.byref(buf_in),
+        None,
+        None,
+        None,
+        None,
+        _CRYPTPROTECT_UI_FORBIDDEN,
+        ctypes.byref(buf_out),
     ):
         raise OSError(f"CryptProtectData failed (error {ctypes.GetLastError()})")
     enc = bytes(ctypes.string_at(buf_out.pbData, buf_out.cbData))
@@ -46,12 +55,19 @@ def _dpapi_encrypt(plaintext: bytes) -> bytes:
 def _dpapi_decrypt(ciphertext: bytes) -> bytes:
     buf_in = _BLOB(
         len(ciphertext),
-        ctypes.cast(ctypes.create_string_buffer(ciphertext), ctypes.POINTER(ctypes.c_char)),
+        ctypes.cast(
+            ctypes.create_string_buffer(ciphertext), ctypes.POINTER(ctypes.c_char)
+        ),
     )
     buf_out = _BLOB()
     if not ctypes.windll.crypt32.CryptUnprotectData(
-        ctypes.byref(buf_in), None, None, None, None,
-        _CRYPTPROTECT_UI_FORBIDDEN, ctypes.byref(buf_out),
+        ctypes.byref(buf_in),
+        None,
+        None,
+        None,
+        None,
+        _CRYPTPROTECT_UI_FORBIDDEN,
+        ctypes.byref(buf_out),
     ):
         raise OSError(f"CryptUnprotectData failed (error {ctypes.GetLastError()})")
     dec = bytes(ctypes.string_at(buf_out.pbData, buf_out.cbData))
@@ -62,6 +78,7 @@ def _dpapi_decrypt(ciphertext: bytes) -> bytes:
 # ---------------------------------------------------------------------------
 # Session file path
 # ---------------------------------------------------------------------------
+
 
 def _session_path() -> str:
     if getattr(sys, "frozen", False):
@@ -75,6 +92,7 @@ def _session_path() -> str:
 # AuthManager
 # ---------------------------------------------------------------------------
 
+
 class AuthManager:
     def __init__(self, supabase_url: str, supabase_key: str):
         self._url = supabase_url
@@ -86,6 +104,7 @@ class AuthManager:
         if not self._client:
             try:
                 from supabase import create_client
+
                 self._client = create_client(self._url, self._key)
             except Exception as e:
                 print(f"[Auth] ERROR creating Supabase client: {e}")
@@ -98,10 +117,12 @@ class AuthManager:
 
     def _save_session(self, session) -> None:
         try:
-            payload = json.dumps({
-                "access_token":  session.access_token,
-                "refresh_token": session.refresh_token,
-            }).encode()
+            payload = json.dumps(
+                {
+                    "access_token": session.access_token,
+                    "refresh_token": session.refresh_token,
+                }
+            ).encode()
             encrypted = _dpapi_encrypt(payload)
             with open(_session_path(), "wb") as f:
                 f.write(encrypted)
@@ -134,10 +155,17 @@ class AuthManager:
                 if r and r.user:
                     self._user = r.user
                     # Re-save with encryption in case it was a legacy file
-                    self._save_session(r.session or type("S", (), {
-                        "access_token": data["access_token"],
-                        "refresh_token": data["refresh_token"],
-                    })())
+                    self._save_session(
+                        r.session
+                        or type(
+                            "S",
+                            (),
+                            {
+                                "access_token": data["access_token"],
+                                "refresh_token": data["refresh_token"],
+                            },
+                        )()
+                    )
                     print(f"[Auth] Restored session for {self._user.email}")
                     result[0] = True
             except Exception as e:
@@ -187,6 +215,7 @@ class AuthManager:
     def sign_in_offline(self) -> None:
         """Mark as authenticated without Supabase — used when auth is disabled."""
         import types
+
         self._user = types.SimpleNamespace(id="local", email="")
 
     def sign_up(self, email: str, password: str) -> tuple[bool, str]:
@@ -198,7 +227,10 @@ class AuthManager:
                     self._user = result.user
                     self._save_session(result.session)
                     return True, "Account created and logged in!"
-                return True, "Account created! You can now sign in."
+                return (
+                    True,
+                    "Account created. Check your email to confirm, then sign in.",
+                )
             return False, "Sign-up failed: no user returned from server."
         except Exception as e:
             msg = str(e)
@@ -209,7 +241,9 @@ class AuthManager:
     def sign_in(self, email: str, password: str) -> tuple[bool, str]:
         try:
             client = self._get_client()
-            result = client.auth.sign_in_with_password({"email": email, "password": password})
+            result = client.auth.sign_in_with_password(
+                {"email": email, "password": password}
+            )
             if result.user and result.session:
                 self._user = result.user
                 self._save_session(result.session)
@@ -217,6 +251,11 @@ class AuthManager:
             return False, "Invalid email or password."
         except Exception as e:
             msg = str(e)
+            if (
+                "email not confirmed" in msg.lower()
+                or "email_not_confirmed" in msg.lower()
+            ):
+                return False, "Please confirm your email before signing in."
             if "invalid" in msg.lower() or "credentials" in msg.lower():
                 return False, "Invalid email or password."
             return False, f"Sign-in error: {msg}"

@@ -127,6 +127,10 @@ class HotkeyManager:
         # keyboard-library hook handles (so we unhook only ours, not everything)
         self._kb_hooks: list = []
 
+        # Suppresses the bare base key while recording with a combo hotkey,
+        # preventing it from being typed if the modifier is released before the base key.
+        self._base_key_suppress_hook = None
+
         self._parse_hotkey(self.hotkey)
 
     # ------------------------------------------------------------------
@@ -171,12 +175,39 @@ class HotkeyManager:
     # Key event handlers
     # ------------------------------------------------------------------
 
+    def _install_base_key_suppressor(self) -> None:
+        """Install a low-level hook that suppresses the bare base key during recording.
+
+        When using a combo like Alt+V in hold mode, releasing Alt before V causes the
+        OS to deliver bare V keydown events to the foreground window, typing 'v' before
+        the transcription.  Suppressing V at the hook level prevents this entirely.
+        """
+        if not self._is_combo or not self._win32_ok:
+            return
+        if self._base_key_suppress_hook is not None:
+            return
+        try:
+            self._base_key_suppress_hook = kb.on_press_key(
+                self._base_key, lambda _e: None, suppress=True
+            )
+        except Exception as e:
+            print(f"[HotkeyManager] Could not install base key suppressor: {e}")
+
+    def _remove_base_key_suppressor(self) -> None:
+        if self._base_key_suppress_hook is not None:
+            try:
+                kb.unhook(self._base_key_suppress_hook)
+            except Exception:
+                pass
+            self._base_key_suppress_hook = None
+
     def _on_key_down(self, _event=None) -> None:
         with self._lock:
             if self.mode == "hold":
                 if self._state == AppState.IDLE:
                     self._press_time = time.time()
                     self._set_state(AppState.RECORDING)
+                    self._install_base_key_suppressor()
                     if self.on_start_recording:
                         threading.Thread(
                             target=self.on_start_recording, daemon=True
@@ -198,6 +229,7 @@ class HotkeyManager:
     def _on_key_up(self, _event=None) -> None:
         with self._lock:
             if self.mode == "hold" and self._state == AppState.RECORDING:
+                self._remove_base_key_suppressor()
                 self._release_combo_modifiers_if_needed()
                 duration = time.time() - getattr(self, "_press_time", 0.0)
                 if duration < 0.3:
@@ -354,6 +386,7 @@ class HotkeyManager:
             return
 
         self._polling = False
+        self._remove_base_key_suppressor()
 
         # Remove any keyboard-library hooks we installed
         for h in self._kb_hooks:

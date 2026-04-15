@@ -63,13 +63,13 @@ C = CP
 POPUP_RADIUS = 16  # window-level corner radius
 
 # Waveform config
-NUM_BARS = 12
-BAR_W = 4
-BAR_GAP = 3
-BAR_MAX_H = 28
-BAR_MIN_H = 4
+NUM_BARS = 16
+BAR_W = 3
+BAR_GAP = 2
+BAR_MAX_H = 30
+BAR_MIN_H = 3
 CANVAS_W = NUM_BARS * (BAR_W + BAR_GAP) - BAR_GAP
-CANVAS_H = BAR_MAX_H + 2
+CANVAS_H = BAR_MAX_H + 4
 
 
 def _apply_popup_corners(hwnd: int, w: int, h: int, r: int = POPUP_RADIUS) -> None:
@@ -265,23 +265,29 @@ class FloatingPopup:
             self._bar_ids.append(bid)
 
     def _animate_waveform(self) -> None:
-        """Called every 50 ms while recording — updates bar heights."""
+        """Called every 40 ms while recording — updates bar heights."""
         if not self._waveform_running:
             return
 
         level = self._mic_level
         t = time.time()
+        mid = CANVAS_H // 2
 
         for i, bid in enumerate(self._bar_ids):
-            # Base oscillation — each bar has a different phase
-            osc = math.sin(t * 6.0 + self._bar_phases[i]) * 0.3 + 0.7
-            # Scale by microphone level; floor at minimum height
-            h = BAR_MIN_H + (BAR_MAX_H - BAR_MIN_H) * level * osc
-            h = max(BAR_MIN_H, min(BAR_MAX_H, h))
-            mid = CANVAS_H // 2
+            phase = self._bar_phases[i]
+
+            # Ambient oscillation — always present, gives a gentle idle wave
+            ambient = (math.sin(t * 3.5 + phase) * 0.5 + 0.5) * 0.22  # 0 → 0.22
+
+            # Speech component — scales with mic level, faster oscillation
+            speech = level * (math.sin(t * 9.0 + phase * 1.4) * 0.35 + 0.65)
+
+            normalized = min(1.0, ambient + speech)
+            h = BAR_MIN_H + (BAR_MAX_H - BAR_MIN_H) * normalized
+
             x1 = i * (BAR_W + BAR_GAP)
             x2 = x1 + BAR_W
-            color = CP["bar_active"] if level > 0.05 else CP["bar_idle"]
+            color = CP["bar_active"] if level > 0.03 else CP["bar_idle"]
             self._wave_canvas.coords(bid, x1, mid - h / 2, x2, mid + h / 2)
             self._wave_canvas.itemconfigure(bid, fill=color)
 
@@ -292,7 +298,7 @@ class FloatingPopup:
             secs = elapsed % 60
             self._timer_var.set(f"{mins:02d}:{secs:04.1f}")
 
-        self.root.after(50, self._animate_waveform)
+        self.root.after(40, self._animate_waveform)
 
     # ── Icon frame ─────────────────────────────────────────────────────────────
 
@@ -693,8 +699,15 @@ class FloatingPopup:
         w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
         left, top, right, bottom = self._get_monitor_workarea(cx, cy)
         if near_cursor and cx > 0 and cy > 0:
-            x = max(left, min(cx + 10, right - w))
-            y = max(top, min(cy - h - 12, bottom - h))
+            # Position the popup below the caret with a comfortable gap.
+            # If there isn't enough room below, flip it above.
+            gap = 28
+            x = max(left, min(cx - w // 2, right - w))
+            y_below = cy + gap
+            if y_below + h <= bottom:
+                y = y_below
+            else:
+                y = max(top, cy - h - gap)
         else:
             x = left + (right - left - w) // 2
             y = bottom - h - 130

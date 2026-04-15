@@ -10,16 +10,16 @@ from typing import Callable, Optional
 
 # FTC brand palette
 C = {
-    "bg":           "#0d0d0d",
-    "surface":      "#1a1a1a",
-    "input_bg":     "#141414",
-    "text":         "#ffffff",
-    "subtext":      "#777777",
-    "accent":       "#f39200",
+    "bg": "#0d0d0d",
+    "surface": "#1a1a1a",
+    "input_bg": "#141414",
+    "text": "#ffffff",
+    "subtext": "#777777",
+    "accent": "#f39200",
     "accent_hover": "#e08200",
-    "error":        "#ff5555",
-    "success":      "#4ade80",
-    "divider":      "#2d2d2d",
+    "error": "#ff5555",
+    "success": "#4ade80",
+    "divider": "#2d2d2d",
 }
 
 WINDOW_W = 400
@@ -41,7 +41,7 @@ class LoginWindow:
         self._auth = auth_manager
         self._on_success = on_success
         self._on_cancel = on_cancel
-        self._mode = "login"   # "login" | "signup"
+        self._mode = "login"  # "login" | "signup"
 
     def run(self) -> None:
         """Build and run the window on the current thread (blocking)."""
@@ -74,14 +74,17 @@ class LoginWindow:
         header.pack(fill="x")
 
         from logo_cache import get_logo_photo
+
         self._logo_photo = get_logo_photo(self._root, C["bg"], max_w=160, max_h=60)
 
         if self._logo_photo:
             tk.Label(header, image=self._logo_photo, bg=C["bg"]).pack()
         else:
             tk.Label(
-                header, text="FTC Whisper",
-                fg=C["accent"], bg=C["bg"],
+                header,
+                text="FTC Whisper",
+                fg=C["accent"],
+                bg=C["bg"],
                 font=("Segoe UI", 22, "bold"),
             ).pack()
 
@@ -92,7 +95,9 @@ class LoginWindow:
         self._login_tab = self._tab(tabs, "Sign In", lambda: self._switch("login"))
         self._login_tab.pack(side="left", expand=True, fill="x")
 
-        self._signup_tab = self._tab(tabs, "Create Account", lambda: self._switch("signup"))
+        self._signup_tab = self._tab(
+            tabs, "Create Account", lambda: self._switch("signup")
+        )
         self._signup_tab.pack(side="left", expand=True, fill="x")
 
         # ── Form card ──────────────────────────────────────────────────
@@ -121,9 +126,12 @@ class LoginWindow:
         # Status message
         self._status_var = tk.StringVar()
         self._status_lbl = tk.Label(
-            self._card, textvariable=self._status_var,
-            fg=C["error"], bg=C["surface"],
-            font=("Segoe UI", 10), wraplength=300,
+            self._card,
+            textvariable=self._status_var,
+            fg=C["error"],
+            bg=C["surface"],
+            font=("Segoe UI", 10),
+            wraplength=300,
         )
         self._status_lbl.pack(pady=(0, 10))
 
@@ -131,15 +139,21 @@ class LoginWindow:
         self._submit_btn = tk.Label(
             self._card,
             text="Sign In",
-            fg=C["bg"], bg=C["accent"],
+            fg=C["bg"],
+            bg=C["accent"],
             font=("Segoe UI", 12, "bold"),
-            padx=16, pady=10,
+            padx=16,
+            pady=10,
             cursor="hand2",
         )
         self._submit_btn.pack(fill="x", pady=(4, 0))
         self._submit_btn.bind("<Button-1>", lambda _e: self._submit())
-        self._submit_btn.bind("<Enter>", lambda _e: self._submit_btn.configure(bg=C["accent_hover"]))
-        self._submit_btn.bind("<Leave>", lambda _e: self._submit_btn.configure(bg=C["accent"]))
+        self._submit_btn.bind(
+            "<Enter>", lambda _e: self._submit_btn.configure(bg=C["accent_hover"])
+        )
+        self._submit_btn.bind(
+            "<Leave>", lambda _e: self._submit_btn.configure(bg=C["accent"])
+        )
 
         # Enter key submits
         self._root.bind("<Return>", lambda _e: self._submit())
@@ -148,10 +162,13 @@ class LoginWindow:
 
     def _tab(self, parent, text, command) -> tk.Label:
         lbl = tk.Label(
-            parent, text=text,
-            fg=C["subtext"], bg=C["surface"],
+            parent,
+            text=text,
+            fg=C["subtext"],
+            bg=C["surface"],
             font=("Segoe UI", 10),
-            padx=12, pady=8,
+            padx=12,
+            pady=8,
             cursor="hand2",
         )
         lbl.bind("<Button-1>", lambda _e: command())
@@ -159,8 +176,10 @@ class LoginWindow:
 
     def _field_label(self, parent, text) -> tk.Label:
         lbl = tk.Label(
-            parent, text=text,
-            fg=C["subtext"], bg=C["surface"],
+            parent,
+            text=text,
+            fg=C["subtext"],
+            bg=C["surface"],
             font=("Segoe UI", 10),
             anchor="w",
         )
@@ -184,7 +203,7 @@ class LoginWindow:
     # Mode switching
     # ------------------------------------------------------------------
 
-    def _switch(self, mode: str) -> None:
+    def _switch(self, mode: str, clear_status: bool = True) -> None:
         self._mode = mode
         if mode == "login":
             self._login_tab.configure(fg=C["accent"], bg=C["surface"])
@@ -198,7 +217,8 @@ class LoginWindow:
             self._confirm_label.pack(fill="x")
             self._confirm_entry.pack(fill="x", pady=(4, 12))
             self._submit_btn.configure(text="Create Account")
-        self._status_var.set("")
+        if clear_status:
+            self._status_var.set("")
 
     # ------------------------------------------------------------------
     # Form submission
@@ -238,8 +258,16 @@ class LoginWindow:
         if ok and self._auth.is_authenticated:
             self._set_status(msg, error=False)
             self._root.after(600, self._finish)
-        else:
-            self._set_status(msg, error=True)
+            return
+
+        if ok and self._mode == "signup":
+            self._set_status(msg, error=False)
+            self._password_var.set("")
+            self._confirm_var.set("")
+            self._switch("login", clear_status=False)
+            return
+
+        self._set_status(msg, error=True)
 
     def _finish(self) -> None:
         self._root.destroy()
