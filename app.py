@@ -177,6 +177,13 @@ class WhisperFlowApp:
                 print(f"[App] Recording started, target hwnd={self._recording_hwnd:#x}")
             except Exception:
                 self._recording_hwnd = 0
+            # Capture mouse position now — user is hovering near the target text field
+            try:
+                pt = ctypes.wintypes.POINT()
+                ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+                self._rec_cursor_x, self._rec_cursor_y = pt.x, pt.y
+            except Exception:
+                self._rec_cursor_x, self._rec_cursor_y = 0, 0
             # Streaming injection state — reset each recording session
             self._injected_text = ""          # text already typed into cursor during streaming
             self._streaming_lock = threading.Lock()
@@ -296,6 +303,8 @@ class WhisperFlowApp:
                 on_insert=lambda t=text, h=hwnd: self._insert_text(t, h),
                 on_replace=lambda new_text, t=text: self._replace_text(new_text, hwnd, t),
                 hwnd=hwnd,
+                cursor_x=getattr(self, "_rec_cursor_x", 0),
+                cursor_y=getattr(self, "_rec_cursor_y", 0),
             )
 
         except Exception as e:

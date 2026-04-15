@@ -105,13 +105,20 @@ class FloatingPopup:
             self.root.after(0, self._enter_status_mode, text, recording)
 
     def show_cursor_icon(self, text: str, on_insert: Callable = None,
-                         on_replace: Callable[[str], None] = None, hwnd: int = 0) -> None:
+                         on_replace: Callable[[str], None] = None,
+                         hwnd: int = 0,
+                         cursor_x: int = 0, cursor_y: int = 0) -> None:
         self._on_insert = on_insert
         self._on_replace = on_replace
         self._target_hwnd = hwnd
         self._original_text = text
         self._current_result = None
-        self._cursor_x, self._cursor_y = self._get_cursor_pos()
+        # Use pre-captured position (from recording start) if provided,
+        # otherwise fall back to current mouse position
+        if cursor_x or cursor_y:
+            self._cursor_x, self._cursor_y = cursor_x, cursor_y
+        else:
+            self._cursor_x, self._cursor_y = self._get_cursor_pos()
         if self.root:
             self.root.after(0, self._enter_icon_mode)
 
@@ -171,14 +178,14 @@ class FloatingPopup:
             fg=CP["text"], bg=CP["bg"],
             font=("Consolas", 13, "bold"),
         )
-        self._timer_lbl.pack(side="left", padx=(0, 12))
+        # NOT packed here — packed on demand in _enter_status_mode
 
         # Waveform canvas — bars animated by microphone level
         self._wave_canvas = tk.Canvas(
             f, width=CANVAS_W, height=CANVAS_H,
             bg=CP["bg"], highlightthickness=0,
         )
-        self._wave_canvas.pack(side="left", padx=(0, 12))
+        # NOT packed here — packed on demand in _enter_status_mode
         self._bar_ids: list[int] = []
         self._draw_bars_initial()
 
@@ -188,6 +195,7 @@ class FloatingPopup:
             fg=CP["subtext"], bg=CP["bg"],
             font=("Segoe UI", 11, "bold"),
         )
+        # Packed at build time — always visible in the status frame
         self._status_label.pack(side="left")
 
         # Recording start time (for timer)
@@ -389,22 +397,28 @@ class FloatingPopup:
     def _enter_status_mode(self, text: str, recording: bool = False) -> None:
         self._stop_waveform()
         self._hide_all_frames()
-        self._status_label.configure(text=text)
+
+        # Always remove timer/canvas from pack order first so we control placement
+        self._timer_lbl.pack_forget()
+        self._wave_canvas.pack_forget()
 
         if recording:
+            # Correct order: timer | waveform | label
+            self._draw_bars_initial()           # fresh bars every session
             self._timer_var.set("00:00.0")
             self._rec_start = time.time()
-            self._timer_lbl.pack(side="left", padx=(0, 12))
-            self._wave_canvas.pack(side="left", padx=(0, 12))
+            self._timer_lbl.pack(side="left", before=self._status_label, padx=(0, 12))
+            self._wave_canvas.pack(side="left", before=self._status_label, padx=(0, 12))
+            self._status_label.configure(text=text)
             self._start_waveform()
         else:
-            # Transcribing — hide timer and waveform, show just the label
-            self._timer_lbl.pack_forget()
-            self._wave_canvas.pack_forget()
+            # Transcribing — just the label, no timer or waveform
             self._rec_start = None
+            self._status_label.configure(text=text)
 
         self._status_frame.pack()
         self._mode = "status"
+        self.root.update_idletasks()   # force canvas render before animation
         self._reposition()
         self.root.deiconify()
         self.root.lift()
