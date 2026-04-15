@@ -35,12 +35,17 @@ class Recorder:
         self._recording = False
         self._active_device_index: Optional[int] = None
         self._active_device_name: str = ""
+        self._active_sample_rate: int = sample_rate
         self._last_rms: float = 0.0
         self._last_peak: float = 0.0
 
     @property
     def is_recording(self) -> bool:
         return self._recording
+
+    @property
+    def active_sample_rate(self) -> int:
+        return int(self._active_sample_rate or self.sample_rate)
 
     def _audio_callback(
         self, indata: np.ndarray, _frames: int, _time_info, status
@@ -66,6 +71,7 @@ class Recorder:
         with self._lock:
             self._chunks = []
             self._recording = True
+            self._active_sample_rate = self.sample_rate
             self._last_rms = 0.0
             self._last_peak = 0.0
 
@@ -73,7 +79,9 @@ class Recorder:
             self._stream = self._open_best_input_stream()
             self._stream.start()
             where = self._active_device_name or "default input"
-            print(f"[Recorder] Recording started ({where}).")
+            print(
+                f"[Recorder] Recording started ({where}, {self.active_sample_rate} Hz)."
+            )
         except Exception as e:
             self._recording = False
             self._stream = None
@@ -88,7 +96,7 @@ class Recorder:
                 return None
             # Work from the tail so concatenation cost stays bounded regardless
             # of how long the user has been recording.
-            max_samples = int(self.sample_rate * max_seconds)
+            max_samples = int(self.active_sample_rate * max_seconds)
             samples_per_chunk = self._chunks[0].shape[0]
             max_chunks = max(1, max_samples // max(samples_per_chunk, 1) + 1)
             recent = self._chunks[-max_chunks:]
@@ -121,7 +129,7 @@ class Recorder:
             audio = np.concatenate(self._chunks, axis=0).flatten()
             self._chunks = []
 
-        duration = len(audio) / self.sample_rate
+        duration = len(audio) / max(self.active_sample_rate, 1)
         print(f"[Recorder] Captured {duration:.1f}s of audio.")
         return audio
 
@@ -194,7 +202,7 @@ class Recorder:
         last_err: Optional[Exception] = None
         for rate in rates:
             try:
-                return sd.InputStream(
+                stream = sd.InputStream(
                     samplerate=rate,
                     channels=self.channels,
                     dtype="float32",
@@ -202,6 +210,8 @@ class Recorder:
                     blocksize=1024,
                     device=dev_index,
                 )
+                self._active_sample_rate = int(rate)
+                return stream
             except Exception as e:
                 last_err = e
                 print(

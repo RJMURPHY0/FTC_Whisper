@@ -152,6 +152,9 @@ This happens in hold mode when you release the modifier key (Alt) before the bas
 **Waveform bars are flat / not reacting to voice**  
 The bars always animate gently even at silence. If they aren't responding to speech, check that Windows has microphone access enabled (**Settings → Privacy → Microphone**) and that the correct input device is selected as your default in Windows Sound settings. You can also force a specific mic by setting `input_device` in `config.json`.
 
+**Waveform moves but transcription is empty / inconsistent**  
+Some microphones only open reliably at 44.1/48 kHz. FTC Whisper now auto-detects the active capture rate and resamples to Whisper's expected 16 kHz internally. If this still happens, confirm you're speaking into the selected microphone and try setting `input_device` explicitly in `config.json`.
+
 **Wrong microphone used**  
 FTC Whisper uses the current Windows default input and automatically falls back across available microphones if one fails. To force a specific mic, set `input_device` in `config.json` to part of the microphone name (e.g. `"USB"`) or a device index from `Recorder.get_input_devices()`.
 

@@ -206,8 +206,9 @@ class WhisperFlowApp:
         try:
             audio = self.recorder.stop()
             self.feedback.recording_stopped()
+            capture_rate = max(1, self.recorder.active_sample_rate)
 
-            if audio is None or len(audio) < self.config.sample_rate * 0.3:
+            if audio is None or len(audio) < capture_rate * 0.3:
                 print("[App] Recording too short, ignoring.")
                 self.hotkey_manager.set_idle()
                 self.feedback.error_occurred("Recording too short")
@@ -215,12 +216,12 @@ class WhisperFlowApp:
 
             # Cap to 60 s — enough for any reasonable dictation
             MAX_SECS = 60.0
-            max_samples = int(self.config.sample_rate * MAX_SECS)
+            max_samples = int(capture_rate * MAX_SECS)
             final_audio = audio[-max_samples:] if len(audio) > max_samples else audio
             print(
-                f"[App] Transcribing {len(final_audio) / self.config.sample_rate:.1f}s of audio..."
+                f"[App] Transcribing {len(final_audio) / capture_rate:.1f}s of audio at {capture_rate} Hz..."
             )
-            text = self.transcriber.transcribe(final_audio, self.config.sample_rate)
+            text = self.transcriber.transcribe(final_audio, capture_rate)
             print(f"[App] Transcription: '{text}'")
 
             if not text.strip():
@@ -234,6 +235,7 @@ class WhisperFlowApp:
         except Exception as e:
             print(f"[App] Transcription pipeline error: {e}")
             import traceback
+
             traceback.print_exc()
             self.feedback.error_occurred(str(e))
             self.hotkey_manager.set_idle()
@@ -248,13 +250,21 @@ class WhisperFlowApp:
         # input. Simulate a click at the recording-start cursor position to
         # re-establish the browser's internal focus before Ctrl+V.
         _BROWSER_PREFIXES = ("Chrome_WidgetWin_", "Mozilla", "CEF-")
-        _BROWSER_EXACT    = {"Chrome_WidgetWin_1", "MozillaWindowClass",
-                             "MozillaDialogClass", "Chrome_RenderWidgetHostHWND"}
+        _BROWSER_EXACT = {
+            "Chrome_WidgetWin_1",
+            "MozillaWindowClass",
+            "MozillaDialogClass",
+            "Chrome_RenderWidgetHostHWND",
+        }
         try:
             cls = self._get_window_class(hwnd)
-            if cls and (cls in _BROWSER_EXACT or
-                        any(cls.startswith(p) for p in _BROWSER_PREFIXES)):
-                self._click_to_restore_focus(self._rec_cursor_x, self._rec_cursor_y, hwnd)
+            if cls and (
+                cls in _BROWSER_EXACT
+                or any(cls.startswith(p) for p in _BROWSER_PREFIXES)
+            ):
+                self._click_to_restore_focus(
+                    self._rec_cursor_x, self._rec_cursor_y, hwnd
+                )
         except Exception as e:
             print(f"[App] Browser focus click error: {e}")
 
@@ -391,12 +401,16 @@ class WhisperFlowApp:
             if hwnd:
                 rect = ctypes.wintypes.RECT()
                 if u32.GetWindowRect(hwnd, ctypes.byref(rect)):
-                    if not (rect.left <= x <= rect.right and rect.top <= y <= rect.bottom):
-                        print(f"[App] Click pos ({x},{y}) outside window rect — skipping")
+                    if not (
+                        rect.left <= x <= rect.right and rect.top <= y <= rect.bottom
+                    ):
+                        print(
+                            f"[App] Click pos ({x},{y}) outside window rect — skipping"
+                        )
                         return
 
             MOUSEEVENTF_LEFTDOWN = 0x0002
-            MOUSEEVENTF_LEFTUP   = 0x0004
+            MOUSEEVENTF_LEFTUP = 0x0004
             # Move cursor to target, then click at current position (dx/dy = 0
             # in non-absolute mode means "at wherever the cursor now is").
             u32.SetCursorPos(x, y)
