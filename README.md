@@ -63,6 +63,7 @@ Edit **`config.json`** (in the same folder as the app) to customise settings:
 | `mode` | `hold` | `hold` (hold while speaking) or `toggle` (press to start/stop) |
 | `whisper_model` | `base.en` | Model size: `tiny.en`, `base.en`, `small.en`, `medium.en`, `large-v3` |
 | `language` | `en` | Whisper language code |
+| `input_device` | *(empty)* | Optional microphone override (device name fragment or numeric index); empty = auto-default + fallback |
 | `sound_feedback` | `true` | Beep sounds on start/stop |
 | `anthropic_api_key` | *(empty)* | [Anthropic API key](https://console.anthropic.com/) — enables AI refinement |
 | `supabase_url` | *(empty)* | Supabase project URL — enables history & sync |
@@ -127,6 +128,12 @@ Re-install Python from [python.org](https://www.python.org/downloads/) and tick 
 
 **Text not appearing after transcription**  
 Make sure a text field is focused before releasing the hotkey. Some apps (e.g. games) block clipboard paste — try switching `inject_method` to `keystrokes` in `config.json`.
+
+**Waveform not reacting or wrong microphone used**  
+By default FTC Whisper uses the current Windows default input and automatically falls back across available microphones if one fails. If you want to force a specific mic, set `input_device` in `config.json` to part of the microphone name (e.g. `"USB"`) or a device index from `Recorder.get_input_devices()`.
+
+**Outlook shows ribbon key tips when using Alt+V**  
+FTC Whisper now normalises modifier key state on hotkey release to prevent stuck Alt/menu mode in Outlook and other Office editors.
 
 ---
 

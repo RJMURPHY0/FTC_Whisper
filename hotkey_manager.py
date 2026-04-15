@@ -26,6 +26,14 @@ _MOD_FLAGS = {"ctrl": 0x0002, "alt": 0x0001, "shift": 0x0004, "super": 0x0008}
 _MOD_NOREPEAT = 0x4000
 _WM_HOTKEY = 0x0312
 _WM_QUIT = 0x0012
+_KEYEVENTF_KEYUP = 0x0002
+
+_MODIFIER_VKS = {
+    "alt": (0xA4, 0xA5, 0x12),
+    "ctrl": (0xA2, 0xA3, 0x11),
+    "shift": (0xA0, 0xA1, 0x10),
+    "super": (0x5B, 0x5C),
+}
 
 # Virtual key code lookup table
 _VK_MAP: dict = {
@@ -190,6 +198,7 @@ class HotkeyManager:
     def _on_key_up(self, _event=None) -> None:
         with self._lock:
             if self.mode == "hold" and self._state == AppState.RECORDING:
+                self._release_combo_modifiers_if_needed()
                 duration = time.time() - getattr(self, "_press_time", 0.0)
                 if duration < 0.3:
                     self._set_state(AppState.IDLE)
@@ -205,6 +214,19 @@ class HotkeyManager:
                 self._set_state(AppState.PROCESSING)
                 if self.on_stop_recording:
                     threading.Thread(target=self.on_stop_recording, daemon=True).start()
+
+    def _release_combo_modifiers_if_needed(self) -> None:
+        """Normalize modifier state after combo release (prevents stuck Alt/menu mode)."""
+        if not self._is_combo:
+            return
+        if not self._win32_ok:
+            return
+        try:
+            for mod in self._modifiers:
+                for vk in _MODIFIER_VKS.get(mod, ()):
+                    _user32.keybd_event(vk, 0, _KEYEVENTF_KEYUP, 0)
+        except Exception:
+            pass
 
     def _toggle_caps_lock_threaded(self) -> None:
         self.unregister()

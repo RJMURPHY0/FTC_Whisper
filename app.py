@@ -54,7 +54,10 @@ class WhisperFlowApp:
             model_size=config.whisper_model,
             language=config.language,
         )
-        self.recorder = Recorder(sample_rate=config.sample_rate)
+        self.recorder = Recorder(
+            sample_rate=config.sample_rate,
+            input_device=getattr(config, "input_device", ""),
+        )
         self.injector = Injector(method=config.inject_method)
 
         # ── AI + logging ───────────────────────────────────────────────

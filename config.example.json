@@ -4,6 +4,7 @@
   "whisper_model": "base.en",
   "language": "en",
   "sample_rate": 16000,
+  "input_device": "",
   "inject_method": "clipboard",
   "sound_feedback": true,
   "auto_start": false,

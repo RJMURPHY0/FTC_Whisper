@@ -46,6 +46,7 @@ class Config:
     whisper_model: str = "base"  # tiny, base, small, medium, large-v3
     language: str = "en"
     sample_rate: int = 16000
+    input_device: str = ""  # Optional input device name fragment or index
     inject_method: str = "clipboard"  # "clipboard" or "keystrokes"
     sound_feedback: bool = True
     auto_start: bool = False
