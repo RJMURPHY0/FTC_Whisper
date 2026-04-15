@@ -343,49 +343,51 @@ class WhisperFlowApp:
 
     def _focus_window(self, hwnd: int, short: bool = False) -> bool:
         """Bring hwnd to the foreground so injected keystrokes land there.
-        short=True uses a shorter settle delay (streaming calls).
+        Retries once if focus doesn't land on the first attempt.
         Returns True if the window is confirmed foreground after the call."""
         if not hwnd:
             return False
-        try:
-            u32      = ctypes.windll.user32
-            kernel32 = ctypes.windll.kernel32
+        for attempt in range(2):
+            try:
+                u32      = ctypes.windll.user32
+                kernel32 = ctypes.windll.kernel32
 
-            # Only restore if minimised — avoids un-maximise flicker.
-            WS_MINIMIZE = 0x20000000
-            style = u32.GetWindowLongW(hwnd, -16)  # GWL_STYLE
-            if style & WS_MINIMIZE:
-                u32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
+                # Only restore if minimised — avoids un-maximise flicker.
+                WS_MINIMIZE = 0x20000000
+                style = u32.GetWindowLongW(hwnd, -16)  # GWL_STYLE
+                if style & WS_MINIMIZE:
+                    u32.ShowWindow(hwnd, 9)  # SW_RESTORE
 
-            # AllowSetForegroundWindow unlocks the focus lock for the target process
-            pid = ctypes.wintypes.DWORD()
-            u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            u32.AllowSetForegroundWindow(pid.value)
+                # AllowSetForegroundWindow(-1) unlocks the focus lock globally
+                u32.AllowSetForegroundWindow(-1)
 
-            # AttachThreadInput bypasses Windows focus-steal restrictions.
-            fg_hwnd = u32.GetForegroundWindow()
-            fg_tid  = u32.GetWindowThreadProcessId(fg_hwnd, None)
-            our_tid = kernel32.GetCurrentThreadId()
+                # AttachThreadInput bypasses Windows focus-steal restrictions.
+                fg_hwnd = u32.GetForegroundWindow()
+                fg_tid  = u32.GetWindowThreadProcessId(fg_hwnd, None)
+                our_tid = kernel32.GetCurrentThreadId()
 
-            attached = bool(fg_tid and fg_tid != our_tid)
-            if attached:
-                u32.AttachThreadInput(our_tid, fg_tid, True)
+                attached = bool(fg_tid and fg_tid != our_tid)
+                if attached:
+                    u32.AttachThreadInput(our_tid, fg_tid, True)
 
-            u32.SetForegroundWindow(hwnd)
-            u32.BringWindowToTop(hwnd)
+                u32.SetForegroundWindow(hwnd)
+                u32.BringWindowToTop(hwnd)
+                u32.SetFocus(hwnd)
 
-            if attached:
-                u32.AttachThreadInput(our_tid, fg_tid, False)
+                if attached:
+                    u32.AttachThreadInput(our_tid, fg_tid, False)
 
-            time.sleep(0.08 if short else 0.18)
+                time.sleep(0.08 if short else 0.20)
 
-            actual = u32.GetForegroundWindow()
-            if actual != hwnd:
-                print(f"[App] Focus warning: expected {hwnd:#x}, got {actual:#x}")
-            return actual == hwnd
-        except Exception as e:
-            print(f"[App] Focus failed: {e}")
-            return False
+                actual = u32.GetForegroundWindow()
+                if actual == hwnd:
+                    return True
+                print(f"[App] Focus attempt {attempt+1}: expected {hwnd:#x}, got {actual:#x}")
+            except Exception as e:
+                print(f"[App] Focus error (attempt {attempt+1}): {e}")
+
+        print(f"[App] Focus failed after retries — injecting anyway")
+        return False
 
     def _insert_text(self, text: str, hwnd: int) -> None:
         """Manual insert fallback — focuses the target window and injects the full text."""

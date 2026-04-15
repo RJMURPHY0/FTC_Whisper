@@ -2,12 +2,12 @@
 Text injector — sends transcribed text into the focused window.
 
 Primary method: Windows SendInput API with VK_PACKET (Unicode keystrokes).
-  - Bypasses the clipboard entirely — no "Paste Special" dialog
-  - Modifier-key clean: Alt/Ctrl state from the hotkey cannot bleed through
-  - Works with Word, Outlook, browsers, any app that accepts keyboard input
-  - Single batched SendInput call — fast even for long text
+  - Bypasses the clipboard entirely — no Paste Special dialog
+  - Modifier keys are explicitly released via SendInput before every injection
+    so hotkey modifier bleed (Alt, Ctrl, Shift, Win) cannot affect the target app
+  - Surrogate pairs handled for emoji / extended Unicode
 
-Fallback: clipboard + raw keybd_event Ctrl+V (if SendInput fails).
+Fallback: clipboard + raw keybd_event Ctrl+V (if SendInput reports zero events sent).
 """
 
 import ctypes
@@ -38,6 +38,42 @@ class _Input(ctypes.Structure):
 _INPUT_KEYBOARD    = 1
 _KEYEVENTF_UNICODE = 0x0004
 _KEYEVENTF_KEYUP   = 0x0002
+
+# Virtual-key codes for modifier keys
+_MODIFIERS = (
+    0x10,   # VK_SHIFT
+    0x11,   # VK_CONTROL
+    0x12,   # VK_MENU  (Alt)
+    0x5B,   # VK_LWIN
+    0x5C,   # VK_RWIN
+    0xA0,   # VK_LSHIFT
+    0xA1,   # VK_RSHIFT
+    0xA2,   # VK_LCONTROL
+    0xA3,   # VK_RCONTROL
+    0xA4,   # VK_LMENU  (Left Alt)
+    0xA5,   # VK_RMENU  (Right Alt / AltGr)
+)
+
+
+def _release_modifiers() -> None:
+    """
+    Send key-up events for any modifier keys that GetAsyncKeyState reports as held.
+    Called before every injection so hotkey combos (Alt+key, Ctrl+key, etc.) cannot
+    bleed into the target window and trigger shortcuts like Paste Special.
+    Uses SendInput (not keybd_event) for consistency with the injection path.
+    """
+    u32 = ctypes.windll.user32
+    events: list[_Input] = []
+    for vk in _MODIFIERS:
+        if u32.GetAsyncKeyState(vk) & 0x8000:
+            inp = _Input(type=_INPUT_KEYBOARD)
+            inp.ki.wVk     = vk
+            inp.ki.dwFlags = _KEYEVENTF_KEYUP
+            events.append(inp)
+    if events:
+        arr = (_Input * len(events))(*events)
+        u32.SendInput(len(events), arr, ctypes.sizeof(_Input))
+        time.sleep(0.04)   # let the key-up events settle before injecting
 
 
 def _send_unicode(text: str) -> bool:
@@ -99,21 +135,23 @@ class Injector:
     # ── Implementation ─────────────────────────────────────────────────────────
 
     def _inject(self, text: str) -> bool:
+        # Always release modifier keys first — prevents hotkey bleed (Paste Special etc.)
+        _release_modifiers()
+
         ok = _send_unicode(text)
         if ok:
             print(f"[Injector] SendInput {len(text)} chars.")
             return True
 
-        # SendInput failed (rare) — fall back to clipboard
-        print("[Injector] SendInput failed — trying clipboard fallback")
+        # SendInput returned 0 events sent (blocked by UIPI or other reason)
+        print("[Injector] SendInput blocked — trying clipboard fallback")
         return self._clipboard_paste(text)
 
     def _clipboard_paste(self, text: str) -> bool:
         """
         Clipboard + raw keybd_event Ctrl+V.
-        Uses keybd_event instead of keyboard.send to avoid modifier bleed:
-        keyboard.send() can inherit stuck Alt/Shift state from the hotkey press,
-        which makes Word treat Ctrl+V as Ctrl+Alt+V (Paste Special).
+        Last resort — used only when SendInput is blocked (e.g. UIPI elevation mismatch).
+        Modifiers were already released by _inject() before this is called.
         """
         try:
             import pyperclip
@@ -126,21 +164,18 @@ class Injector:
             pyperclip.copy(text)
             time.sleep(0.12)
 
-            # Ensure no modifier keys are stuck before sending Ctrl+V
-            VK_MENU   = 0x12   # Alt
-            VK_SHIFT  = 0x10
-            VK_CTRL   = 0x11
-            VK_V      = 0x56
-            KU        = 0x0002  # KEYEVENTF_KEYUP
-            u32 = ctypes.windll.user32
+            VK_CTRL = 0x11
+            VK_V    = 0x56
+            KU      = 0x0002   # KEYEVENTF_KEYUP
+            u32     = ctypes.windll.user32
 
-            # Release any stuck Alt/Shift (prevents Paste Special in Word)
-            for vk in (VK_MENU, VK_SHIFT):
-                if u32.GetAsyncKeyState(vk) & 0x8000:
-                    u32.keybd_event(vk, 0, KU, 0)
-            time.sleep(0.03)
+            # Belt-and-suspenders: release Alt again in case any app re-set it
+            VK_MENU = 0x12
+            if u32.GetAsyncKeyState(VK_MENU) & 0x8000:
+                u32.keybd_event(VK_MENU, 0, KU, 0)
+                time.sleep(0.03)
 
-            # Send Ctrl+V via raw keybd_event
+            # Send Ctrl+V via raw keybd_event (not keyboard.send — avoids modifier bleed)
             u32.keybd_event(VK_CTRL, 0, 0,  0)
             u32.keybd_event(VK_V,    0, 0,  0)
             u32.keybd_event(VK_V,    0, KU, 0)
