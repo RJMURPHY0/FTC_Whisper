@@ -184,6 +184,20 @@ class FloatingPopup:
         self.root.update_idletasks()
         self._popup_hwnd = self.root.winfo_id()
 
+        # WS_EX_NOACTIVATE: popup can never steal focus from the foreground app.
+        # This is the critical fix for ChatGPT / browser inputs — without it the
+        # recording pill steals focus from Chrome, which clears the ProseMirror /
+        # contenteditable focus state so Ctrl+V lands nowhere.
+        # Mouse clicks on the popup's own buttons still work normally.
+        try:
+            GWL_EXSTYLE      = -20
+            WS_EX_NOACTIVATE = 0x08000000
+            u32 = ctypes.windll.user32
+            style = u32.GetWindowLongW(self._popup_hwnd, GWL_EXSTYLE)
+            u32.SetWindowLongW(self._popup_hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE)
+        except Exception:
+            pass
+
         self._build_status_frame()
         self._build_icon_frame()
         self._build_refinement_frame()
@@ -287,7 +301,7 @@ class FloatingPopup:
 
             x1 = i * (BAR_W + BAR_GAP)
             x2 = x1 + BAR_W
-            color = CP["bar_active"] if level > 0.03 else CP["bar_idle"]
+            color = CP["bar_active"] if level > 0.005 else CP["bar_idle"]
             self._wave_canvas.coords(bid, x1, mid - h / 2, x2, mid + h / 2)
             self._wave_canvas.itemconfigure(bid, fill=color)
 

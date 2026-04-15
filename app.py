@@ -322,12 +322,14 @@ class WhisperFlowApp:
         while self.recorder.is_recording and self._mic_loop_running.is_set():
             try:
                 rms, peak = self.recorder.get_live_levels()
-                # More sensitive gain: lower floor, higher multiplier
-                raw = max(rms * 32.0, peak * 9.0)
-                level = min(1.0, max(0.0, (raw - 0.008) / 0.38))
-                # Faster attack (0.55 new weight) so bars react quickly to speech
-                self._mic_level_smooth = (self._mic_level_smooth * 0.45) + (
-                    level * 0.55
+                # High gain — typical Windows mic RMS is 0.001-0.02 at default
+                # gain settings; multiply aggressively so bars are always visible.
+                # No floor: even very quiet audio moves the bars.
+                raw = max(rms * 80.0, peak * 25.0)
+                level = min(1.0, raw)
+                # Fast attack (75 % new) so bars snap up immediately on speech
+                self._mic_level_smooth = (self._mic_level_smooth * 0.25) + (
+                    level * 0.75
                 )
                 self.popup.update_mic_level(self._mic_level_smooth)
             except Exception:
