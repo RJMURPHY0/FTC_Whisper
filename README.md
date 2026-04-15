@@ -1,6 +1,6 @@
 # FTC Whisper
 
-> **[⬇ Install FTC Whisper](https://github.com/RJMURPHY0/FTC_Whisper/releases/download/latest/FTC-Whisper.exe)**
+> **[⬇ Install FTC Whisper](https://github.com/RJMURPHY0/FTC_Whisper/releases/download/latest/FTC-Whisper-Setup.exe)**
 
 ---
 
@@ -27,7 +27,7 @@ Built for Windows. Transcription runs **fully locally** using [faster-whisper](h
 
 ### Option 1 — Single exe (recommended, no Python needed)
 
-1. [**Download FTC-Whisper.exe**](https://github.com/RJMURPHY0/FTC_Whisper/releases/download/latest/FTC-Whisper.exe)
+1. [**Download FTC-Whisper-Setup.exe**](https://github.com/RJMURPHY0/FTC_Whisper/releases/download/latest/FTC-Whisper-Setup.exe)
 2. Double-click it — if Windows shows a SmartScreen warning, click **More info → Run anyway**
 3. The app starts immediately in your system tray
 

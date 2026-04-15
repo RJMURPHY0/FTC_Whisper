@@ -1,4 +1,4 @@
-name: Build and publish Windows app
+name: Build and publish Windows installer
 
 on:
   push:
@@ -32,16 +32,16 @@ jobs:
 
       - name: Prepare release asset name
         shell: pwsh
-        run: Copy-Item "dist\FTC Whisper.exe" "dist\FTC-Whisper.exe" -Force
+        run: Copy-Item "dist\FTC Whisper.exe" "dist\FTC-Whisper-Setup.exe" -Force
 
       - name: Publish latest release asset
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: Latest build
-          prerelease: true
-          make_latest: false
-          files: dist/FTC-Whisper.exe
+          name: FTC Whisper Latest
+          prerelease: false
+          make_latest: true
+          files: dist/FTC-Whisper-Setup.exe
           overwrite_files: true
           generate_release_notes: true
           append_body: true
