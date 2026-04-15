@@ -184,55 +184,12 @@ class WhisperFlowApp:
                 self._rec_cursor_x, self._rec_cursor_y = pt.x, pt.y
             except Exception:
                 self._rec_cursor_x, self._rec_cursor_y = 0, 0
-            # Streaming injection state — reset each recording session
-            self._injected_text = ""          # text already typed into cursor during streaming
-            self._streaming_lock = threading.Lock()
             self.recorder.start()
             self.feedback.recording_started()
-            threading.Thread(target=self._streaming_loop, daemon=True).start()
         except Exception as e:
             print(f"[App] Failed to start recording: {e}")
             self.feedback.error_occurred(str(e))
             self.hotkey_manager.set_idle()
-
-    def _streaming_loop(self) -> None:
-        """Inject partial transcription into the cursor every ~1 s while recording.
-        Uses non-blocking transcribe so it never delays the final pass.
-        No focus call needed — RegisterHotKey leaves the target window focused."""
-        INTERVAL = 1.0
-        MIN_SAMPLES = int(self.config.sample_rate * 1.0)
-        while self.recorder.is_recording:
-            time.sleep(INTERVAL)
-            if not self.recorder.is_recording:
-                break
-            # Short rolling window — faster Whisper inference, less drift
-            audio = self.recorder.get_current_audio(max_seconds=4.0)
-            if audio is None or len(audio) < MIN_SAMPLES:
-                continue
-            try:
-                partial = self.transcriber.transcribe(
-                    audio, self.config.sample_rate, blocking=False)
-                if not partial or not partial.strip():
-                    continue
-                partial = partial.strip() + " "   # trailing space before next word
-
-                with self._streaming_lock:
-                    if not self.recorder.is_recording:
-                        break   # final transcription is now running — let it handle the rest
-                    already = self._injected_text
-                    if partial.startswith(already) and len(partial) > len(already):
-                        new_part = partial[len(already):]
-                        # Target window stays focused during hold-to-talk; no focus
-                        # switch needed here — avoids the 80ms settle delay per word
-                        ok = self.injector.inject_immediate(new_part)
-                        if ok:
-                            self._injected_text = partial
-                            print(f"[App] Streamed +{len(new_part)} chars")
-                    # If Whisper changed earlier words we skip the stream update
-                    # and let the final transcription do a clean overwrite.
-
-            except Exception as e:
-                print(f"[App] Streaming error (non-fatal): {e}")
 
     def _on_stop_recording(self) -> None:
         try:
@@ -245,13 +202,11 @@ class WhisperFlowApp:
                 self.feedback.error_occurred("Recording too short")
                 return
 
-            # Cap to last 30 s — streaming handles earlier text; this keeps
-            # the final Whisper pass fast even for minutes-long recordings.
-            MAX_FINAL_SECS = 30.0
-            max_samples = int(self.config.sample_rate * MAX_FINAL_SECS)
+            # Cap to 60 s — enough for any reasonable dictation
+            MAX_SECS = 60.0
+            max_samples = int(self.config.sample_rate * MAX_SECS)
             final_audio = audio[-max_samples:] if len(audio) > max_samples else audio
-            print(f"[App] Transcribing {len(final_audio)} samples "
-                  f"({len(final_audio)/self.config.sample_rate:.1f}s)...")
+            print(f"[App] Transcribing {len(final_audio)/self.config.sample_rate:.1f}s of audio...")
             text = self.transcriber.transcribe(final_audio, self.config.sample_rate)
             print(f"[App] Transcription: '{text}'")
 
@@ -261,37 +216,13 @@ class WhisperFlowApp:
                 self.feedback.error_occurred("No speech detected")
                 return
 
-            hwnd = self._recording_hwnd
+            hwnd  = self._recording_hwnd
             final = text.strip()
-
-            # Read and clear the streaming state (streaming loop is done by now)
-            with self._streaming_lock:
-                injected = self._injected_text
-                self._injected_text = ""
 
             self._focus_window(hwnd)
 
-            if not injected:
-                # Nothing was streamed — inject the whole transcription
-                print(f"[App] Injecting full text ({len(final)} chars)")
-                result = self.injector.inject(final)
-            elif final.startswith(injected.rstrip()):
-                # Whisper's final agrees with what was streamed; inject just the tail
-                suffix = final[len(injected.rstrip()):]
-                if suffix:
-                    print(f"[App] Injecting suffix ({len(suffix)} chars)")
-                    result = self.injector.inject(suffix)
-                else:
-                    print("[App] Streaming already complete — nothing to append")
-                    result = True
-            else:
-                # Whisper changed earlier words — erase streamed text and re-inject
-                print(f"[App] Correcting stream: erasing {len(injected)} chars, re-injecting")
-                import keyboard as kb
-                for _ in range(len(injected)):
-                    kb.send("backspace")
-                time.sleep(0.05)
-                result = self.injector.inject(final)
+            print(f"[App] Injecting {len(final)} chars")
+            result = self.injector.inject(final)
 
             print(f"[App] Inject result: {result}")
             self.feedback.transcription_complete(text)
