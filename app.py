@@ -254,7 +254,7 @@ class WhisperFlowApp:
             cls = self._get_window_class(hwnd)
             if cls and (cls in _BROWSER_EXACT or
                         any(cls.startswith(p) for p in _BROWSER_PREFIXES)):
-                self._click_to_restore_focus(self._rec_cursor_x, self._rec_cursor_y)
+                self._click_to_restore_focus(self._rec_cursor_x, self._rec_cursor_y, hwnd)
         except Exception as e:
             print(f"[App] Browser focus click error: {e}")
 
@@ -371,20 +371,30 @@ class WhisperFlowApp:
         except Exception:
             return ""
 
-    def _click_to_restore_focus(self, x: int, y: int) -> None:
+    def _click_to_restore_focus(self, x: int, y: int, hwnd: int = 0) -> None:
         """
         Simulate a left-click at (x, y) to restore DOM focus inside browser
         contenteditable / ProseMirror elements (ChatGPT, Gmail, etc.).
 
-        SetForegroundWindow restores Win32 focus but does NOT restore the
-        browser's internal JS focus state. A simulated mouse click fires a
-        native mousedown event that Chrome/Firefox processes, which refocuses
-        the correct element so the subsequent Ctrl+V lands in the right place.
+        Only fires if (x, y) is actually within the target window rect — this
+        prevents accidentally clicking links, buttons, or empty page areas when
+        the cursor was outside the input box when recording started.
         """
         if not x and not y:
             return
         try:
             u32 = ctypes.windll.user32
+
+            # Safety check: only click if the point is inside the target window.
+            # If the recording-start cursor was outside Chrome (e.g. on another
+            # monitor or on the taskbar), skip the click entirely.
+            if hwnd:
+                rect = ctypes.wintypes.RECT()
+                if u32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                    if not (rect.left <= x <= rect.right and rect.top <= y <= rect.bottom):
+                        print(f"[App] Click pos ({x},{y}) outside window rect — skipping")
+                        return
+
             MOUSEEVENTF_LEFTDOWN = 0x0002
             MOUSEEVENTF_LEFTUP   = 0x0004
             # Move cursor to target, then click at current position (dx/dy = 0

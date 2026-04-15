@@ -207,6 +207,33 @@ class FloatingPopup:
         self._ready.set()
         self.root.mainloop()
 
+    def _show_no_activate(self) -> None:
+        """
+        Show the popup window WITHOUT stealing keyboard focus from the active app.
+
+        tkinter's deiconify() calls ShowWindow(SW_SHOW=5) which ACTIVATES the
+        window and steals focus — even when WS_EX_NOACTIVATE is set (that flag
+        only prevents activation on mouse click, not on ShowWindow).
+
+        Strategy:
+          1. Remember who currently has focus.
+          2. Call deiconify() + lift() as normal (lets tkinter track internal state).
+          3. Immediately give focus back to whoever had it before.
+
+        This keeps tkinter's internal window-state consistent while ensuring the
+        foreground app (e.g. Chrome with ChatGPT open) never loses keyboard focus.
+        """
+        u32 = ctypes.windll.user32
+        prev_fg = u32.GetForegroundWindow()
+        self.root.deiconify()
+        self.root.lift()
+        # Restore focus to the previous foreground window if it wasn't ours
+        if prev_fg and prev_fg != self._popup_hwnd:
+            try:
+                u32.SetForegroundWindow(prev_fg)
+            except Exception:
+                pass
+
     def _on_popup_configure(self, event) -> None:
         if event.widget is self.root:
             self.root.update_idletasks()
@@ -536,8 +563,7 @@ class FloatingPopup:
         self.root.update_idletasks()  # force canvas render before animation
         # Always position on the monitor where the cursor is
         self._reposition(self._status_cx, self._status_cy)
-        self.root.deiconify()
-        self.root.lift()
+        self._show_no_activate()
 
     def _start_waveform(self) -> None:
         self._waveform_running = True
@@ -568,8 +594,7 @@ class FloatingPopup:
         # Use the same fixed bottom-centre position as the recording status pill
         # so the badge always appears in a predictable, consistent location.
         self._reposition(self._status_cx, self._status_cy)
-        self.root.deiconify()
-        self.root.lift()
+        self._show_no_activate()
         if self._inserted_ok:
             self._register_space_dismiss()
         else:
@@ -583,7 +608,7 @@ class FloatingPopup:
         self._refine_frame.pack()
         self._mode = "refinement"
         self._reposition(self._status_cx, self._status_cy)
-        self.root.lift()
+        self._show_no_activate()
 
     def _refresh_insert_status(self) -> None:
         if self._inserted_ok:
