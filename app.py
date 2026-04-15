@@ -242,6 +242,22 @@ class WhisperFlowApp:
         # ── Injection — isolated so a failure never prevents the popup ──────────
         self._focus_window(hwnd)
 
+        # Browser windows (ChatGPT, Gmail, Outlook web, etc.) — Win32
+        # SetForegroundWindow restores the Chrome/Firefox Win32 focus but does
+        # NOT restore the JS/DOM focus of the contenteditable or ProseMirror
+        # input. Simulate a click at the recording-start cursor position to
+        # re-establish the browser's internal focus before Ctrl+V.
+        _BROWSER_PREFIXES = ("Chrome_WidgetWin_", "Mozilla", "CEF-")
+        _BROWSER_EXACT    = {"Chrome_WidgetWin_1", "MozillaWindowClass",
+                             "MozillaDialogClass", "Chrome_RenderWidgetHostHWND"}
+        try:
+            cls = self._get_window_class(hwnd)
+            if cls and (cls in _BROWSER_EXACT or
+                        any(cls.startswith(p) for p in _BROWSER_PREFIXES)):
+                self._click_to_restore_focus(self._rec_cursor_x, self._rec_cursor_y)
+        except Exception as e:
+            print(f"[App] Browser focus click error: {e}")
+
         result = False
         try:
             print(f"[App] Injecting {len(transcribed_text)} chars")
@@ -342,6 +358,46 @@ class WhisperFlowApp:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_window_class(hwnd: int) -> str:
+        """Return the Win32 class name of the given window (empty string on failure)."""
+        if not hwnd:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(128)
+            ctypes.windll.user32.GetClassNameW(hwnd, buf, 128)
+            return buf.value
+        except Exception:
+            return ""
+
+    def _click_to_restore_focus(self, x: int, y: int) -> None:
+        """
+        Simulate a left-click at (x, y) to restore DOM focus inside browser
+        contenteditable / ProseMirror elements (ChatGPT, Gmail, etc.).
+
+        SetForegroundWindow restores Win32 focus but does NOT restore the
+        browser's internal JS focus state. A simulated mouse click fires a
+        native mousedown event that Chrome/Firefox processes, which refocuses
+        the correct element so the subsequent Ctrl+V lands in the right place.
+        """
+        if not x and not y:
+            return
+        try:
+            u32 = ctypes.windll.user32
+            MOUSEEVENTF_LEFTDOWN = 0x0002
+            MOUSEEVENTF_LEFTUP   = 0x0004
+            # Move cursor to target, then click at current position (dx/dy = 0
+            # in non-absolute mode means "at wherever the cursor now is").
+            u32.SetCursorPos(x, y)
+            time.sleep(0.05)
+            u32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            time.sleep(0.03)
+            u32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            time.sleep(0.12)  # let Chrome process click and re-focus the element
+            print(f"[App] Browser DOM focus click at ({x}, {y})")
+        except Exception as e:
+            print(f"[App] Click to restore focus failed: {e}")
 
     def _focus_window(self, hwnd: int, short: bool = False) -> bool:
         """Bring hwnd to the foreground so injected keystrokes land there.
@@ -460,14 +516,12 @@ class WhisperFlowApp:
 
     def _replace_text(self, new_text: str, hwnd: int, original_text: str = "") -> None:
         import keyboard as kb
-        import pyperclip
 
         self._focus_window(hwnd)
         kb.send("ctrl+z")
         time.sleep(0.05)
-        pyperclip.copy(new_text)
-        time.sleep(0.05)
-        kb.send("ctrl+v")
+        # Use the injector's native clipboard method (no pyperclip dependency)
+        self.injector.inject(new_text)
         print(f"[App] Replaced with refined text: '{new_text}'")
         if original_text:
             self.db.log_refinement(original_text, new_text, "replace")

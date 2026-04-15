@@ -64,12 +64,12 @@ POPUP_RADIUS = 16  # window-level corner radius
 
 # Waveform config
 NUM_BARS = 16
-BAR_W = 3
-BAR_GAP = 2
+BAR_W    = 4
+BAR_GAP  = 2
 BAR_MAX_H = 30
-BAR_MIN_H = 3
+BAR_MIN_H = 5
 CANVAS_W = NUM_BARS * (BAR_W + BAR_GAP) - BAR_GAP
-CANVAS_H = BAR_MAX_H + 4
+CANVAS_H = BAR_MAX_H + 6
 
 
 def _apply_popup_corners(hwnd: int, w: int, h: int, r: int = POPUP_RADIUS) -> None:
@@ -284,26 +284,31 @@ class FloatingPopup:
             return
 
         level = self._mic_level
-        t = time.time()
-        mid = CANVAS_H // 2
+        t     = time.time()
+        mid   = CANVAS_H // 2
+
+        # Idle ceiling: bars oscillate up to 30 % of full height even in silence.
+        # Voice ceiling: bars can reach 100 % when speaking.
+        idle_max  = BAR_MIN_H + (BAR_MAX_H - BAR_MIN_H) * 0.30
 
         for i, bid in enumerate(self._bar_ids):
             phase = self._bar_phases[i]
 
-            # Ambient oscillation — always present, gives a gentle idle wave
-            ambient = (math.sin(t * 3.5 + phase) * 0.5 + 0.5) * 0.22  # 0 → 0.22
+            # Gentle idle wave — always visible even with no microphone input
+            idle_osc = math.sin(t * 4.0 + phase) * 0.5 + 0.5        # 0 → 1
+            h_idle   = BAR_MIN_H + (idle_max - BAR_MIN_H) * idle_osc
 
-            # Speech component — scales with mic level, faster oscillation
-            speech = level * (math.sin(t * 9.0 + phase * 1.4) * 0.35 + 0.65)
+            # Voice spike — grows with mic level, faster oscillation per bar
+            voice_osc = math.sin(t * 10.0 + phase * 1.6) * 0.4 + 0.6  # 0.2 → 1.0
+            h_voice   = (BAR_MAX_H - idle_max) * level * voice_osc
 
-            normalized = min(1.0, ambient + speech)
-            h = BAR_MIN_H + (BAR_MAX_H - BAR_MIN_H) * normalized
+            h = max(BAR_MIN_H, min(BAR_MAX_H, h_idle + h_voice))
 
             x1 = i * (BAR_W + BAR_GAP)
             x2 = x1 + BAR_W
-            color = CP["bar_active"] if level > 0.005 else CP["bar_idle"]
+            # Always orange while recording so the waveform is always visible
             self._wave_canvas.coords(bid, x1, mid - h / 2, x2, mid + h / 2)
-            self._wave_canvas.itemconfigure(bid, fill=color)
+            self._wave_canvas.itemconfigure(bid, fill=CP["bar_active"])
 
         # Update timer
         if self._rec_start is not None:
@@ -668,7 +673,7 @@ class FloatingPopup:
         display = text if len(text) <= 140 else text[:137] + "…"
         self._result_text.configure(text=display)
         self._result_frame.pack(fill="x")
-        self._reposition(self._cursor_x, self._cursor_y)
+        self._reposition(self._status_cx, self._status_cy)
 
     # ── Positioning ────────────────────────────────────────────────────────────
 
