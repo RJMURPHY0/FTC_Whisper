@@ -306,49 +306,101 @@ class Injector:
         print("[Injector] All direct methods failed")
         return False
 
+    # ── Clipboard helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _clipboard_set(text: str) -> str:
+        """
+        Write *text* to the Windows clipboard via ctypes (no pyperclip dependency).
+        Returns the previous clipboard text so the caller can restore it later,
+        or '' if the previous content could not be read.
+        Works for any text length without subprocess overhead.
+        """
+        CF_UNICODETEXT = 13
+        GMEM_MOVEABLE  = 0x0002
+        u32 = ctypes.windll.user32
+        k32 = ctypes.windll.kernel32
+
+        # ── Read previous content ──
+        previous = ""
+        if u32.OpenClipboard(None):
+            try:
+                h = u32.GetClipboardData(CF_UNICODETEXT)
+                if h:
+                    ptr = k32.GlobalLock(h)
+                    if ptr:
+                        previous = ctypes.wstring_at(ptr)
+                        k32.GlobalUnlock(h)
+            except Exception:
+                pass
+            finally:
+                u32.CloseClipboard()
+
+        # ── Write new content ──
+        encoded = (text + "\x00").encode("utf-16-le")
+        for _attempt in range(5):
+            if u32.OpenClipboard(None):
+                try:
+                    u32.EmptyClipboard()
+                    h = k32.GlobalAlloc(GMEM_MOVEABLE, len(encoded))
+                    if h:
+                        ptr = k32.GlobalLock(h)
+                        ctypes.memmove(ptr, encoded, len(encoded))
+                        k32.GlobalUnlock(h)
+                        u32.SetClipboardData(CF_UNICODETEXT, h)
+                    return previous
+                except Exception:
+                    pass
+                finally:
+                    u32.CloseClipboard()
+            time.sleep(0.02)
+
+        return previous
+
+    @staticmethod
+    def _clipboard_restore(original: str) -> None:
+        """Restore the clipboard to *original* after a short delay."""
+        def _do():
+            time.sleep(0.5)
+            try:
+                Injector._clipboard_set(original)
+            except Exception:
+                pass
+        threading.Thread(target=_do, daemon=True).start()
+
     def _clipboard_paste(self, text: str) -> bool:
         """
-        Last resort: clipboard + raw keybd_event Ctrl+V.
-        Only reached when SendInput is blocked (UIPI elevation mismatch).
+        Copy *text* to the clipboard then send Ctrl+V via SendInput.
+        Works for all apps — native, browsers, React/Vue/Angular (ChatGPT etc.)
+        and any text length.
         """
         try:
-            import pyperclip
-
-            try:
-                original = pyperclip.paste()
-            except Exception:
-                original = None
-
-            pyperclip.copy(text)
-            time.sleep(0.15)
-
             VK_CTRL = 0x11
-            VK_V = 0x56
+            VK_V    = 0x56
             VK_MENU = 0x12
-            KU = 0x0002
-            u32 = ctypes.windll.user32
+            u32     = ctypes.windll.user32
 
-            # Release Alt in case it's still registered
+            original = self._clipboard_set(text)
+            time.sleep(0.10)   # let clipboard settle
+
+            # Release Alt if still held — prevents Paste Special in Office
             if u32.GetAsyncKeyState(VK_MENU) & 0x8000:
-                u32.keybd_event(VK_MENU, 0, KU, 0)
-                time.sleep(0.05)
+                inp = _Input(type=_INPUT_KEYBOARD)
+                inp.ki.wVk     = VK_MENU
+                inp.ki.dwFlags = _KEYEVENTF_KEYUP
+                u32.SendInput(1, (_Input * 1)(inp), ctypes.sizeof(_Input))
+                time.sleep(0.04)
 
-            u32.keybd_event(VK_CTRL, 0, 0, 0)
-            u32.keybd_event(VK_V, 0, 0, 0)
-            u32.keybd_event(VK_V, 0, KU, 0)
-            u32.keybd_event(VK_CTRL, 0, KU, 0)
+            # Atomic Ctrl+V via SendInput (no interleaving with hardware events)
+            ctrl_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL))
+            v_dn    = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_V))
+            v_up    = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_V,    dwFlags=_KEYEVENTF_KEYUP))
+            ctrl_up = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL, dwFlags=_KEYEVENTF_KEYUP))
+            arr = (_Input * 4)(ctrl_dn, v_dn, v_up, ctrl_up)
+            u32.SendInput(4, arr, ctypes.sizeof(_Input))
             time.sleep(0.18)
 
-            if original is not None:
-
-                def _restore():
-                    time.sleep(0.4)
-                    try:
-                        pyperclip.copy(original)
-                    except Exception:
-                        pass
-
-                threading.Thread(target=_restore, daemon=True).start()
+            self._clipboard_restore(original)
 
             print(f"[Injector] Clipboard paste {len(text)} chars.")
             return True

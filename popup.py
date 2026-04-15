@@ -546,7 +546,9 @@ class FloatingPopup:
         self._ai_status.configure(text="")
         self._icon_frame.pack()
         self._mode = "icon"
-        self._reposition(self._cursor_x, self._cursor_y, near_cursor=True)
+        # Use the same fixed bottom-centre position as the recording status pill
+        # so the badge always appears in a predictable, consistent location.
+        self._reposition(self._status_cx, self._status_cy)
         self.root.deiconify()
         self.root.lift()
         if self._inserted_ok:
@@ -561,7 +563,7 @@ class FloatingPopup:
         self._refresh_insert_status()
         self._refine_frame.pack()
         self._mode = "refinement"
-        self._reposition(self._cursor_x, self._cursor_y)
+        self._reposition(self._status_cx, self._status_cy)
         self.root.lift()
 
     def _refresh_insert_status(self) -> None:

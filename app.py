@@ -200,6 +200,9 @@ class WhisperFlowApp:
             self.hotkey_manager.set_idle()
 
     def _on_stop_recording(self) -> None:
+        transcribed_text: str = ""
+        hwnd = self._recording_hwnd
+
         try:
             audio = self.recorder.stop()
             self.feedback.recording_stopped()
@@ -226,45 +229,43 @@ class WhisperFlowApp:
                 self.feedback.error_occurred("No speech detected")
                 return
 
-            hwnd = self._recording_hwnd
-            final = text.strip()
-
-            self._focus_window(hwnd)
-
-            print(f"[App] Injecting {len(final)} chars")
-            result = self.injector.inject(final)
-            time.sleep(0.10)  # let Chrome update its caret position after injection
-            caret_x, caret_y = self._get_caret_screen_pos(hwnd)
-            # Chrome's omnibox rarely exposes caret via GetGUIThreadInfo; fall back
-            # to the cursor position captured at recording-start so the popup lands
-            # near where the user was actually working.
-            if not (caret_x or caret_y):
-                caret_x, caret_y = getattr(self, "_rec_cursor_x", 0), getattr(self, "_rec_cursor_y", 0)
-
-            print(f"[App] Inject result: {result}")
-            self.feedback.transcription_complete(text)
-            self.hotkey_manager.set_idle()
-            self.db.log_transcription(text)
-
-            self.popup.show_cursor_icon(
-                text,
-                on_insert=lambda t=text, h=hwnd: self._insert_text(t, h),
-                on_replace=lambda new_text, t=text: self._replace_text(
-                    new_text, hwnd, t
-                ),
-                inserted=result,
-                hwnd=hwnd,
-                cursor_x=caret_x,
-                cursor_y=caret_y,
-            )
+            transcribed_text = text.strip()
 
         except Exception as e:
-            print(f"[App] Pipeline error: {e}")
+            print(f"[App] Transcription pipeline error: {e}")
             import traceback
-
             traceback.print_exc()
             self.feedback.error_occurred(str(e))
             self.hotkey_manager.set_idle()
+            return
+
+        # ── Injection — isolated so a failure never prevents the popup ──────────
+        self._focus_window(hwnd)
+
+        result = False
+        try:
+            print(f"[App] Injecting {len(transcribed_text)} chars")
+            result = self.injector.inject(transcribed_text)
+            print(f"[App] Inject result: {result}")
+        except Exception as e:
+            print(f"[App] Injection error (popup will still appear): {e}")
+
+        self.feedback.transcription_complete(transcribed_text)
+        self.hotkey_manager.set_idle()
+        self.db.log_transcription(transcribed_text)
+
+        # ── Popup always shown — works as manual-insert fallback if inject failed ─
+        self.popup.show_cursor_icon(
+            transcribed_text,
+            on_insert=lambda t=transcribed_text, h=hwnd: self._insert_text(t, h),
+            on_replace=lambda new_text, t=transcribed_text: self._replace_text(
+                new_text, hwnd, t
+            ),
+            inserted=result,
+            hwnd=hwnd,
+            cursor_x=0,
+            cursor_y=0,
+        )
 
     def _on_cancel_recording(self) -> None:
         try:
@@ -310,6 +311,14 @@ class WhisperFlowApp:
 
     def _mic_level_loop(self) -> None:
         """Sample the recorder's audio buffer for RMS level and push to popup."""
+        # recorder.start() runs in a separate thread; wait for it to actually begin
+        # before entering the poll loop (up to 1 s) — otherwise is_recording is
+        # still False on the first check and the loop exits immediately.
+        for _ in range(25):
+            if self.recorder.is_recording:
+                break
+            time.sleep(0.04)
+
         while self.recorder.is_recording and self._mic_loop_running.is_set():
             try:
                 rms, peak = self.recorder.get_live_levels()
