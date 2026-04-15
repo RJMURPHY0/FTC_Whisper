@@ -257,12 +257,16 @@ class WhisperFlowApp:
 
     def _on_state_change(self, state: AppState) -> None:
         self.app_window.update_status(state.value)  # "idle" / "recording" / "processing"
+        cx = getattr(self, "_rec_cursor_x", 0)
+        cy = getattr(self, "_rec_cursor_y", 0)
         if state == AppState.RECORDING:
-            self.popup.show_status("Recording", hwnd=self._recording_hwnd, recording=True)
+            self.popup.show_status("Recording", hwnd=self._recording_hwnd,
+                                   recording=True, cursor_x=cx, cursor_y=cy)
             # Feed mic levels to the popup waveform while recording
             threading.Thread(target=self._mic_level_loop, daemon=True).start()
         elif state == AppState.PROCESSING:
-            self.popup.show_status("Transcribing…", hwnd=self._recording_hwnd, recording=False)
+            self.popup.show_status("Transcribing…", hwnd=self._recording_hwnd,
+                                   recording=False, cursor_x=cx, cursor_y=cy)
         elif state == AppState.IDLE:
             if not self.popup.is_user_facing:
                 self.popup.hide()

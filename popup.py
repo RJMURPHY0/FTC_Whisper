@@ -94,15 +94,26 @@ class FloatingPopup:
         self._waveform_running: bool = False
         self._bar_phases = [i * (2 * math.pi / NUM_BARS) for i in range(NUM_BARS)]
 
+        # Cursor position at last show_status call — used for monitor selection
+        self._status_cx: int = 0
+        self._status_cy: int = 0
+
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def set_ai_refiner(self, refiner) -> None:
         self._ai_refiner = refiner
 
-    def show_status(self, text: str, hwnd: int = 0, recording: bool = False) -> None:
+    def show_status(self, text: str, hwnd: int = 0, recording: bool = False,
+                    cursor_x: int = 0, cursor_y: int = 0) -> None:
         self._target_hwnd = hwnd
+        # Store cursor position so popup appears on the correct monitor
+        if cursor_x or cursor_y:
+            self._status_cx, self._status_cy = cursor_x, cursor_y
+        else:
+            self._status_cx, self._status_cy = self._get_cursor_pos()
         if self.root:
-            self.root.after(0, self._enter_status_mode, text, recording)
+            # Use lambda — avoids tkinter after() quirks with boolean positional args
+            self.root.after(0, lambda: self._enter_status_mode(text, recording))
 
     def show_cursor_icon(self, text: str, on_insert: Callable = None,
                          on_replace: Callable[[str], None] = None,
@@ -419,13 +430,15 @@ class FloatingPopup:
         self._status_frame.pack()
         self._mode = "status"
         self.root.update_idletasks()   # force canvas render before animation
-        self._reposition()
+        # Always position on the monitor where the cursor is
+        self._reposition(self._status_cx, self._status_cy)
         self.root.deiconify()
         self.root.lift()
 
     def _start_waveform(self) -> None:
         self._waveform_running = True
-        self._animate_waveform()
+        # Small delay so canvas is fully rendered before first animation tick
+        self.root.after(30, self._animate_waveform)
 
     def _stop_waveform(self) -> None:
         self._waveform_running = False
@@ -547,16 +560,23 @@ class FloatingPopup:
     def _get_monitor_workarea(self, x: int = 0, y: int = 0) -> tuple[int, int, int, int]:
         try:
             MONITOR_DEFAULTTONEAREST = 2
-            if self._target_hwnd:
-                hmon = ctypes.windll.user32.MonitorFromWindow(
-                    self._target_hwnd, MONITOR_DEFAULTTONEAREST)
-            else:
+            u32 = ctypes.windll.user32
+            # Prefer explicit cursor coords — always puts popup on the user's active screen.
+            # Fall back to target hwnd only when no cursor coords given.
+            if x or y:
                 pt = _POINT()
                 pt.x, pt.y = x, y
-                hmon = ctypes.windll.user32.MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)
+                hmon = u32.MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)
+            elif self._target_hwnd:
+                hmon = u32.MonitorFromWindow(self._target_hwnd, MONITOR_DEFAULTTONEAREST)
+            else:
+                # Last resort: monitor containing the current cursor
+                pt = _POINT()
+                u32.GetCursorPos(ctypes.byref(pt))
+                hmon = u32.MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)
             info = _MONITORINFO()
             info.cbSize = ctypes.sizeof(_MONITORINFO)
-            ctypes.windll.user32.GetMonitorInfoW(hmon, ctypes.byref(info))
+            u32.GetMonitorInfoW(hmon, ctypes.byref(info))
             r = info.rcWork
             return r.left, r.top, r.right, r.bottom
         except Exception:
