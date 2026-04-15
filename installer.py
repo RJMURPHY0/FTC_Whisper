@@ -100,6 +100,43 @@ def create_shortcut(icon_path: str) -> None:
         print(f"  [WARN] Shortcut creation failed: {e}")
 
 
+def add_to_startup() -> None:
+    """Add FTC Whisper to Windows startup via the user Startup folder."""
+    try:
+        import winreg
+        # Resolve %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion"
+                            r"\Explorer\Shell Folders") as k:
+            startup_dir, _ = winreg.QueryValueEx(k, "Startup")
+    except Exception:
+        startup_dir = os.path.join(os.environ.get("APPDATA", ""),
+                                   r"Microsoft\Windows\Start Menu\Programs\Startup")
+
+    icon_loc = f"{LOGO_ICO},0" if os.path.exists(LOGO_ICO) else f"{PYTHON},0"
+    ps = (
+        "$sh = New-Object -ComObject WScript.Shell; "
+        f"$lnk = $sh.CreateShortcut('{startup_dir}\\FTC Whisper.lnk'); "
+        f"$lnk.TargetPath       = '{PYTHON}'; "
+        f"$lnk.Arguments        = '\"{APP_PY}\"'; "
+        f"$lnk.WorkingDirectory = '{APP_DIR}'; "
+        f"$lnk.IconLocation     = '{icon_loc}'; "
+        "$lnk.Description      = 'FTC Whisper - Voice-to-Text'; "
+        "$lnk.Save()"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+            capture_output=True, text=True, timeout=20,
+        )
+        if result.returncode == 0:
+            print("  [OK] Added to Windows startup folder.")
+        else:
+            print(f"  [WARN] Startup shortcut failed:\n{result.stderr.strip()}")
+    except Exception as e:
+        print(f"  [WARN] Startup shortcut failed: {e}")
+
+
 def main() -> None:
     print()
     print("  ==============================================")
@@ -114,6 +151,9 @@ def main() -> None:
 
     _banner("Creating desktop shortcut...")
     create_shortcut(icon)
+
+    _banner("Adding to Windows startup...")
+    add_to_startup()
 
     print()
     print("  ==============================================")

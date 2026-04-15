@@ -98,6 +98,12 @@ class WhisperFlowApp:
             on_state_change=self._on_state_change,
         )
 
+        # ── Pre-load Whisper model immediately in background ───────────
+        # Auth and model loading now run in parallel — model will be
+        # ready (or close to it) by the time the user first presses the hotkey.
+        threading.Thread(target=self.transcriber.load_model,
+                         daemon=True, name="model-preload").start()
+
     # ------------------------------------------------------------------
     # Startup
     # ------------------------------------------------------------------
@@ -468,9 +474,47 @@ def _ensure_single_instance() -> None:
         pass
 
 
+def _ensure_startup_registry() -> None:
+    """
+    Add FTC Whisper to Windows startup (HKCU Run) so it launches when the user logs in.
+    Safe to call on every launch — only writes if the value is missing or stale.
+    Works for both the PyInstaller exe and the source (pythonw.exe app.py) installs.
+    """
+    import winreg
+    RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    VALUE   = "FTC Whisper"
+
+    # Determine our own executable path
+    if getattr(sys, "frozen", False):
+        # PyInstaller bundle — use the exe itself
+        exe = sys.executable
+    else:
+        # Source install — pythonw.exe + this script
+        pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        script  = os.path.abspath(__file__)
+        exe     = f'"{pythonw}" "{script}"'
+
+    cmd = f'"{exe}"' if not exe.startswith('"') else exe
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
+                            winreg.KEY_READ | winreg.KEY_SET_VALUE) as k:
+            try:
+                current, _ = winreg.QueryValueEx(k, VALUE)
+                if current == cmd:
+                    return   # already set correctly
+            except FileNotFoundError:
+                pass   # value doesn't exist yet
+            winreg.SetValueEx(k, VALUE, 0, winreg.REG_SZ, cmd)
+            print(f"[App] Startup registry key set: {cmd}")
+    except Exception as e:
+        print(f"[App] Could not set startup registry: {e}")
+
+
 def main() -> None:
     if sys.platform == "win32":
         _ensure_single_instance()
+        _ensure_startup_registry()
         try:
             if not ctypes.windll.shell32.IsUserAnAdmin():
                 print("[App] Note: running without admin — some hotkeys may not work "

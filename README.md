@@ -1,10 +1,6 @@
 # FTC Whisper
 
-
-> **Install V1:  https://github.com/RJMURPHY0/FTC---Whisper/releases/latest/download/FTC-Whisper-Setup.exe
->
-> 
-> **Install V2: [https://github.com/RJMURPHY0/FTC_Whisper/releases/latest/download/FTC-Whisper-Setup.exe](https://github.com/RJMURPHY0/FTC_Whisper/releases/latest/download/FTC-Whisper-Setup.exe)**
+> **[⬇ Install FTC Whisper](https://github.com/RJMURPHY0/FTC_Whisper/releases/latest/download/FTC-Whisper-Setup.exe)**
 
 ---
 
@@ -121,7 +117,7 @@ Requires `anthropic_api_key` in `config.json`.
 Some elevated (admin) windows block hotkeys from non-admin processes. Try running the app as administrator.
 
 **First transcription is slow**  
-The Whisper model loads on first use (~5–15 s depending on model size). Subsequent transcriptions are fast.
+The Whisper model starts loading in the background as soon as the app opens. The first transcription may still take a few seconds while the model finishes loading; all subsequent ones are instant.
 
 **App doesn't appear after double-clicking the shortcut**  
 Check the system tray — the app runs minimised by default. Click the microphone icon → Open FTC Whisper.
