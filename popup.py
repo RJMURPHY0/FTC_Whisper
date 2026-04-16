@@ -751,26 +751,54 @@ class FloatingPopup:
         except Exception:
             return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
 
+    def _dpi_scale(self) -> tuple[float, float]:
+        """
+        Scale factors (sx, sy) from Win32 physical pixels → tkinter logical pixels.
+
+        Win32 GetMonitorInfoW / GetCursorPos return physical pixels for DPI-aware
+        processes and logical pixels for non-DPI-aware ones.  tkinter geometry()
+        always uses logical pixels.  Comparing SM_CXSCREEN (Win32 physical) with
+        winfo_screenwidth() (tkinter logical) gives the scale factor; if the
+        process is non-DPI-aware the two match and (1.0, 1.0) is returned.
+        """
+        try:
+            phys_w = ctypes.windll.user32.GetSystemMetrics(0)  # SM_CXSCREEN physical
+            phys_h = ctypes.windll.user32.GetSystemMetrics(1)  # SM_CYSCREEN physical
+            tk_w   = self.root.winfo_screenwidth()
+            tk_h   = self.root.winfo_screenheight()
+            if phys_w > 0 and phys_h > 0:
+                return tk_w / phys_w, tk_h / phys_h
+        except Exception:
+            pass
+        return 1.0, 1.0
+
     def _reposition(self, cx: int = 0, cy: int = 0, near_cursor: bool = False) -> None:
         self.root.update_idletasks()
         w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
 
-        # ALWAYS use tkinter's own screen dimensions for placement.
-        # GetMonitorInfoW returns Win32 physical pixels; tkinter's geometry()
-        # uses logical (DPI-scaled) pixels. On 125 % / 150 % displays these
-        # differ by the scale factor, shifting the popup to the wrong position.
-        # winfo_screenwidth/height always matches the coordinate system that
-        # geometry() uses — no DPI mismatch possible.
-        sw = self.root.winfo_screenwidth()
-        sh = self.root.winfo_screenheight()
+        # Use Win32 MonitorFromPoint to pick the correct monitor (multi-monitor
+        # aware — popup follows whichever screen the cursor is on).  Then scale
+        # the work-area from Win32 physical pixels to tkinter logical pixels so
+        # geometry() lands in the right place on any DPI configuration.
+        try:
+            left_p, top_p, right_p, bottom_p = self._get_monitor_workarea(cx, cy)
+            sx, sy = self._dpi_scale()
+            left   = round(left_p   * sx)
+            top    = round(top_p    * sy)
+            right  = round(right_p  * sx)
+            bottom = round(bottom_p * sy)
+        except Exception:
+            left, top, sx, sy = 0, 0, 1.0, 1.0
+            right  = self.root.winfo_screenwidth()
+            bottom = self.root.winfo_screenheight()
 
         if near_cursor and cx > 0 and cy > 0:
             gap = 28
-            x = max(0, min(cx - w // 2, sw - w))
-            y_below = cy + gap
-            y = y_below if y_below + h <= sh else max(0, cy - h - gap)
+            x   = max(left, min(round(cx * sx) - w // 2, right - w))
+            y_b = round(cy * sy) + gap
+            y   = y_b if y_b + h <= bottom else max(top, round(cy * sy) - h - gap)
         else:
-            # Fixed bottom-centre of the screen — consistent across all apps.
-            x = (sw - w) // 2
-            y = sh - h - 60   # 60 px above the taskbar
+            # Fixed bottom-centre of whichever monitor the cursor is on.
+            x = left + (right - left - w) // 2
+            y = bottom - h - 60   # 60 px above the taskbar
         self.root.geometry(f"+{x}+{y}")
