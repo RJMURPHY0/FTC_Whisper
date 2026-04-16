@@ -629,25 +629,106 @@ def _ensure_single_instance() -> None:
         pass
 
 
-def _ensure_startup_registry() -> None:
+def _ensure_startup_task() -> None:
     """
-    Add FTC Whisper to Windows startup (HKCU Run) so it launches when the user logs in.
-    Safe to call on every launch — only writes if the value is missing or stale.
-    Works for both the PyInstaller exe and the source (pythonw.exe app.py) installs.
+    Register FTC Whisper as a Task Scheduler logon task.
+
+    Task Scheduler is preferred over the HKCU Run registry key because:
+      - Tasks run earlier in the login sequence (before most tray apps)
+      - Not blocked by Windows Installer Detection (no UAC elevation prompt)
+      - We can set above-normal priority so Whisper loads before other startup apps
+      - More reliable — the scheduler retries on failure
+
+    Falls back to the registry key if schtasks is unavailable.
     """
+    import subprocess
+
+    TASK_NAME = "FTC Whisper"
+
+    if getattr(sys, "frozen", False):
+        exe_cmd = f'"{sys.executable}"'
+    else:
+        pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        script  = os.path.abspath(__file__)
+        exe_cmd = f'"{pythonw}" "{script}"'
+
+    # Check if the task already exists and points to the right exe
+    try:
+        result = subprocess.run(
+            ["schtasks", "/query", "/tn", TASK_NAME, "/fo", "LIST"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0 and sys.executable.lower() in result.stdout.lower():
+            return  # already registered correctly
+    except Exception:
+        pass
+
+    # Create / overwrite the task — ONLOGON, current user only, no elevation needed
+    xml = f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{os.environ.get("USERNAME", "")}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>6</Priority>
+  </Settings>
+  <Actions>
+    <Exec>
+      <Command>{sys.executable if getattr(sys, "frozen", False) else os.path.join(os.path.dirname(sys.executable), "pythonw.exe")}</Command>
+      {"" if getattr(sys, "frozen", False) else f"<Arguments>{os.path.abspath(__file__)}</Arguments>"}
+    </Exec>
+  </Actions>
+</Task>"""
+
+    try:
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".xml", delete=False, encoding="utf-16"
+        ) as tf:
+            tf.write(xml)
+            xml_path = tf.name
+
+        result = subprocess.run(
+            ["schtasks", "/create", "/tn", TASK_NAME, "/xml", xml_path, "/f"],
+            capture_output=True, text=True
+        )
+        os.unlink(xml_path)
+
+        if result.returncode == 0:
+            print(f"[App] Startup task registered (Task Scheduler): {exe_cmd}")
+        else:
+            raise RuntimeError(result.stderr.strip())
+
+    except Exception as e:
+        print(f"[App] Task Scheduler registration failed ({e}), falling back to registry")
+        _ensure_startup_registry_fallback()
+
+
+def _ensure_startup_registry_fallback() -> None:
+    """Registry Run key fallback — used only if Task Scheduler is unavailable."""
     import winreg
 
     RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    VALUE = "FTC Whisper"
+    VALUE   = "FTC Whisper"
 
-    # Determine our own executable path
     if getattr(sys, "frozen", False):
-        # PyInstaller bundle — use the exe itself
         exe = sys.executable
     else:
-        # Source install — pythonw.exe + this script
         pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-        script = os.path.abspath(__file__)
+        script  = os.path.abspath(__file__)
         exe = f'"{pythonw}" "{script}"'
 
     cmd = f'"{exe}"' if not exe.startswith('"') else exe
@@ -659,9 +740,9 @@ def _ensure_startup_registry() -> None:
             try:
                 current, _ = winreg.QueryValueEx(k, VALUE)
                 if current == cmd:
-                    return  # already set correctly
+                    return
             except FileNotFoundError:
-                pass  # value doesn't exist yet
+                pass
             winreg.SetValueEx(k, VALUE, 0, winreg.REG_SZ, cmd)
             print(f"[App] Startup registry key set: {cmd}")
     except Exception as e:
@@ -671,7 +752,17 @@ def _ensure_startup_registry() -> None:
 def main() -> None:
     if sys.platform == "win32":
         _ensure_single_instance()
-        _ensure_startup_registry()
+        _ensure_startup_task()
+        # Boost process to above-normal priority so Whisper model loads
+        # faster and hotkey response isn't delayed by competing startup apps.
+        try:
+            ABOVE_NORMAL_PRIORITY_CLASS = 0x00008000
+            ctypes.windll.kernel32.SetPriorityClass(
+                ctypes.windll.kernel32.GetCurrentProcess(),
+                ABOVE_NORMAL_PRIORITY_CLASS,
+            )
+        except Exception:
+            pass
         try:
             if not ctypes.windll.shell32.IsUserAnAdmin():
                 print(
