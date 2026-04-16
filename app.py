@@ -308,12 +308,27 @@ class WhisperFlowApp:
         self.app_window.update_status(
             state.value
         )  # "idle" / "recording" / "processing"
-        cx = getattr(self, "_rec_cursor_x", 0)
-        cy = getattr(self, "_rec_cursor_y", 0)
         if state == AppState.RECORDING:
+            # Capture cursor and foreground window RIGHT NOW, synchronously on the
+            # hotkey thread. _on_start_recording runs in a daemon thread and has
+            # NOT fired yet — reading _rec_cursor_x/y or _recording_hwnd here
+            # would return stale values from the previous recording session.
+            try:
+                hwnd = ctypes.windll.user32.GetForegroundWindow()
+                self._recording_hwnd = hwnd
+            except Exception:
+                hwnd = self._recording_hwnd
+            try:
+                pt = ctypes.wintypes.POINT()
+                ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+                cx, cy = pt.x, pt.y
+                self._rec_cursor_x, self._rec_cursor_y = cx, cy
+            except Exception:
+                cx = getattr(self, "_rec_cursor_x", 0)
+                cy = getattr(self, "_rec_cursor_y", 0)
             self.popup.show_status(
                 "Recording",
-                hwnd=self._recording_hwnd,
+                hwnd=hwnd,
                 recording=True,
                 cursor_x=cx,
                 cursor_y=cy,
@@ -327,8 +342,8 @@ class WhisperFlowApp:
                 "Transcribing…",
                 hwnd=self._recording_hwnd,
                 recording=False,
-                cursor_x=cx,
-                cursor_y=cy,
+                cursor_x=getattr(self, "_rec_cursor_x", 0),
+                cursor_y=getattr(self, "_rec_cursor_y", 0),
             )
         elif state == AppState.IDLE:
             self._mic_loop_running.clear()

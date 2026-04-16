@@ -122,10 +122,10 @@ class Transcriber:
             vad_filter=True,
             vad_parameters=dict(
                 min_silence_duration_ms=300,
-                threshold=0.30,
+                threshold=0.50,   # raised from 0.30 — filters headset background noise
                 speech_pad_ms=100,
             ),
-            no_speech_threshold=0.5,
+            no_speech_threshold=0.6,   # raised from 0.5 — fewer false positives
             condition_on_previous_text=False,
             temperature=0.0,
         )
@@ -141,11 +141,28 @@ class Transcriber:
             "[BLANK_AUDIO]",
             "[MUSIC]",
             "[SOUND]",
+            "[NOISE]",
+            "[INAUDIBLE]",
             "(music)",
             "(silence)",
+            "(Silence)",
+            "(applause)",
             "...",
+            "♪",
+            "Thank you for watching.",
+            "Thank you for watching!",
+            "Thanks for watching.",
+            "Thanks for watching!",
+            "Please subscribe.",
+            "Subtitles by",
+            "Transcribed by",
         ):
             text = text.replace(artifact, "")
+        # Strip lines that are just whitespace/punctuation after artifact removal
+        text = text.strip(" \t\n.,!")
+        # Whisper sometimes outputs a lone full stop on silence — discard it
+        if text in {".", "!", "?", ","}:
+            text = ""
         text = text.strip()
         if text and text[0].islower():
             text = text[0].upper() + text[1:]
