@@ -274,7 +274,7 @@ class Injector:
         # Respect config-driven injection mode:
         # - clipboard  : most universal for office/web/chat apps
         # - keystrokes : direct Win32/SendInput path first
-        # - auto       : direct first, clipboard last
+        # - auto       : clipboard first, then direct fallback
         if self.method == "clipboard":
             if self._clipboard_paste(text):
                 return True
@@ -287,10 +287,10 @@ class Injector:
             print("[Injector] Keystrokes mode fallback -> clipboard")
             return self._clipboard_paste(text)
 
-        if self._direct_inject(text):
+        if self._clipboard_paste(text):
             return True
-        print("[Injector] Auto mode fallback -> clipboard")
-        return self._clipboard_paste(text)
+        print("[Injector] Auto mode fallback -> direct methods")
+        return self._direct_inject(text)
 
     def _direct_inject(self, text: str) -> bool:
         cls = _get_fg_class()
@@ -329,7 +329,7 @@ class Injector:
         Works for any text length without subprocess overhead.
         """
         CF_UNICODETEXT = 13
-        GMEM_MOVEABLE  = 0x0002
+        GMEM_MOVEABLE = 0x0002
         u32 = ctypes.windll.user32
         k32 = ctypes.windll.kernel32
 
@@ -372,12 +372,14 @@ class Injector:
     @staticmethod
     def _clipboard_restore(original: str) -> None:
         """Restore the clipboard to *original* after a short delay."""
+
         def _do():
             time.sleep(0.5)
             try:
                 Injector._clipboard_set(original)
             except Exception:
                 pass
+
         threading.Thread(target=_do, daemon=True).start()
 
     def _clipboard_paste(self, text: str) -> bool:
@@ -388,17 +390,17 @@ class Injector:
         """
         try:
             VK_CTRL = 0x11
-            VK_V    = 0x56
+            VK_V = 0x56
             VK_MENU = 0x12
-            u32     = ctypes.windll.user32
+            u32 = ctypes.windll.user32
 
             original = self._clipboard_set(text)
-            time.sleep(0.15)   # let clipboard settle (was 0.10 — extra margin)
+            time.sleep(0.15)  # let clipboard settle (was 0.10 — extra margin)
 
             # Release Alt if still held — prevents Paste Special in Office
             if u32.GetAsyncKeyState(VK_MENU) & 0x8000:
                 inp = _Input(type=_INPUT_KEYBOARD)
-                inp.ki.wVk     = VK_MENU
+                inp.ki.wVk = VK_MENU
                 inp.ki.dwFlags = _KEYEVENTF_KEYUP
                 u32.SendInput(1, (_Input * 1)(inp), ctypes.sizeof(_Input))
                 time.sleep(0.05)
@@ -406,19 +408,24 @@ class Injector:
             # Also release Ctrl if held (prevents Ctrl+V being treated as Ctrl+Ctrl+V)
             if u32.GetAsyncKeyState(VK_CTRL) & 0x8000:
                 inp = _Input(type=_INPUT_KEYBOARD)
-                inp.ki.wVk     = VK_CTRL
+                inp.ki.wVk = VK_CTRL
                 inp.ki.dwFlags = _KEYEVENTF_KEYUP
                 u32.SendInput(1, (_Input * 1)(inp), ctypes.sizeof(_Input))
                 time.sleep(0.04)
 
             # Atomic Ctrl+V via SendInput (no interleaving with hardware events)
             ctrl_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL))
-            v_dn    = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_V))
-            v_up    = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_V,    dwFlags=_KEYEVENTF_KEYUP))
-            ctrl_up = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL, dwFlags=_KEYEVENTF_KEYUP))
+            v_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_V))
+            v_up = _Input(
+                type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_V, dwFlags=_KEYEVENTF_KEYUP)
+            )
+            ctrl_up = _Input(
+                type=_INPUT_KEYBOARD,
+                ki=_KbdInput(wVk=VK_CTRL, dwFlags=_KEYEVENTF_KEYUP),
+            )
             arr = (_Input * 4)(ctrl_dn, v_dn, v_up, ctrl_up)
             u32.SendInput(4, arr, ctypes.sizeof(_Input))
-            time.sleep(0.22)   # let app process the paste before restoring clipboard
+            time.sleep(0.22)  # let app process the paste before restoring clipboard
 
             self._clipboard_restore(original)
 
