@@ -20,6 +20,7 @@ for pkg in [
     'ctranslate2',
     'tokenizers',
     'sounddevice',
+    '_sounddevice_data',   # PortAudio DLL — sounddevice won't work without this
     'pystray',
     'PIL',
     'anthropic',
@@ -74,7 +75,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[os.path.join(APP_DIR, 'rthook_sounddevice.py')],
     # Exclude heavy packages not needed at runtime
     excludes=['torch', 'torchvision', 'torchaudio',
               'matplotlib', 'scipy', 'pandas', 'jupyter',

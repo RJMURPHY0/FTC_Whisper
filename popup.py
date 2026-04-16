@@ -306,43 +306,54 @@ class FloatingPopup:
             self._bar_ids.append(bid)
 
     def _animate_waveform(self) -> None:
-        """Called every 40 ms while recording — updates bar heights."""
+        """Called every 40 ms while recording — updates bar heights.
+
+        IMPORTANT: the try/except around the body is intentional and must stay.
+        In the PyInstaller frozen build (console=False) any unhandled exception
+        inside a tkinter after() callback is silently swallowed, which breaks
+        the after(40, ...) chain and freezes the bars permanently. Wrapping the
+        body ensures we always reschedule even if a single frame fails.
+        """
         if not self._waveform_running:
             return
 
-        level = self._mic_level
-        t     = time.time()
-        mid   = CANVAS_H // 2
+        try:
+            level = self._mic_level
+            t     = time.time()
+            mid   = CANVAS_H // 2
 
-        # Idle ceiling: bars oscillate up to 30 % of full height even in silence.
-        # Voice ceiling: bars can reach 100 % when speaking.
-        idle_max  = BAR_MIN_H + (BAR_MAX_H - BAR_MIN_H) * 0.30
+            # Idle ceiling: bars oscillate up to 30 % of full height even in silence.
+            # Voice ceiling: bars can reach 100 % when speaking.
+            idle_max = BAR_MIN_H + (BAR_MAX_H - BAR_MIN_H) * 0.30
 
-        for i, bid in enumerate(self._bar_ids):
-            phase = self._bar_phases[i]
+            for i, bid in enumerate(self._bar_ids):
+                phase = self._bar_phases[i]
 
-            # Gentle idle wave — always visible even with no microphone input
-            idle_osc = math.sin(t * 4.0 + phase) * 0.5 + 0.5        # 0 → 1
-            h_idle   = BAR_MIN_H + (idle_max - BAR_MIN_H) * idle_osc
+                # Gentle idle wave — always visible even with no microphone input
+                idle_osc = math.sin(t * 4.0 + phase) * 0.5 + 0.5        # 0 → 1
+                h_idle   = BAR_MIN_H + (idle_max - BAR_MIN_H) * idle_osc
 
-            # Voice spike — grows with mic level, faster oscillation per bar
-            voice_osc = math.sin(t * 10.0 + phase * 1.6) * 0.4 + 0.6  # 0.2 → 1.0
-            h_voice   = (BAR_MAX_H - idle_max) * level * voice_osc
+                # Voice spike — grows with mic level, faster oscillation per bar
+                voice_osc = math.sin(t * 10.0 + phase * 1.6) * 0.4 + 0.6  # 0.2 → 1.0
+                h_voice   = (BAR_MAX_H - idle_max) * level * voice_osc
 
-            h = max(BAR_MIN_H, min(BAR_MAX_H, h_idle + h_voice))
+                h = max(BAR_MIN_H, min(BAR_MAX_H, h_idle + h_voice))
 
-            x1 = i * (BAR_W + BAR_GAP)
-            x2 = x1 + BAR_W
-            # Always orange while recording so the waveform is always visible
-            self._wave_canvas.coords(bid, x1, mid - h / 2, x2, mid + h / 2)
-            self._wave_canvas.itemconfigure(bid, fill=CP["bar_active"])
+                x1 = i * (BAR_W + BAR_GAP)
+                x2 = x1 + BAR_W
+                # Always orange while recording so the waveform is always visible
+                self._wave_canvas.coords(bid, x1, mid - h / 2, x2, mid + h / 2)
+                self._wave_canvas.itemconfigure(bid, fill=CP["bar_active"])
 
-        # Update timer
-        if self._rec_start is not None:
-            elapsed = time.time() - self._rec_start
-            mins = int(elapsed) // 60
-            secs = elapsed % 60
-            self._timer_var.set(f"{mins:02d}:{secs:04.1f}")
+            # Update timer
+            if self._rec_start is not None:
+                elapsed = time.time() - self._rec_start
+                mins = int(elapsed) // 60
+                secs = elapsed % 60
+                self._timer_var.set(f"{mins:02d}:{secs:04.1f}")
+
+        except Exception:
+            pass  # never let a single-frame error kill the animation loop
 
         self.root.after(40, self._animate_waveform)
 
