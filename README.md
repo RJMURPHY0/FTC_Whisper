@@ -30,6 +30,7 @@ Built for Windows. Transcription runs **fully locally** using [faster-whisper](h
 1. [**Download FTC-Whisper.exe**](https://github.com/RJMURPHY0/FTC_Whisper/releases/latest/download/FTC-Whisper.exe)
 2. Double-click it — if Windows shows a SmartScreen warning, click **More info → Run anyway**
 3. The app starts immediately in your system tray
+4. **Auto-starts with Windows** — on first run the app registers itself as a Task Scheduler logon task, so it launches automatically every time you log in (with above-normal priority to load before Teams, OneDrive, etc.)
 
 ### Option 2 — Run from source (developers)
 
