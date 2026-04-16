@@ -9,8 +9,8 @@
   "sound_feedback": true,
   "auto_start": false,
   "anthropic_api_key": "",
-  "supabase_url": "",
-  "supabase_key": "",
+  "supabase_url": "https://mbxwqtsesxgpcfyicphs.supabase.co",
+  "supabase_key": "sb_publishable_KHH-r7opV8Rfqm2ioWBCfw_bt31cSUd",
   "supabase_email": "",
   "supabase_password": ""
 }

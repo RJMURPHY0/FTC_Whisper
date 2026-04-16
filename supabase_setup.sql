@@ -153,5 +153,5 @@ begin
     end;
 end $$;
 
--- Set your own user as admin (replace with your actual email):
--- update public.profiles set role = 'admin' where email = 'you@example.com';
+-- Grant admin role to the master account
+update public.profiles set role = 'admin' where email = 'ryan.murphy@ftc-ss.com';
