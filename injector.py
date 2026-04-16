@@ -25,6 +25,33 @@ import threading
 import time
 
 
+_u32 = ctypes.WinDLL("user32", use_last_error=True)
+_k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+_HGLOBAL = ctypes.c_void_p
+_LPVOID = ctypes.c_void_p
+
+_u32.OpenClipboard.argtypes = [ctypes.wintypes.HWND]
+_u32.OpenClipboard.restype = ctypes.wintypes.BOOL
+_u32.CloseClipboard.argtypes = []
+_u32.CloseClipboard.restype = ctypes.wintypes.BOOL
+_u32.EmptyClipboard.argtypes = []
+_u32.EmptyClipboard.restype = ctypes.wintypes.BOOL
+_u32.GetClipboardData.argtypes = [ctypes.c_uint]
+_u32.GetClipboardData.restype = _HGLOBAL
+_u32.SetClipboardData.argtypes = [ctypes.c_uint, _HGLOBAL]
+_u32.SetClipboardData.restype = _HGLOBAL
+
+_k32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+_k32.GlobalAlloc.restype = _HGLOBAL
+_k32.GlobalLock.argtypes = [_HGLOBAL]
+_k32.GlobalLock.restype = _LPVOID
+_k32.GlobalUnlock.argtypes = [_HGLOBAL]
+_k32.GlobalUnlock.restype = ctypes.wintypes.BOOL
+_k32.GlobalFree.argtypes = [_HGLOBAL]
+_k32.GlobalFree.restype = _HGLOBAL
+
+
 # ── Win32 constants ───────────────────────────────────────────────────────────
 
 _INPUT_KEYBOARD = 1
@@ -330,41 +357,47 @@ class Injector:
         """
         CF_UNICODETEXT = 13
         GMEM_MOVEABLE = 0x0002
-        u32 = ctypes.windll.user32
-        k32 = ctypes.windll.kernel32
-
         # ── Read previous content ──
         previous = ""
-        if u32.OpenClipboard(None):
+        if _u32.OpenClipboard(None):
             try:
-                h = u32.GetClipboardData(CF_UNICODETEXT)
+                h = _u32.GetClipboardData(CF_UNICODETEXT)
                 if h:
-                    ptr = k32.GlobalLock(h)
+                    ptr = _k32.GlobalLock(h)
                     if ptr:
                         previous = ctypes.wstring_at(ptr)
-                        k32.GlobalUnlock(h)
+                        _k32.GlobalUnlock(h)
             except Exception:
                 pass
             finally:
-                u32.CloseClipboard()
+                _u32.CloseClipboard()
 
         # ── Write new content ──
         encoded = (text + "\x00").encode("utf-16-le")
         for _attempt in range(5):
-            if u32.OpenClipboard(None):
+            if _u32.OpenClipboard(None):
                 try:
-                    u32.EmptyClipboard()
-                    h = k32.GlobalAlloc(GMEM_MOVEABLE, len(encoded))
-                    if h:
-                        ptr = k32.GlobalLock(h)
-                        ctypes.memmove(ptr, encoded, len(encoded))
-                        k32.GlobalUnlock(h)
-                        u32.SetClipboardData(CF_UNICODETEXT, h)
-                    return previous
+                    _u32.EmptyClipboard()
+                    h = _k32.GlobalAlloc(GMEM_MOVEABLE, len(encoded))
+                    if not h:
+                        continue
+
+                    ptr = _k32.GlobalLock(h)
+                    if not ptr:
+                        _k32.GlobalFree(h)
+                        continue
+
+                    ctypes.memmove(ptr, encoded, len(encoded))
+                    _k32.GlobalUnlock(h)
+
+                    if _u32.SetClipboardData(CF_UNICODETEXT, h):
+                        return previous
+
+                    _k32.GlobalFree(h)
                 except Exception:
                     pass
                 finally:
-                    u32.CloseClipboard()
+                    _u32.CloseClipboard()
             time.sleep(0.02)
 
         return previous
