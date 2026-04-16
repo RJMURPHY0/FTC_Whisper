@@ -222,21 +222,23 @@ class AuthManager:
         try:
             client = self._get_client()
             result = client.auth.sign_up({"email": email, "password": password})
+            print(f"[Auth] Sign-up result: user={result.user}, session={result.session}")
             if result.user:
                 if result.session:
                     self._user = result.user
                     self._save_session(result.session)
-                    return True, "Account created and logged in!"
-                return (
-                    True,
-                    "Account created. Check your email to confirm, then sign in.",
-                )
-            return False, "Sign-up failed: no user returned from server."
+                    return True, "Account created and signed in!"
+                # User created but email confirmation required
+                return True, "Account created — confirmation email sent."
+            return False, "Sign-up failed: no user returned. Please try again."
         except Exception as e:
             msg = str(e)
+            print(f"[Auth] Sign-up error: {msg}")
             if "already registered" in msg.lower() or "already exists" in msg.lower():
-                return False, "An account with this email already exists."
-            return False, f"Sign-up error: {msg}"
+                return False, "An account with that email already exists. Try signing in."
+            if "password" in msg.lower() and "weak" in msg.lower():
+                return False, "Password too weak — use at least 6 characters."
+            return False, f"Sign-up failed: {msg}"
 
     def sign_in(self, email: str, password: str) -> tuple[bool, str]:
         try:
@@ -248,17 +250,17 @@ class AuthManager:
                 self._user = result.user
                 self._save_session(result.session)
                 return True, f"Welcome back, {result.user.email}"
-            return False, "Invalid email or password."
+            return False, "Sign-in failed — please check your email and password."
         except Exception as e:
             msg = str(e)
-            if (
-                "email not confirmed" in msg.lower()
-                or "email_not_confirmed" in msg.lower()
-            ):
-                return False, "Please confirm your email before signing in."
-            if "invalid" in msg.lower() or "credentials" in msg.lower():
-                return False, "Invalid email or password."
-            return False, f"Sign-in error: {msg}"
+            print(f"[Auth] Sign-in error: {msg}")
+            if "email not confirmed" in msg.lower() or "email_not_confirmed" in msg.lower():
+                return False, "Email not confirmed — check your inbox and click the confirmation link first."
+            if "invalid" in msg.lower() or "credentials" in msg.lower() or "wrong" in msg.lower():
+                return False, "Incorrect email or password."
+            if "user not found" in msg.lower() or "no user" in msg.lower():
+                return False, "No account found with that email. Try Create Account."
+            return False, f"Sign-in failed: {msg}"
 
     def sign_out(self) -> None:
         try:

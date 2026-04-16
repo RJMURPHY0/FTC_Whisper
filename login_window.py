@@ -123,17 +123,21 @@ class LoginWindow:
         self._confirm_entry = self._entry(self._card, self._confirm_var, show="•")
         self._confirm_entry.pack(fill="x", pady=(4, 12))
 
-        # Status message
+        # Status message — hidden until needed
         self._status_var = tk.StringVar()
+        self._status_frame = tk.Frame(self._card, bg=C["surface"])
         self._status_lbl = tk.Label(
-            self._card,
+            self._status_frame,
             textvariable=self._status_var,
             fg=C["error"],
             bg=C["surface"],
-            font=("Segoe UI", 10),
+            font=("Segoe UI", 11, "bold"),
             wraplength=300,
+            justify="center",
+            pady=6,
         )
-        self._status_lbl.pack(pady=(0, 10))
+        self._status_lbl.pack(fill="x")
+        # Don't pack _status_frame yet — only shown when there's a message
 
         # Submit button
         self._submit_btn = tk.Label(
@@ -255,19 +259,27 @@ class LoginWindow:
 
     def _handle_result(self, ok: bool, msg: str) -> None:
         self._submit_btn.configure(bg=C["accent"], cursor="hand2")
+        print(f"[Login] ok={ok} msg={msg!r}")
+
         if ok and self._auth.is_authenticated:
-            self._set_status(msg, error=False)
-            self._root.after(600, self._finish)
+            self._set_status(f"✓  {msg}", error=False)
+            self._root.after(800, self._finish)
             return
 
         if ok and self._mode == "signup":
-            self._set_status(msg, error=False)
+            # Account created but email confirmation required
+            email = self._email_var.get().strip()
+            self._set_status(
+                f"✉  Confirmation email sent to {email}\n"
+                "Please check your inbox and confirm, then sign in.",
+                error=False,
+            )
             self._password_var.set("")
             self._confirm_var.set("")
             self._switch("login", clear_status=False)
             return
 
-        self._set_status(msg, error=True)
+        self._set_status(f"✕  {msg}", error=True)
 
     def _finish(self) -> None:
         self._root.destroy()
@@ -280,4 +292,9 @@ class LoginWindow:
 
     def _set_status(self, msg: str, error: bool = True) -> None:
         self._status_var.set(msg)
-        self._status_lbl.configure(fg=C["error"] if error else C["success"])
+        color = C["error"] if error else C["success"]
+        self._status_lbl.configure(fg=color)
+        self._status_frame.configure(bg=C["surface"])
+        self._status_lbl.configure(bg=C["surface"])
+        # Show the frame (may already be visible — pack is idempotent)
+        self._status_frame.pack(fill="x", pady=(0, 10), before=self._submit_btn)
