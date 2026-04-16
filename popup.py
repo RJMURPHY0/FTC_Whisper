@@ -754,18 +754,23 @@ class FloatingPopup:
     def _reposition(self, cx: int = 0, cy: int = 0, near_cursor: bool = False) -> None:
         self.root.update_idletasks()
         w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
-        left, top, right, bottom = self._get_monitor_workarea(cx, cy)
+
+        # ALWAYS use tkinter's own screen dimensions for placement.
+        # GetMonitorInfoW returns Win32 physical pixels; tkinter's geometry()
+        # uses logical (DPI-scaled) pixels. On 125 % / 150 % displays these
+        # differ by the scale factor, shifting the popup to the wrong position.
+        # winfo_screenwidth/height always matches the coordinate system that
+        # geometry() uses — no DPI mismatch possible.
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+
         if near_cursor and cx > 0 and cy > 0:
-            # Position the popup below the caret with a comfortable gap.
-            # If there isn't enough room below, flip it above.
             gap = 28
-            x = max(left, min(cx - w // 2, right - w))
+            x = max(0, min(cx - w // 2, sw - w))
             y_below = cy + gap
-            if y_below + h <= bottom:
-                y = y_below
-            else:
-                y = max(top, cy - h - gap)
+            y = y_below if y_below + h <= sh else max(0, cy - h - gap)
         else:
-            x = left + (right - left - w) // 2
-            y = bottom - h - 130
+            # Fixed bottom-centre of the screen — consistent across all apps.
+            x = (sw - w) // 2
+            y = sh - h - 60   # 60 px above the taskbar
         self.root.geometry(f"+{x}+{y}")

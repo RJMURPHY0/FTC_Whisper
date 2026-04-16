@@ -5,7 +5,7 @@
   "language": "en",
   "sample_rate": 16000,
   "input_device": "",
-  "inject_method": "clipboard",
+  "inject_method": "auto",
   "sound_feedback": true,
   "auto_start": false,
   "anthropic_api_key": "",
