@@ -27,6 +27,10 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Prepare build-time config (no secrets)
+        shell: pwsh
+        run: Copy-Item "config_default.json" "config.json" -Force
+
       - name: Build executable
         run: pyinstaller --noconfirm --clean "ftc_whisper.spec"
 

@@ -16,7 +16,6 @@ config.json
 
 # Runtime / generated files
 .ftc_pid
-logo.ico
 app_log.txt
 app_err.txt
 app_log_test.txt
