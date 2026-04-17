@@ -149,10 +149,12 @@ class FloatingPopup:
         self._target_hwnd = hwnd
         self._original_text = text
         self._current_result = None
-        # Use pre-captured position (from recording start) if provided,
-        # otherwise fall back to current mouse position
+        # If explicit cursor coords are provided (e.g. refine-selection flow where
+        # show_status was never called), also update _status_cx/cy so _enter_icon_mode
+        # and _expand_to_panel position the popup on the correct monitor.
         if cursor_x or cursor_y:
             self._cursor_x, self._cursor_y = cursor_x, cursor_y
+            self._status_cx, self._status_cy = cursor_x, cursor_y
         else:
             self._cursor_x, self._cursor_y = self._get_cursor_pos()
         if self.root:
@@ -206,6 +208,20 @@ class FloatingPopup:
 
         self._ready.set()
         self.root.mainloop()
+
+    def _set_no_activate(self, enabled: bool) -> None:
+        """Enable or disable WS_EX_NOACTIVATE on the popup window."""
+        try:
+            GWL_EXSTYLE      = -20
+            WS_EX_NOACTIVATE = 0x08000000
+            u32 = ctypes.windll.user32
+            style = u32.GetWindowLongW(self._popup_hwnd, GWL_EXSTYLE)
+            if enabled:
+                u32.SetWindowLongW(self._popup_hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE)
+            else:
+                u32.SetWindowLongW(self._popup_hwnd, GWL_EXSTYLE, style & ~WS_EX_NOACTIVATE)
+        except Exception:
+            pass
 
     def _show_no_activate(self) -> None:
         """
@@ -619,6 +635,7 @@ class FloatingPopup:
             frame.pack_forget()
 
     def _enter_status_mode(self, text: str, recording: bool = False) -> None:
+        self._set_no_activate(True)
         self._stop_waveform()
         self._hide_all_frames()
 
@@ -667,14 +684,13 @@ class FloatingPopup:
                 self._wave_canvas.itemconfigure(bid, fill=CP["bar_idle"])
 
     def _enter_icon_mode(self) -> None:
+        self._set_no_activate(True)
         self._stop_waveform()
         self._hide_all_frames()
         self._result_frame.pack_forget()
         self._ai_status.configure(text="")
         self._icon_frame.pack()
         self._mode = "icon"
-        # Use the same fixed bottom-centre position as the recording status pill
-        # so the badge always appears in a predictable, consistent location.
         self._reposition(self._status_cx, self._status_cy)
         self._show_no_activate()
         if self._inserted_ok:
@@ -683,6 +699,11 @@ class FloatingPopup:
             self._unregister_space_dismiss()
 
     def _expand_to_panel(self) -> None:
+        # Space should dismiss the small badge, but NOT the full refinement panel
+        # where the user may be typing in the Ask AI field.
+        self._unregister_space_dismiss()
+        # Remove WS_EX_NOACTIVATE so the Entry widget can receive keyboard focus
+        self._set_no_activate(False)
         self._hide_all_frames()
         self._result_frame.pack_forget()
         self._ai_status.configure(text="")
@@ -690,7 +711,10 @@ class FloatingPopup:
         self._refine_frame.pack()
         self._mode = "refinement"
         self._reposition(self._status_cx, self._status_cy)
-        self._show_no_activate()
+        # Activate the window so keyboard input works
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
 
     def _refresh_insert_status(self) -> None:
         if self._inserted_ok:
@@ -728,6 +752,7 @@ class FloatingPopup:
             self._space_hook = None
 
     def _do_hide(self) -> None:
+        self._set_no_activate(True)
         self._stop_waveform()
         self._unregister_space_dismiss()
         self._mode = None

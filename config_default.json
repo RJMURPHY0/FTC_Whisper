@@ -1,5 +1,6 @@
 {
   "hotkey": "alt+v",
+  "refine_hotkey": "alt+r",
   "mode": "hold",
   "whisper_model": "base.en",
   "language": "en",

@@ -61,22 +61,28 @@ class AppWindow:
         on_open_config: Callable,
         on_quit: Callable,
         on_hotkey_change: Callable,
+        on_refine_hotkey_change: Callable = None,
         db=None,
         hotkey: str = "alt+v",
+        refine_hotkey: str = "alt+r",
     ):
-        self._auth             = auth
-        self._on_authenticated = on_authenticated
-        self._on_sign_out      = on_sign_out
-        self._open_config_cb   = on_open_config
-        self._on_quit          = on_quit
-        self._on_hotkey_change = on_hotkey_change
-        self._db               = db
-        self._hotkey           = hotkey.upper()
+        self._auth                    = auth
+        self._on_authenticated        = on_authenticated
+        self._on_sign_out             = on_sign_out
+        self._open_config_cb          = on_open_config
+        self._on_quit                 = on_quit
+        self._on_hotkey_change        = on_hotkey_change
+        self._on_refine_hotkey_change = on_refine_hotkey_change
+        self._db                      = db
+        self._hotkey                  = hotkey.upper()
+        self._refine_hotkey           = refine_hotkey.upper()
         self._root: Optional[tk.Tk] = None
 
         # Hotkey recorder state
-        self._recording_hotkey = False
+        self._recording_hotkey        = False
         self._pending_hotkey: Optional[str] = None
+        self._recording_refine_hotkey = False
+        self._pending_refine_hotkey: Optional[str] = None
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -278,33 +284,31 @@ class AppWindow:
     # ── Hotkey tab ────────────────────────────────────────────────────────────
 
     def _build_hotkey_tab(self, parent: tk.Frame) -> None:
-        # Current shortcut card
-        cur = self._card(parent, margin=(0, 8))
+        # ── Dictation hotkey ─────────────────────────────────────────────────────
+        card1 = self._card(parent, margin=(0, 8))
 
-        tk.Label(cur, text="Current shortcut",
+        tk.Label(card1, text="Dictation shortcut",
                  fg=C["subtext"], bg=C["surface"],
                  font=("Segoe UI", 9), anchor="w").pack(fill="x")
 
-        self._hotkey_display_var = tk.StringVar(value=self._hotkey or "—")
         self._hotkey_display_lbl = tk.Label(
-            cur, textvariable=self._hotkey_display_var,
+            card1, text=self._hotkey or "ALT+V",
             fg=C["accent"], bg=C["surface"],
-            font=("Segoe UI", 22, "bold"), anchor="w",
+            font=("Segoe UI", 18, "bold"), anchor="w",
         )
-        self._hotkey_display_lbl.pack(fill="x", pady=(4, 0))
+        self._hotkey_display_lbl.pack(fill="x", pady=(2, 8))
 
-        # Recorder card
-        rec = self._card(parent, margin=(0, 0))
+        tk.Frame(card1, bg=C["border"], height=1).pack(fill="x", pady=(0, 10))
 
         self._hotkey_record_msg = tk.Label(
-            rec,
-            text="Click  Change Shortcut  then press any key\nor combination (e.g. F9, Alt+V).",
+            card1,
+            text="Press  Change Shortcut  then press any key combo (e.g. F9, Alt+V).",
             fg=C["subtext"], bg=C["surface"],
-            font=("Segoe UI", 9), justify="left", anchor="w",
+            font=("Segoe UI", 9), justify="left", anchor="w", wraplength=340,
         )
-        self._hotkey_record_msg.pack(fill="x", pady=(0, 12))
+        self._hotkey_record_msg.pack(fill="x", pady=(0, 8))
 
-        btn_row = tk.Frame(rec, bg=C["surface"])
+        btn_row = tk.Frame(card1, bg=C["surface"])
         btn_row.pack(fill="x")
 
         self._record_btn = self._surface_btn(
@@ -318,6 +322,44 @@ class AppWindow:
         )
         self._save_btn.pack(side="left")
 
+        # ── Refine selection hotkey ───────────────────────────────────────────────
+        card2 = self._card(parent, margin=(0, 8))
+
+        tk.Label(card2, text="Refine selection shortcut",
+                 fg=C["subtext"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
+
+        self._refine_hotkey_display_lbl = tk.Label(
+            card2, text=self._refine_hotkey or "ALT+R",
+            fg=C["accent"], bg=C["surface"],
+            font=("Segoe UI", 18, "bold"), anchor="w",
+        )
+        self._refine_hotkey_display_lbl.pack(fill="x", pady=(2, 8))
+
+        tk.Frame(card2, bg=C["border"], height=1).pack(fill="x", pady=(0, 10))
+
+        self._refine_record_msg = tk.Label(
+            card2,
+            text="Select text anywhere, then press this key to refine it with AI.",
+            fg=C["subtext"], bg=C["surface"],
+            font=("Segoe UI", 9), justify="left", anchor="w", wraplength=340,
+        )
+        self._refine_record_msg.pack(fill="x", pady=(0, 8))
+
+        btn_row2 = tk.Frame(card2, bg=C["surface"])
+        btn_row2.pack(fill="x")
+
+        self._refine_record_btn = self._surface_btn(
+            btn_row2, "Change Shortcut", self._toggle_refine_hotkey_recording)
+        self._refine_record_btn.pack(side="left", padx=(0, 8))
+
+        self._refine_save_btn = tk.Label(
+            btn_row2, text="Save",
+            fg=C["subtext"], bg=C["border"],
+            font=("Segoe UI", 10, "bold"), padx=14, pady=8,
+        )
+        self._refine_save_btn.pack(side="left")
+
     def _toggle_hotkey_recording(self) -> None:
         if self._recording_hotkey:
             self._stop_hotkey_recording(cancelled=True)
@@ -329,10 +371,10 @@ class AppWindow:
         self._pending_hotkey = None
         self._record_btn.configure(text="Cancel", bg=C["error"], fg=C["text"])
         self._hotkey_record_msg.configure(
-            text="Press your new key or combination…\n(Escape to cancel)",
+            text="Press your new key or combination… (Escape to cancel)",
             fg=C["accent"],
         )
-        self._hotkey_display_var.set("…")
+        self._hotkey_display_lbl.configure(text="…")
         self._root.focus_force()
         self._root.bind("<KeyPress>",   self._on_hk_keypress)
         self._root.bind("<KeyRelease>", self._on_hk_keyrelease)
@@ -356,7 +398,7 @@ class AppWindow:
         base = self._norm_keysym(keysym)
         combo = "+".join(mods + [base]) if mods else base
         self._pending_hotkey = combo
-        self._hotkey_display_var.set(combo.upper())
+        self._hotkey_display_lbl.configure(text=combo.upper())
         self._root.after(300, lambda: self._stop_hotkey_recording(cancelled=False))
         return "break"
 
@@ -371,16 +413,16 @@ class AppWindow:
                                    bg=C["surface"], fg=C["text"], cursor="hand2")
 
         if cancelled or not self._pending_hotkey:
-            self._hotkey_display_var.set(self._hotkey or "—")
+            self._hotkey_display_lbl.configure(text=self._hotkey or "—")
             self._hotkey_record_msg.configure(
-                text="Click  Change Shortcut  then press any key\nor combination (e.g. F9, Alt+V).",
+                text="Press  Change Shortcut  then press any key combo (e.g. F9, Alt+V).",
                 fg=C["subtext"],
             )
             self._save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
         else:
-            self._hotkey_display_var.set(self._pending_hotkey.upper())
+            self._hotkey_display_lbl.configure(text=self._pending_hotkey.upper())
             self._hotkey_record_msg.configure(
-                text=f"New shortcut: {self._pending_hotkey.upper()}\nClick Save to apply.",
+                text=f"New shortcut: {self._pending_hotkey.upper()} — Click Save to apply.",
                 fg=C["success"],
             )
             self._save_btn.configure(bg=C["accent"], cursor="hand2", fg=C["bg"])
@@ -393,7 +435,7 @@ class AppWindow:
             return
         new_hotkey = self._pending_hotkey
         self._hotkey = new_hotkey.upper()
-        self._hotkey_display_var.set(self._hotkey or "—")
+        self._hotkey_display_lbl.configure(text=self._hotkey or "—")
         if hasattr(self, "_home_hotkey_lbl"):
             self._home_hotkey_lbl.configure(text=self._hotkey or "—")
         self._pending_hotkey = None
@@ -406,6 +448,92 @@ class AppWindow:
         threading.Thread(
             target=self._on_hotkey_change, args=(new_hotkey,), daemon=True
         ).start()
+
+    # ── Refine hotkey recorder ────────────────────────────────────────────────
+
+    def _toggle_refine_hotkey_recording(self) -> None:
+        if self._recording_refine_hotkey:
+            self._stop_refine_hotkey_recording(cancelled=True)
+        else:
+            self._start_refine_hotkey_recording()
+
+    def _start_refine_hotkey_recording(self) -> None:
+        self._recording_refine_hotkey = True
+        self._pending_refine_hotkey = None
+        self._refine_record_btn.configure(text="Cancel", bg=C["error"], fg=C["text"])
+        self._refine_record_msg.configure(
+            text="Press your new key or combination… (Escape to cancel)",
+            fg=C["accent"],
+        )
+        self._refine_hotkey_display_lbl.configure(text="…")
+        self._root.focus_force()
+        self._root.bind("<KeyPress>",   self._on_refine_hk_keypress)
+        self._root.bind("<KeyRelease>", self._on_refine_hk_keyrelease)
+
+    def _on_refine_hk_keypress(self, event) -> str:
+        keysym = event.keysym.lower()
+        if keysym == "escape":
+            self._stop_refine_hotkey_recording(cancelled=True)
+            return "break"
+        if keysym in ("control_l", "control_r", "alt_l", "alt_r",
+                      "shift_l", "shift_r", "super_l", "super_r", "meta_l", "meta_r"):
+            return "break"
+        mods = []
+        if event.state & self._TK_CTRL:  mods.append("ctrl")
+        if event.state & self._TK_ALT:   mods.append("alt")
+        if event.state & self._TK_SHIFT: mods.append("shift")
+        base = self._norm_keysym(keysym)
+        combo = "+".join(mods + [base]) if mods else base
+        self._pending_refine_hotkey = combo
+        self._refine_hotkey_display_lbl.configure(text=combo.upper())
+        self._root.after(300, lambda: self._stop_refine_hotkey_recording(cancelled=False))
+        return "break"
+
+    def _on_refine_hk_keyrelease(self, event) -> None:
+        pass
+
+    def _stop_refine_hotkey_recording(self, cancelled: bool) -> None:
+        self._recording_refine_hotkey = False
+        self._root.unbind("<KeyPress>")
+        self._root.unbind("<KeyRelease>")
+        self._refine_record_btn.configure(
+            text="Change Shortcut", bg=C["surface"], fg=C["text"], cursor="hand2")
+
+        if cancelled or not self._pending_refine_hotkey:
+            self._refine_hotkey_display_lbl.configure(text=self._refine_hotkey or "—")
+            self._refine_record_msg.configure(
+                text="Select text anywhere, then press this key to refine it with AI.",
+                fg=C["subtext"],
+            )
+            self._refine_save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
+        else:
+            self._refine_hotkey_display_lbl.configure(text=self._pending_refine_hotkey.upper())
+            self._refine_record_msg.configure(
+                text=f"New shortcut: {self._pending_refine_hotkey.upper()} — Click Save to apply.",
+                fg=C["success"],
+            )
+            self._refine_save_btn.configure(bg=C["accent"], cursor="hand2", fg=C["bg"])
+            self._refine_save_btn.bind("<Button-1>", lambda _e: self._save_refine_hotkey())
+            self._refine_save_btn.bind("<Enter>",    lambda _e: self._refine_save_btn.configure(bg=C["accent_hover"]))
+            self._refine_save_btn.bind("<Leave>",    lambda _e: self._refine_save_btn.configure(bg=C["accent"]))
+
+    def _save_refine_hotkey(self) -> None:
+        if not self._pending_refine_hotkey:
+            return
+        new_hotkey = self._pending_refine_hotkey
+        self._refine_hotkey = new_hotkey.upper()
+        self._refine_hotkey_display_lbl.configure(text=self._refine_hotkey or "—")
+        self._pending_refine_hotkey = None
+        self._refine_save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
+        self._refine_save_btn.unbind("<Button-1>")
+        self._refine_record_msg.configure(
+            text=f"Shortcut updated to {self._refine_hotkey}.",
+            fg=C["success"],
+        )
+        if self._on_refine_hotkey_change:
+            threading.Thread(
+                target=self._on_refine_hotkey_change, args=(new_hotkey,), daemon=True
+            ).start()
 
     @staticmethod
     def _norm_keysym(keysym: str) -> str:

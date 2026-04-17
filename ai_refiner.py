@@ -8,43 +8,41 @@ import os
 from typing import Optional
 
 
+# Added to every prompt — prevents AI from adding bullet points, dashes, or markdown
+_NO_FORMAT = (
+    " Write in plain prose only. "
+    "Do not use bullet points, numbered lists, dashes, hyphens, asterisks, headers, "
+    "or any markdown formatting. Output flowing sentences and paragraphs."
+)
+
 REFINE_PROMPTS = {
     "punctuation": (
         "Fix the punctuation, capitalisation, and spacing in this transcribed speech. "
         "Correct obvious errors but keep the original wording and meaning intact. "
-        "Return only the corrected text, nothing else."
+        "Return only the corrected text, nothing else." + _NO_FORMAT
     ),
     "email": (
         "Rewrite this transcribed speech as a clear, professional email body. "
         "Add proper punctuation, structure sentences properly, and use a polished tone. "
-        "Return only the rewritten text, nothing else."
+        "Return only the rewritten email body, nothing else." + _NO_FORMAT
     ),
     "formal": (
         "Rewrite this transcribed speech in a formal, professional tone. "
-        "Fix grammar and punctuation. Return only the rewritten text, nothing else."
+        "Fix grammar and punctuation. Return only the rewritten text, nothing else." + _NO_FORMAT
     ),
     "casual": (
         "Rewrite this transcribed speech in a friendly, conversational tone. "
         "Keep it natural and fix any obvious transcription errors. "
-        "Return only the rewritten text, nothing else."
+        "Return only the rewritten text, nothing else." + _NO_FORMAT
     ),
     "concise": (
         "Rewrite this transcribed speech as concisely as possible while preserving the full meaning. "
-        "Fix punctuation. Return only the rewritten text, nothing else."
+        "Fix punctuation. Return only the rewritten text, nothing else." + _NO_FORMAT
     ),
     "prompt_optimiser": (
-        "You are Lyra, a master-level AI prompt optimization specialist. "
-        "Your mission: transform the user input below into a precision-crafted prompt that unlocks AI's full potential.\n\n"
-        "Apply the 4-D methodology:\n"
-        "1. DECONSTRUCT — extract core intent, key entities, context, output requirements\n"
-        "2. DIAGNOSE — identify clarity gaps, ambiguity, missing specificity\n"
-        "3. DEVELOP — select the optimal technique:\n"
-        "   • Creative → multi-perspective + tone emphasis\n"
-        "   • Technical → constraint-based + precision focus\n"
-        "   • Educational → few-shot examples + clear structure\n"
-        "   • Complex → chain-of-thought + systematic frameworks\n"
-        "4. DELIVER — output only the final optimized prompt, ready to paste directly into any AI.\n\n"
-        "Return only the optimized prompt text, nothing else. No explanation, no preamble."
+        "You are a prompt optimisation specialist. "
+        "Transform the text below into a clear, precise prompt ready to paste into any AI. "
+        "Preserve the intent exactly. Return only the optimised prompt text, nothing else." + _NO_FORMAT
     ),
 }
 
@@ -98,6 +96,12 @@ class AIRefiner:
             message = client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=1024,
+                system=(
+                    "You are a text refinement assistant. "
+                    "Always respond with plain prose only — no bullet points, no numbered lists, "
+                    "no dashes, no hyphens at the start of lines, no asterisks, no markdown, "
+                    "no headers. Write in flowing sentences and paragraphs."
+                ),
                 messages=[
                     {
                         "role": "user",

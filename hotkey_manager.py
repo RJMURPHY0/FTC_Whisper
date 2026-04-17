@@ -413,3 +413,133 @@ class HotkeyManager:
         self._parse_hotkey(self.hotkey)
         self.register()
         print(f"[HotkeyManager] Hotkey updated to '{self.hotkey}'")
+
+
+# ---------------------------------------------------------------------------
+# TriggerHotkeyManager — simple one-shot hotkey (fires on press, no hold/release)
+# Uses Win32 RegisterHotKey with HOTKEY_ID=2, coexists with HotkeyManager's ID=1.
+# ---------------------------------------------------------------------------
+
+class TriggerHotkeyManager:
+    """Fires on_trigger once each time the hotkey is pressed.
+
+    Designed for actions like "refine selection" where hold/release semantics
+    are not needed.  Uses Win32 RegisterHotKey (HOTKEY_ID=2) so the combo is
+    captured at the OS level without low-level hooks.
+    """
+
+    def __init__(
+        self,
+        hotkey: str = "alt+r",
+        on_trigger: Optional[Callable] = None,
+    ):
+        self.hotkey = hotkey.lower()
+        self.on_trigger = on_trigger
+        self._registered = False
+        self._hotkey_thread_id: int = 0
+        self._msg_loop_thread: Optional[threading.Thread] = None
+        self._loop_ready = threading.Event()
+        self._win32_ok = False
+        self._kb_hooks: list = []
+        self._parse_hotkey(self.hotkey)
+
+    def _parse_hotkey(self, hotkey: str) -> None:
+        parts = [p.strip() for p in hotkey.split("+")]
+        self._base_key = parts[-1]
+        self._modifiers = parts[:-1]
+        self._is_combo = len(self._modifiers) > 0
+
+    def _fire(self) -> None:
+        if self.on_trigger:
+            threading.Thread(target=self.on_trigger, daemon=True).start()
+
+    def _message_loop(self, mods: int, vk: int) -> None:
+        HOTKEY_ID = 2
+        if not _user32.RegisterHotKey(None, HOTKEY_ID, mods, vk):
+            err = ctypes.GetLastError()
+            print(
+                f"[TriggerHotkeyManager] RegisterHotKey failed (error {err}) — "
+                "is another app using this combo?"
+            )
+            self._win32_ok = False
+            self._loop_ready.set()
+            return
+
+        self._win32_ok = True
+        self._hotkey_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
+        self._loop_ready.set()
+        print(f"[TriggerHotkeyManager] Win32 hotkey active (mods={mods:#x}, vk={vk:#x})")
+
+        msg = _wt.MSG()
+        while _user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            if msg.message == _WM_HOTKEY and msg.wParam == HOTKEY_ID:
+                self._fire()
+
+        _user32.UnregisterHotKey(None, HOTKEY_ID)
+        self._hotkey_thread_id = 0
+        self._win32_ok = False
+
+    def register(self) -> None:
+        if self._registered:
+            return
+        self._kb_hooks = []
+        registered = False
+
+        if self._is_combo:
+            mods = _MOD_NOREPEAT
+            for m in self._modifiers:
+                mods |= _MOD_FLAGS.get(m, 0)
+            vk = _vk_code(self._base_key)
+            if vk:
+                self._loop_ready.clear()
+                self._hotkey_thread_id = 0
+                self._win32_ok = False
+                self._msg_loop_thread = threading.Thread(
+                    target=self._message_loop,
+                    args=(mods, vk),
+                    daemon=True,
+                    name="refine-hotkey-win32",
+                )
+                self._msg_loop_thread.start()
+                if not self._loop_ready.wait(timeout=3.0):
+                    print("[TriggerHotkeyManager] Warning: message loop did not start in time")
+                    return
+                registered = self._win32_ok
+            else:
+                self._kb_hooks.append(
+                    kb.on_press_key(self._base_key, lambda _e: self._fire())
+                )
+                registered = True
+        else:
+            self._kb_hooks.append(
+                kb.on_press_key(self._base_key, lambda _e: self._fire())
+            )
+            registered = True
+
+        self._registered = registered
+        if registered:
+            print(f"[TriggerHotkeyManager] Registered '{self.hotkey}'")
+
+    def unregister(self) -> None:
+        if not self._registered:
+            return
+        for h in self._kb_hooks:
+            try:
+                kb.unhook(h)
+            except Exception:
+                pass
+        self._kb_hooks = []
+        if self._hotkey_thread_id:
+            _user32.PostThreadMessageW(self._hotkey_thread_id, _WM_QUIT, 0, 0)
+        if self._msg_loop_thread:
+            self._msg_loop_thread.join(timeout=2.0)
+            self._msg_loop_thread = None
+        self._registered = False
+        print("[TriggerHotkeyManager] Unregistered")
+
+    def update_hotkey(self, new_hotkey: str) -> None:
+        self.unregister()
+        self.hotkey = new_hotkey.lower()
+        self._parse_hotkey(self.hotkey)
+        self.register()
+        print(f"[TriggerHotkeyManager] Hotkey updated to '{self.hotkey}'")

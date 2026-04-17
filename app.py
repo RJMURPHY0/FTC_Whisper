@@ -23,7 +23,7 @@ from config import Config
 from recorder import Recorder
 from transcriber import Transcriber
 from injector import Injector
-from hotkey_manager import HotkeyManager, AppState
+from hotkey_manager import HotkeyManager, TriggerHotkeyManager, AppState
 from feedback import Feedback
 from tray import TrayApp
 from popup import FloatingPopup
@@ -73,8 +73,10 @@ class WhisperFlowApp:
             on_open_config=self._open_config,
             on_quit=self._shutdown,
             on_hotkey_change=self._on_hotkey_change,
+            on_refine_hotkey_change=self._on_refine_hotkey_change,
             db=self.db,
             hotkey=config.hotkey,
+            refine_hotkey=config.refine_hotkey,
         )
 
         self.tray = TrayApp(
@@ -103,6 +105,11 @@ class WhisperFlowApp:
             on_stop_recording=self._on_stop_recording,
             on_cancel_recording=self._on_cancel_recording,
             on_state_change=self._on_state_change,
+        )
+
+        self.refine_hotkey_manager = TriggerHotkeyManager(
+            hotkey=config.refine_hotkey,
+            on_trigger=self._on_refine_selection,
         )
 
         # ── Pre-load Whisper model immediately in background ───────────
@@ -160,9 +167,11 @@ class WhisperFlowApp:
         self.transcriber.load_model()
         print("[App] Ready! Hold the hotkey and start speaking.")
 
-        # Register global hotkey
+        # Register global hotkeys
         self.hotkey_manager.register()
+        self.refine_hotkey_manager.register()
         print(f"[App] Hotkey: '{self.config.hotkey}' | Mode: {self.config.mode}")
+        print(f"[App] Refine hotkey: '{self.config.refine_hotkey}'")
 
         # Start tray in daemon thread (safe on Windows)
         threading.Thread(target=self.tray.run, daemon=True, name="tray").start()
@@ -173,6 +182,13 @@ class WhisperFlowApp:
         self.config.hotkey = new_hotkey
         self.config.save()
         self.hotkey_manager.update_hotkey(new_hotkey)
+
+    def _on_refine_hotkey_change(self, new_hotkey: str) -> None:
+        """Called when the user saves a new refine hotkey in the dashboard."""
+        print(f"[App] Updating refine hotkey to: {new_hotkey}")
+        self.config.refine_hotkey = new_hotkey
+        self.config.save()
+        self.refine_hotkey_manager.update_hotkey(new_hotkey)
 
     # ------------------------------------------------------------------
     # Recording pipeline
@@ -568,6 +584,107 @@ class WhisperFlowApp:
         if original_text:
             self.db.log_refinement(original_text, new_text, "replace")
 
+    def _on_refine_selection(self) -> None:
+        """Fires when the refine-selection hotkey is pressed.
+        Copies selected text via Ctrl+C, then shows the AI refinement popup."""
+        # Skip if we're currently recording
+        if self.hotkey_manager.state != AppState.IDLE:
+            return
+
+        # Capture target window and cursor position before we do anything
+        try:
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+        except Exception:
+            hwnd = 0
+        try:
+            pt = ctypes.wintypes.POINT()
+            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+            cx, cy = pt.x, pt.y
+        except Exception:
+            cx, cy = 0, 0
+
+        # Don't trigger if our own popup is focused
+        if hwnd and hwnd == self.popup._popup_hwnd:
+            return
+
+        # Use the injector's properly typed ctypes structs so 64-bit handles
+        # are never truncated.  The injector already imports and types everything.
+        from injector import _Input, _KbdInput, _INPUT_KEYBOARD, _KEYEVENTF_KEYUP
+
+        u32 = ctypes.windll.user32
+
+        # Release any modifier keys still physically held from the hotkey press.
+        # Without this, the Ctrl+C we send arrives as Alt+Ctrl+C and apps ignore it.
+        release_events = []
+        for vk in (0xA4, 0xA5, 0x12, 0xA2, 0xA3, 0x11):  # LAlt, RAlt, Alt, LCtrl, RCtrl, Ctrl
+            if u32.GetAsyncKeyState(vk) & 0x8000:
+                inp = _Input(type=_INPUT_KEYBOARD)
+                inp.ki.wVk = vk
+                inp.ki.dwFlags = _KEYEVENTF_KEYUP
+                release_events.append(inp)
+        if release_events:
+            arr = (_Input * len(release_events))(*release_events)
+            u32.SendInput(len(release_events), arr, ctypes.sizeof(_Input))
+        time.sleep(0.08)
+
+        # Send Ctrl+C via SendInput — same technique injector uses for Ctrl+V
+        VK_CTRL, VK_C = 0x11, 0x43
+        ctrl_dn  = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL))
+        c_dn     = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_C))
+        c_up     = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_C,    dwFlags=_KEYEVENTF_KEYUP))
+        ctrl_up  = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL, dwFlags=_KEYEVENTF_KEYUP))
+        arr = (_Input * 4)(ctrl_dn, c_dn, c_up, ctrl_up)
+        u32.SendInput(4, arr, ctypes.sizeof(_Input))
+        time.sleep(0.30)  # give Word / browser time to update the clipboard
+
+        text = self._read_clipboard().strip()
+        if not text:
+            print("[App] Refine selection: nothing selected or clipboard empty")
+            return
+
+        print(f"[App] Refine selection: '{text[:60]}' ({len(text)} chars)")
+
+        # on_replace: focus original window and paste (replaces the still-selected text)
+        def _do_replace(new_text: str, _hwnd: int = hwnd) -> None:
+            time.sleep(0.25)
+            self._focus_window(_hwnd)
+            self.injector.inject(new_text)
+            print(f"[App] Refine selection replaced: {len(new_text)} chars")
+
+        self.popup.show_cursor_icon(
+            text,
+            on_insert=lambda t=text, h=hwnd: self._insert_text(t, h),
+            on_replace=_do_replace,
+            inserted=True,
+            hwnd=hwnd,
+            cursor_x=cx,
+            cursor_y=cy,
+        )
+
+    def _read_clipboard(self) -> str:
+        """Read text from clipboard using the same properly typed ctypes as the injector
+        (handles 64-bit HGLOBAL pointers correctly — plain ctypes.windll truncates them)."""
+        from injector import _u32, _k32
+        CF_UNICODETEXT = 13
+        if not _u32.OpenClipboard(None):
+            return ""
+        try:
+            h = _u32.GetClipboardData(CF_UNICODETEXT)
+            if not h:
+                return ""
+            ptr = _k32.GlobalLock(h)
+            if not ptr:
+                return ""
+            try:
+                return ctypes.wstring_at(ptr)
+            finally:
+                _k32.GlobalUnlock(h)
+        except Exception as e:
+            print(f"[App] Clipboard read error: {e}")
+            return ""
+        finally:
+            _u32.CloseClipboard()
+
     def _open_config(self) -> None:
         config_path = self.config._config_path
         if os.path.exists(config_path):
@@ -579,6 +696,7 @@ class WhisperFlowApp:
         self._auth.sign_out()
         self._restart_for_reauth = True
         self.hotkey_manager.unregister()
+        self.refine_hotkey_manager.unregister()
         if self.recorder.is_recording:
             self.recorder.stop()
         self.db.set_user(None)
@@ -590,6 +708,7 @@ class WhisperFlowApp:
     def _shutdown(self) -> None:
         print("[App] Shutting down...")
         self.hotkey_manager.unregister()
+        self.refine_hotkey_manager.unregister()
         if self.recorder.is_recording:
             self.recorder.stop()
 

@@ -42,6 +42,7 @@ class Config:
     """Application configuration with defaults."""
 
     hotkey: str = "alt+v"
+    refine_hotkey: str = "alt+r"
     mode: str = "hold"  # "hold" or "toggle"
     whisper_model: str = "base"  # tiny, base, small, medium, large-v3
     language: str = "en"
