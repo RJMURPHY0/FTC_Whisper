@@ -532,16 +532,34 @@ class FloatingPopup:
             fill="x", pady=(4, 8)
         )
 
-        self._result_text = tk.Label(
-            self._result_frame,
-            text="",
+        # Scrollable text area — shows full result no matter how long,
+        # capped at 8 lines tall then scrolls.
+        txt_frame = tk.Frame(self._result_frame, bg=CP["bg"])
+        txt_frame.pack(fill="x", anchor="w")
+
+        self._result_text = tk.Text(
+            txt_frame,
             fg=CP["subtext"],
             bg=CP["bg"],
             font=("Segoe UI", 12),
-            wraplength=520,
-            justify="left",
+            wrap="word",
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            width=52,
+            height=4,       # initial height — grows up to 8 lines
+            state="disabled",
+            cursor="arrow",
         )
-        self._result_text.pack(anchor="w")
+        self._result_scrollbar = tk.Scrollbar(
+            txt_frame, orient="vertical",
+            command=self._result_text.yview,
+            bg=CP["btn_bg"], troughcolor=CP["bg"],
+            activebackground=CP["accent"],
+            highlightthickness=0, bd=0,
+        )
+        self._result_text.configure(yscrollcommand=self._result_scrollbar.set)
+        self._result_text.pack(side="left", fill="x", expand=True)
 
         btn_row = tk.Frame(self._result_frame, bg=CP["bg"])
         btn_row.pack(fill="x", pady=(8, 0))
@@ -792,8 +810,23 @@ class FloatingPopup:
         self._ai_busy = False
         self._current_result = text
         self._ai_status.configure(text="")
-        display = text if len(text) <= 140 else text[:137] + "…"
-        self._result_text.configure(text=display)
+
+        # Write full text into the scrollable widget
+        self._result_text.configure(state="normal")
+        self._result_text.delete("1.0", "end")
+        self._result_text.insert("1.0", text)
+        self._result_text.configure(state="disabled")
+
+        # Auto-size height: grow up to 8 lines, then scroll
+        line_count = int(self._result_text.index("end-1c").split(".")[0])
+        self._result_text.configure(height=min(max(line_count, 2), 8))
+
+        # Show scrollbar only when text exceeds visible area
+        if line_count > 8:
+            self._result_scrollbar.pack(side="right", fill="y")
+        else:
+            self._result_scrollbar.pack_forget()
+
         self._result_frame.pack(fill="x")
         self._reposition(self._status_cx, self._status_cy)
 
