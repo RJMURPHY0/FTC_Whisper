@@ -539,7 +539,7 @@ class FloatingPopup:
             f, text="", fg=CP["accent"], bg=CP["bg"],
             font=("Segoe UI", 10, "italic"),
         )
-        self._ai_status.pack(anchor="w")
+        # Not packed initially — shown only when there is content to display
 
         # ── Result area ───────────────────────────────────────────────────────
         self._result_frame = tk.Frame(f, bg=CP["bg"])
@@ -689,6 +689,7 @@ class FloatingPopup:
         self._hide_all_frames()
         self._result_frame.pack_forget()
         self._ai_status.configure(text="")
+        self._ai_status.pack_forget()
         self._icon_frame.pack()
         self._mode = "icon"
         self._reposition(self._status_cx, self._status_cy)
@@ -757,6 +758,9 @@ class FloatingPopup:
         self._unregister_space_dismiss()
         self._mode = None
         self._ai_busy = False
+        self._ai_status.configure(text="")
+        self._ai_status.pack_forget()
+        self._result_frame.pack_forget()
         self._hide_all_frames()
         self.root.withdraw()
 
@@ -795,6 +799,7 @@ class FloatingPopup:
             return
         self._ai_busy = True
         self._ai_status.configure(text=f"✦  Refining ({mode})…")
+        self._ai_status.pack(anchor="w")
         self._result_frame.pack_forget()
         text = self._original_text
 
@@ -818,6 +823,7 @@ class FloatingPopup:
             return
         self._ai_busy = True
         self._ai_status.configure(text=f"✦  Asking AI…")
+        self._ai_status.pack(anchor="w")
         self._result_frame.pack_forget()
         text = self._original_text
         custom_prompt = (
@@ -835,6 +841,7 @@ class FloatingPopup:
         self._ai_busy = False
         self._current_result = text
         self._ai_status.configure(text="")
+        self._ai_status.pack_forget()  # hide spinner row — no blank gap
 
         # Write full text into the scrollable widget
         self._result_text.configure(state="normal")

@@ -1,0 +1,57 @@
+=== refine_selection fired ===
+hwnd=0x3168c popup_hwnd=0x0 cursor=(307,430)
+clipboard cleared
+SendInput Ctrl+C sent=4
+  clipboard attempt 1: empty
+  clipboard attempt 2: empty
+  clipboard attempt 3: empty
+  clipboard attempt 4: empty
+  clipboard attempt 5: empty
+  clipboard attempt 6: empty
+  clipboard attempt 7: empty
+  clipboard attempt 8: empty
+  clipboard attempt 9: empty
+  clipboard attempt 10: empty
+no text — aborting
+=== refine_selection fired ===
+hwnd=0x3168c popup_hwnd=0x0 cursor=(315,428)
+clipboard cleared
+SendInput Ctrl+C sent=4
+  clipboard attempt 1: empty
+  clipboard attempt 2: empty
+  clipboard attempt 3: empty
+  clipboard attempt 4: empty
+  clipboard attempt 5: empty
+  clipboard attempt 6: empty
+  clipboard attempt 7: empty
+  clipboard attempt 8: empty
+  clipboard attempt 9: empty
+  clipboard attempt 10: empty
+no text — aborting
+=== refine_selection fired ===
+hwnd=0x3168c popup_hwnd=0x0 cursor=(308,422)
+clipboard cleared
+SendInput Ctrl+C sent=4
+  clipboard attempt 1: empty
+  clipboard attempt 2: empty
+  clipboard attempt 3: empty
+  clipboard attempt 4: empty
+  clipboard attempt 5: empty
+  clipboard attempt 6: empty
+  clipboard attempt 7: empty
+  clipboard attempt 8: empty
+  clipboard attempt 9: empty
+  clipboard attempt 10: empty
+no text — aborting
+[11:11:39] === refine_selection fired ===
+[11:11:39] Target hwnd=0x3168c
+[11:11:39] clipboard cleared
+[11:11:39] Sending WM_COPY to child=0x216ae
+[11:11:40] Captured text: 292 chars
+[11:12:08] _do_replace: 329 chars -> hwnd=0x3168c
+[11:12:09] replaced: 329 chars injected
+[11:12:23] === refine_selection fired ===
+[11:12:23] Target hwnd=0x3168c
+[11:12:24] clipboard cleared
+[11:12:24] Sending WM_COPY to child=0x216ae
+[11:12:24] Captured text: 260 chars

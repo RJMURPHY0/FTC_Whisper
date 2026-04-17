@@ -585,85 +585,102 @@ class WhisperFlowApp:
             self.db.log_refinement(original_text, new_text, "replace")
 
     def _on_refine_selection(self) -> None:
-        """Fires when the refine-selection hotkey is pressed.
-        Copies selected text via Ctrl+C, then shows the AI refinement popup."""
-        # Skip if we're currently recording
-        if self.hotkey_manager.state != AppState.IDLE:
-            return
+        """Fires when the refine-selection hotkey is pressed."""
+        import traceback
+        _log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "refine_debug.log")
 
-        # Capture target window and cursor position before we do anything
+        def _dbg(msg):
+            try:
+                with open(_log, "a", encoding="utf-8") as _f:
+                    _f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+            except Exception:
+                pass
+
         try:
+            _dbg("=== refine_selection fired ===")
+            if self.hotkey_manager.state != AppState.IDLE:
+                _dbg("skip: not idle")
+                return
+
+            # 1. Capture target window immediately
             hwnd = ctypes.windll.user32.GetForegroundWindow()
-        except Exception:
-            hwnd = 0
-        try:
+            _dbg(f"Target hwnd={hwnd:#x}")
+
+            if hwnd and hwnd == self.popup._popup_hwnd:
+                _dbg("skip: popup is foreground")
+                return
+
+            # Capture cursor pos
             pt = ctypes.wintypes.POINT()
             ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
             cx, cy = pt.x, pt.y
+
+            # 2. Force focus to target before copying
+            self._focus_window(hwnd)
+            time.sleep(0.1)
+
+            from injector import _Input, _KbdInput, _INPUT_KEYBOARD, _KEYEVENTF_KEYUP, _u32, _get_focused_child
+            u32 = ctypes.windll.user32
+
+            # Clear clipboard
+            if _u32.OpenClipboard(None):
+                _u32.EmptyClipboard()
+                _u32.CloseClipboard()
+                _dbg("clipboard cleared")
+
+            # Try WM_COPY
+            WM_COPY = 0x0301
+            child = _get_focused_child(hwnd)
+            _dbg(f"Sending WM_COPY to child={child:#x}")
+            u32.SendMessageW(child, WM_COPY, 0, 0)
+            time.sleep(0.15)
+            text = self._read_clipboard().strip()
+
+            if not text:
+                _dbg("WM_COPY empty, trying Ctrl+C")
+                VK_CTRL, VK_C = 0x11, 0x43
+                ctrl_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL))
+                c_dn    = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_C))
+                c_up    = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_C, dwFlags=_KEYEVENTF_KEYUP))
+                ctrl_up = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL, dwFlags=_KEYEVENTF_KEYUP))
+                u32.SendInput(4, (_Input * 4)(ctrl_dn, c_dn, c_up, ctrl_up), ctypes.sizeof(_Input))
+                for _ in range(10):
+                    time.sleep(0.05)
+                    text = self._read_clipboard().strip()
+                    if text: break
+
+            if not text:
+                _dbg("No text captured, aborting")
+                return
+
+            _dbg(f"Captured text: {len(text)} chars")
+
+            # _do_replace: put refined text in clipboard and Ctrl+V over the selection
+            def _do_replace(new_text: str, _hwnd: int = hwnd) -> None:
+                _dbg(f"_do_replace: {len(new_text)} chars -> hwnd={_hwnd:#x}")
+                time.sleep(0.25)  # let popup withdraw so focus returns to target
+                self._focus_window(_hwnd)
+                time.sleep(0.1)
+                # injector puts new_text in clipboard and sends Ctrl+V,
+                # which replaces the currently-selected text in virtually all apps.
+                self.injector.inject(new_text)
+                _dbg(f"replaced: {len(new_text)} chars injected")
+
+            self.popup.show_cursor_icon(
+                text,
+                on_insert=lambda t=text, h=hwnd: self._insert_text(t, h),
+                on_replace=_do_replace,
+                inserted=True,
+                hwnd=hwnd,
+                cursor_x=cx,
+                cursor_y=cy,
+            )
+
         except Exception:
-            cx, cy = 0, 0
-
-        # Don't trigger if our own popup is focused
-        if hwnd and hwnd == self.popup._popup_hwnd:
-            return
-
-        # Use the injector's properly typed ctypes structs so 64-bit handles
-        # are never truncated.  The injector already imports and types everything.
-        from injector import _Input, _KbdInput, _INPUT_KEYBOARD, _KEYEVENTF_KEYUP
-
-        u32 = ctypes.windll.user32
-
-        # Release any modifier keys still physically held from the hotkey press.
-        # Without this, the Ctrl+C we send arrives as Alt+Ctrl+C and apps ignore it.
-        release_events = []
-        for vk in (0xA4, 0xA5, 0x12, 0xA2, 0xA3, 0x11):  # LAlt, RAlt, Alt, LCtrl, RCtrl, Ctrl
-            if u32.GetAsyncKeyState(vk) & 0x8000:
-                inp = _Input(type=_INPUT_KEYBOARD)
-                inp.ki.wVk = vk
-                inp.ki.dwFlags = _KEYEVENTF_KEYUP
-                release_events.append(inp)
-        if release_events:
-            arr = (_Input * len(release_events))(*release_events)
-            u32.SendInput(len(release_events), arr, ctypes.sizeof(_Input))
-        time.sleep(0.08)
-
-        # Send Ctrl+C via SendInput — same technique injector uses for Ctrl+V
-        VK_CTRL, VK_C = 0x11, 0x43
-        ctrl_dn  = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL))
-        c_dn     = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_C))
-        c_up     = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_C,    dwFlags=_KEYEVENTF_KEYUP))
-        ctrl_up  = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL, dwFlags=_KEYEVENTF_KEYUP))
-        arr = (_Input * 4)(ctrl_dn, c_dn, c_up, ctrl_up)
-        u32.SendInput(4, arr, ctypes.sizeof(_Input))
-        time.sleep(0.30)  # give Word / browser time to update the clipboard
-
-        text = self._read_clipboard().strip()
-        if not text:
-            print("[App] Refine selection: nothing selected or clipboard empty")
-            return
-
-        print(f"[App] Refine selection: '{text[:60]}' ({len(text)} chars)")
-
-        # on_replace: focus original window and paste (replaces the still-selected text)
-        def _do_replace(new_text: str, _hwnd: int = hwnd) -> None:
-            time.sleep(0.25)
-            self._focus_window(_hwnd)
-            self.injector.inject(new_text)
-            print(f"[App] Refine selection replaced: {len(new_text)} chars")
-
-        self.popup.show_cursor_icon(
-            text,
-            on_insert=lambda t=text, h=hwnd: self._insert_text(t, h),
-            on_replace=_do_replace,
-            inserted=True,
-            hwnd=hwnd,
-            cursor_x=cx,
-            cursor_y=cy,
-        )
+            _dbg("EXCEPTION:\n" + traceback.format_exc())
 
     def _read_clipboard(self) -> str:
-        """Read text from clipboard using the same properly typed ctypes as the injector
-        (handles 64-bit HGLOBAL pointers correctly — plain ctypes.windll truncates them)."""
+        """Read text from clipboard using properly typed ctypes (64-bit safe)."""
         from injector import _u32, _k32
         CF_UNICODETEXT = 13
         if not _u32.OpenClipboard(None):
@@ -679,8 +696,7 @@ class WhisperFlowApp:
                 return ctypes.wstring_at(ptr)
             finally:
                 _k32.GlobalUnlock(h)
-        except Exception as e:
-            print(f"[App] Clipboard read error: {e}")
+        except Exception:
             return ""
         finally:
             _u32.CloseClipboard()

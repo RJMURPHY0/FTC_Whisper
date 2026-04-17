@@ -17,6 +17,7 @@ Built for Windows. Transcription runs **fully locally** using [faster-whisper](h
 - **Hold-to-talk or toggle mode** — hold your hotkey while speaking, release to transcribe
 - **Local Whisper transcription** — runs on CPU or GPU, no internet required
 - **AI text refinement** — rewrite as email, formal, casual, or fix punctuation (requires Anthropic API key)
+- **Refine Selected Text** — press **Alt+R** to capture the currently selected text and open the refinement panel instantly
 - **Floating action badge** — appears directly below your inserted text after each transcription; click to open AI refinement
 - **Live waveform** — animated bars react to your voice in real time (orange when speaking, like iPhone Voice Memos)
 - **System tray** — runs quietly in the background with status icons
@@ -64,6 +65,7 @@ Edit **`config.json`** (in the same folder as the app) to customise settings:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `hotkey` | `alt+v` | Trigger key — e.g. `caps lock`, `f9`, `ctrl+shift+space` |
+| `refine_hotkey` | `alt+r` | Select text anywhere and press this to refine it |
 | `mode` | `hold` | `hold` (hold while speaking) or `toggle` (press to start/stop) |
 | `whisper_model` | `base.en` | Model size: `tiny.en`, `base.en`, `small.en`, `medium.en`, `large-v3` |
 | `language` | `en` | Whisper language code |
