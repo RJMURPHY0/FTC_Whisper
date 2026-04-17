@@ -417,9 +417,9 @@ class FloatingPopup:
         f = tk.Frame(self.root, bg=CP["bg"], padx=16, pady=14)
         self._refine_frame = f
 
-        # Top row: inserted badge + Insert button + AI buttons + close
+        # ── Row 1: status badge + Insert + AI preset buttons + close ──────────
         top = tk.Frame(f, bg=CP["bg"])
-        top.pack(fill="x", pady=(0, 10))
+        top.pack(fill="x", pady=(0, 6))
 
         self._inserted_badge = tk.Label(
             top,
@@ -445,12 +445,8 @@ class FloatingPopup:
         )
         insert_btn.pack(side="left", padx=(0, 10))
         insert_btn.bind("<Button-1>", lambda _e: self._do_insert())
-        insert_btn.bind(
-            "<Enter>", lambda _e: insert_btn.configure(bg=CP["accent"], fg=CP["bg"])
-        )
-        insert_btn.bind(
-            "<Leave>", lambda _e: insert_btn.configure(bg=CP["btn_bg"], fg=CP["text"])
-        )
+        insert_btn.bind("<Enter>", lambda _e: insert_btn.configure(bg=CP["accent"], fg=CP["bg"]))
+        insert_btn.bind("<Leave>", lambda _e: insert_btn.configure(bg=CP["btn_bg"], fg=CP["text"]))
 
         for label, mode in [
             ("✉ Email", "email"),
@@ -465,29 +461,71 @@ class FloatingPopup:
             )
 
         close = tk.Label(
-            top,
-            text="✕",
-            fg=CP["subtext"],
-            bg=CP["bg"],
-            font=("Segoe UI", 13),
-            cursor="hand2",
-            padx=8,
+            top, text="✕", fg=CP["subtext"], bg=CP["bg"],
+            font=("Segoe UI", 13), cursor="hand2", padx=8,
         )
         close.pack(side="right")
         close.bind("<Button-1>", lambda _e: self._do_hide())
         close.bind("<Enter>", lambda _e: close.configure(fg=CP["accent"]))
         close.bind("<Leave>", lambda _e: close.configure(fg=CP["subtext"]))
 
+        # ── Row 2: Ask AI custom instruction input ────────────────────────────
+        ask_row = tk.Frame(f, bg=CP["bg"])
+        ask_row.pack(fill="x", pady=(0, 6))
+
+        self._ask_var = tk.StringVar()
+        self._ask_entry = tk.Entry(
+            ask_row,
+            textvariable=self._ask_var,
+            bg=CP["btn_bg"],
+            fg=CP["text"],
+            insertbackground=CP["text"],
+            relief="flat",
+            font=("Segoe UI", 10),
+            bd=0,
+        )
+        self._ask_entry.pack(side="left", fill="x", expand=True, ipady=5, padx=(0, 6))
+        self._ask_entry.insert(0, "Ask AI — e.g. 'make this sound more urgent'")
+        self._ask_entry.configure(fg=CP["subtext"])
+
+        def _clear_placeholder(e):
+            if self._ask_entry.get() == "Ask AI — e.g. 'make this sound more urgent'":
+                self._ask_entry.delete(0, "end")
+                self._ask_entry.configure(fg=CP["text"])
+
+        def _restore_placeholder(e):
+            if not self._ask_entry.get().strip():
+                self._ask_entry.delete(0, "end")
+                self._ask_entry.insert(0, "Ask AI — e.g. 'make this sound more urgent'")
+                self._ask_entry.configure(fg=CP["subtext"])
+
+        self._ask_entry.bind("<FocusIn>", _clear_placeholder)
+        self._ask_entry.bind("<FocusOut>", _restore_placeholder)
+        self._ask_entry.bind("<Return>", lambda _e: self._run_ai_custom())
+
+        ask_btn = tk.Label(
+            ask_row,
+            text="  ✦ Ask  ",
+            fg=CP["bg"],
+            bg=CP["accent"],
+            font=("Segoe UI", 10, "bold"),
+            padx=8,
+            pady=5,
+            cursor="hand2",
+        )
+        ask_btn.pack(side="left")
+        ask_btn.bind("<Button-1>", lambda _e: self._run_ai_custom())
+        ask_btn.bind("<Enter>", lambda _e: ask_btn.configure(bg=CP["accent_hover"]))
+        ask_btn.bind("<Leave>", lambda _e: ask_btn.configure(bg=CP["accent"]))
+
+        # ── Status / spinner ──────────────────────────────────────────────────
         self._ai_status = tk.Label(
-            f,
-            text="",
-            fg=CP["accent"],
-            bg=CP["bg"],
+            f, text="", fg=CP["accent"], bg=CP["bg"],
             font=("Segoe UI", 10, "italic"),
         )
         self._ai_status.pack(anchor="w")
 
-        # Result area
+        # ── Result area ───────────────────────────────────────────────────────
         self._result_frame = tk.Frame(f, bg=CP["bg"])
 
         tk.Frame(self._result_frame, bg=CP["divider"], height=1).pack(
@@ -510,7 +548,7 @@ class FloatingPopup:
 
         replace = tk.Label(
             btn_row,
-            text="  ↩  Replace  ",
+            text="  ↩  Replace & Close  ",
             fg=CP["bg"],
             bg=CP["accent"],
             font=("Segoe UI", 10, "bold"),
@@ -522,6 +560,21 @@ class FloatingPopup:
         replace.bind("<Button-1>", lambda _e: self._do_replace())
         replace.bind("<Enter>", lambda _e: replace.configure(bg=CP["accent_hover"]))
         replace.bind("<Leave>", lambda _e: replace.configure(bg=CP["accent"]))
+
+        insert_result_btn = tk.Label(
+            btn_row,
+            text="  ↓ Insert Result  ",
+            fg=CP["text"],
+            bg=CP["btn_bg"],
+            font=("Segoe UI", 10, "bold"),
+            padx=10,
+            pady=6,
+            cursor="hand2",
+        )
+        insert_result_btn.pack(side="left", padx=(8, 0))
+        insert_result_btn.bind("<Button-1>", lambda _e: self._do_insert_result())
+        insert_result_btn.bind("<Enter>", lambda _e: insert_result_btn.configure(bg=CP["accent"], fg=CP["bg"]))
+        insert_result_btn.bind("<Leave>", lambda _e: insert_result_btn.configure(bg=CP["btn_bg"], fg=CP["text"]))
 
         self.root.bind("<Escape>", lambda _e: self._do_hide())
 
@@ -673,7 +726,15 @@ class FloatingPopup:
             self._do_hide()
             threading.Thread(target=cb, daemon=True).start()
 
+    def _do_insert_result(self) -> None:
+        """Insert the AI result — undoes the original and inserts the refined version."""
+        if self._current_result and self._on_replace:
+            result = self._current_result
+            self._do_hide()
+            threading.Thread(target=self._on_replace, args=(result,), daemon=True).start()
+
     def _do_replace(self) -> None:
+        """Undo original injection and insert AI result instead."""
         if self._current_result and self._on_replace:
             result = self._current_result
             self._do_hide()
@@ -685,9 +746,7 @@ class FloatingPopup:
 
     def _run_ai(self, mode: str) -> None:
         if not self._ai_refiner or not self._ai_refiner.is_available:
-            self._ai_status.configure(
-                text="⚠  Set ANTHROPIC_API_KEY to enable AI refinement"
-            )
+            self._ai_status.configure(text="⚠  Set anthropic_api_key in config to enable AI")
             return
         if self._ai_busy:
             return
@@ -698,6 +757,33 @@ class FloatingPopup:
 
         def _worker():
             result = self._ai_refiner.refine(text, mode)
+            self.root.after(0, self._show_ai_result, result)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _run_ai_custom(self) -> None:
+        """Run AI refinement with a custom instruction typed by the user."""
+        instruction = self._ask_var.get().strip()
+        placeholder = "Ask AI — e.g. 'make this sound more urgent'"
+        if not instruction or instruction == placeholder:
+            self._ai_status.configure(text="⚠  Type an instruction first")
+            return
+        if not self._ai_refiner or not self._ai_refiner.is_available:
+            self._ai_status.configure(text="⚠  Set anthropic_api_key in config to enable AI")
+            return
+        if self._ai_busy:
+            return
+        self._ai_busy = True
+        self._ai_status.configure(text=f"✦  Asking AI…")
+        self._result_frame.pack_forget()
+        text = self._original_text
+        custom_prompt = (
+            f"{instruction}. "
+            "Return only the rewritten text, nothing else."
+        )
+
+        def _worker():
+            result = self._ai_refiner.refine(text, custom_prompt=custom_prompt)
             self.root.after(0, self._show_ai_result, result)
 
         threading.Thread(target=_worker, daemon=True).start()

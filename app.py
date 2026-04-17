@@ -548,7 +548,10 @@ class WhisperFlowApp:
             return 0, 0
 
     def _insert_text(self, text: str, hwnd: int) -> None:
-        """Manual insert fallback — focuses the target window and injects the full text."""
+        """Manual insert — called when user clicks Insert in the popup.
+        Waits for the popup to fully close before focusing the target window,
+        otherwise the popup steals focus back and the injection lands nowhere."""
+        time.sleep(0.25)  # let popup withdraw and OS settle focus
         self._focus_window(hwnd)
         self.injector.inject(text)
         print(f"[App] Manual insert: {len(text)} chars")
