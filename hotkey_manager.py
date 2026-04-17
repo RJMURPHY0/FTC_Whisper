@@ -420,6 +420,7 @@ class HotkeyManager:
 # Uses Win32 RegisterHotKey with HOTKEY_ID=2, coexists with HotkeyManager's ID=1.
 # ---------------------------------------------------------------------------
 
+
 class TriggerHotkeyManager:
     """Fires on_trigger once each time the hotkey is pressed.
 
@@ -441,6 +442,7 @@ class TriggerHotkeyManager:
         self._loop_ready = threading.Event()
         self._win32_ok = False
         self._kb_hooks: list = []
+        self._kb_hotkeys: list = []
         self._parse_hotkey(self.hotkey)
 
     def _parse_hotkey(self, hotkey: str) -> None:
@@ -468,7 +470,9 @@ class TriggerHotkeyManager:
         self._win32_ok = True
         self._hotkey_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
         self._loop_ready.set()
-        print(f"[TriggerHotkeyManager] Win32 hotkey active (mods={mods:#x}, vk={vk:#x})")
+        print(
+            f"[TriggerHotkeyManager] Win32 hotkey active (mods={mods:#x}, vk={vk:#x})"
+        )
 
         msg = _wt.MSG()
         while _user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
@@ -483,6 +487,7 @@ class TriggerHotkeyManager:
         if self._registered:
             return
         self._kb_hooks = []
+        self._kb_hotkeys = []
         registered = False
 
         if self._is_combo:
@@ -502,14 +507,34 @@ class TriggerHotkeyManager:
                 )
                 self._msg_loop_thread.start()
                 if not self._loop_ready.wait(timeout=3.0):
-                    print("[TriggerHotkeyManager] Warning: message loop did not start in time")
-                    return
+                    print(
+                        "[TriggerHotkeyManager] Warning: message loop did not start in time"
+                    )
+                    self._win32_ok = False
                 registered = self._win32_ok
+                if not registered:
+                    try:
+                        hk = kb.add_hotkey(self.hotkey, self._fire, suppress=False)
+                        self._kb_hotkeys.append(hk)
+                        registered = True
+                        print(
+                            "[TriggerHotkeyManager] Falling back to keyboard hook "
+                            f"for '{self.hotkey}'"
+                        )
+                    except Exception as e:
+                        print(
+                            f"[TriggerHotkeyManager] Fallback registration failed: {e}"
+                        )
             else:
-                self._kb_hooks.append(
-                    kb.on_press_key(self._base_key, lambda _e: self._fire())
-                )
-                registered = True
+                try:
+                    hk = kb.add_hotkey(self.hotkey, self._fire, suppress=False)
+                    self._kb_hotkeys.append(hk)
+                    registered = True
+                except Exception as e:
+                    print(
+                        "[TriggerHotkeyManager] Keyboard fallback registration failed: "
+                        f"{e}"
+                    )
         else:
             self._kb_hooks.append(
                 kb.on_press_key(self._base_key, lambda _e: self._fire())
@@ -529,6 +554,12 @@ class TriggerHotkeyManager:
             except Exception:
                 pass
         self._kb_hooks = []
+        for h in self._kb_hotkeys:
+            try:
+                kb.remove_hotkey(h)
+            except Exception:
+                pass
+        self._kb_hotkeys = []
         if self._hotkey_thread_id:
             _user32.PostThreadMessageW(self._hotkey_thread_id, _WM_QUIT, 0, 0)
         if self._msg_loop_thread:
