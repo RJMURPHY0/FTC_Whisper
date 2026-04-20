@@ -273,6 +273,26 @@ class AppWindow:
             font=("Segoe UI", 10),
         ).pack(side="left")
 
+        # Refine hotkey pill
+        refine_hint_row = tk.Frame(sc, bg=C["surface"])
+        refine_hint_row.pack(fill="x", pady=(4, 0))
+
+        refine_pill_bg = tk.Frame(refine_hint_row, bg=C["accent_dim"], padx=8, pady=3)
+        refine_pill_bg.pack(side="left")
+        refine_hint_text = self._refine_hotkey if self._refine_hotkey else "—"
+        self._home_refine_hotkey_lbl = tk.Label(
+            refine_pill_bg, text=refine_hint_text,
+            fg=C["accent"], bg=C["accent_dim"],
+            font=("Segoe UI", 10, "bold"),
+        )
+        self._home_refine_hotkey_lbl.pack()
+
+        tk.Label(
+            refine_hint_row, text=" refine selection with AI",
+            fg=C["subtext"], bg=C["surface"],
+            font=("Segoe UI", 10),
+        ).pack(side="left")
+
         # Instructions card
         ic = self._card(parent, margin=(0, 0))
         tk.Label(
@@ -523,6 +543,7 @@ class AppWindow:
         new_hotkey = self._pending_refine_hotkey
         self._refine_hotkey = new_hotkey.upper()
         self._refine_hotkey_display_lbl.configure(text=self._refine_hotkey or "—")
+        self._home_refine_hotkey_lbl.configure(text=self._refine_hotkey or "—")
         self._pending_refine_hotkey = None
         self._refine_save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
         self._refine_save_btn.unbind("<Button-1>")

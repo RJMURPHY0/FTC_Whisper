@@ -262,6 +262,28 @@ class AuthManager:
                 return False, "No account found with that email. Try Create Account."
             return False, f"Sign-in failed: {msg}"
 
+    def reset_password(self, email: str) -> tuple[bool, str]:
+        try:
+            client = self._get_client()
+            client.auth.reset_password_email(email)
+            return True, "Password reset email sent — check your inbox."
+        except Exception as e:
+            msg = str(e)
+            print(f"[Auth] Reset password error: {msg}")
+            if "user not found" in msg.lower() or "no user" in msg.lower():
+                return False, "No account found with that email."
+            return False, "Reset failed — please try again."
+
+    def resend_confirmation(self, email: str) -> tuple[bool, str]:
+        try:
+            client = self._get_client()
+            client.auth.resend({"type": "signup", "email": email})
+            return True, "Confirmation email resent — check your inbox."
+        except Exception as e:
+            msg = str(e)
+            print(f"[Auth] Resend confirmation error: {msg}")
+            return False, "Could not resend — please try again."
+
     def sign_out(self) -> None:
         try:
             self._get_client().auth.sign_out()

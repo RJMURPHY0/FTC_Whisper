@@ -42,6 +42,7 @@ class LoginWindow:
         self._on_success = on_success
         self._on_cancel = on_cancel
         self._mode = "login"  # "login" | "signup"
+        self._pending_confirm_email: Optional[str] = None
 
     def run(self) -> None:
         """Build and run the window on the current thread (blocking)."""
@@ -115,13 +116,32 @@ class LoginWindow:
 
         # Password
         self._field_label(self._card, "Password")
-        self._pass_entry = self._entry(self._card, self._password_var, show="•")
-        self._pass_entry.pack(fill="x", pady=(4, 12))
+        pass_row = tk.Frame(self._card, bg=C["surface"])
+        pass_row.pack(fill="x", pady=(4, 12))
+        self._pass_entry = self._entry(pass_row, self._password_var, show="•")
+        self._pass_entry.pack(side="left", fill="x", expand=True)
+        self._pass_visible = False
+        self._pass_eye = tk.Label(pass_row, text="👁", bg=C["surface"], fg=C["subtext"],
+                                  font=("Segoe UI", 11), cursor="hand2", padx=4)
+        self._pass_eye.pack(side="left")
+        self._pass_eye.bind("<Button-1>", lambda _e: self._toggle_pass())
 
-        # Confirm password (sign-up only)
-        self._confirm_label = self._field_label(self._card, "Confirm Password")
-        self._confirm_entry = self._entry(self._card, self._confirm_var, show="•")
-        self._confirm_entry.pack(fill="x", pady=(4, 12))
+        # Confirm password section — kept in a frame so _switch can reliably
+        # reposition it above the submit button using before=
+        self._confirm_section = tk.Frame(self._card, bg=C["surface"])
+        tk.Label(
+            self._confirm_section, text="Confirm Password",
+            fg=C["subtext"], bg=C["surface"],
+            font=("Segoe UI", 10), anchor="w",
+        ).pack(fill="x")
+        confirm_row = tk.Frame(self._confirm_section, bg=C["surface"])
+        confirm_row.pack(fill="x", pady=(4, 12))
+        self._confirm_entry = self._entry(confirm_row, self._confirm_var, show="•")
+        self._confirm_entry.pack(side="left", fill="x", expand=True)
+        self._confirm_eye = tk.Label(confirm_row, text="👁", bg=C["surface"], fg=C["subtext"],
+                                     font=("Segoe UI", 11), cursor="hand2", padx=4)
+        self._confirm_eye.pack(side="left")
+        self._confirm_eye.bind("<Button-1>", lambda _e: self._toggle_confirm())
 
         # Status message — hidden until needed
         self._status_var = tk.StringVar()
@@ -158,6 +178,26 @@ class LoginWindow:
         self._submit_btn.bind(
             "<Leave>", lambda _e: self._submit_btn.configure(bg=C["accent"])
         )
+
+        # Forgot password link (login mode only)
+        self._forgot_link = tk.Label(
+            self._card, text="Forgot password?",
+            fg=C["subtext"], bg=C["surface"],
+            font=("Segoe UI", 9), cursor="hand2",
+        )
+        self._forgot_link.bind("<Button-1>", lambda _e: self._forgot_password())
+        self._forgot_link.bind("<Enter>", lambda _e: self._forgot_link.configure(fg=C["accent"]))
+        self._forgot_link.bind("<Leave>", lambda _e: self._forgot_link.configure(fg=C["subtext"]))
+
+        # Resend confirmation link (login mode, when email awaiting confirmation)
+        self._resend_link = tk.Label(
+            self._card, text="Resend confirmation email",
+            fg=C["subtext"], bg=C["surface"],
+            font=("Segoe UI", 9), cursor="hand2",
+        )
+        self._resend_link.bind("<Button-1>", lambda _e: self._resend_confirmation())
+        self._resend_link.bind("<Enter>", lambda _e: self._resend_link.configure(fg=C["accent"]))
+        self._resend_link.bind("<Leave>", lambda _e: self._resend_link.configure(fg=C["subtext"]))
 
         # Enter key submits
         self._root.bind("<Return>", lambda _e: self._submit())
@@ -209,20 +249,24 @@ class LoginWindow:
 
     def _switch(self, mode: str, clear_status: bool = True) -> None:
         self._mode = mode
+        self._forgot_link.pack_forget()
+        self._resend_link.pack_forget()
         if mode == "login":
             self._login_tab.configure(fg=C["accent"], bg=C["surface"])
             self._signup_tab.configure(fg=C["subtext"], bg=C["surface"])
-            self._confirm_label.pack_forget()
-            self._confirm_entry.pack_forget()
+            self._confirm_section.pack_forget()
             self._submit_btn.configure(text="Sign In")
+            self._forgot_link.pack(anchor="center", pady=(8, 0))
+            if self._pending_confirm_email:
+                self._resend_link.pack(anchor="center", pady=(4, 0))
         else:
             self._login_tab.configure(fg=C["subtext"], bg=C["surface"])
             self._signup_tab.configure(fg=C["accent"], bg=C["surface"])
-            self._confirm_label.pack(fill="x")
-            self._confirm_entry.pack(fill="x", pady=(4, 12))
+            self._confirm_section.pack(fill="x", before=self._submit_btn)
             self._submit_btn.configure(text="Create Account")
         if clear_status:
             self._status_var.set("")
+            self._status_frame.pack_forget()
 
     # ------------------------------------------------------------------
     # Form submission
@@ -262,16 +306,17 @@ class LoginWindow:
         print(f"[Login] ok={ok} msg={msg!r}")
 
         if ok and self._auth.is_authenticated:
+            self._pending_confirm_email = None
             self._set_status(f"✓  {msg}", error=False)
             self._root.after(800, self._finish)
             return
 
         if ok and self._mode == "signup":
-            # Account created but email confirmation required
             email = self._email_var.get().strip()
+            self._pending_confirm_email = email
             self._set_status(
                 f"✉  Confirmation email sent to {email}\n"
-                "Please check your inbox and confirm, then sign in.",
+                "Check your inbox, click the link, then sign in here.",
                 error=False,
             )
             self._password_var.set("")
@@ -279,7 +324,48 @@ class LoginWindow:
             self._switch("login", clear_status=False)
             return
 
+        if not ok and ("email not confirmed" in msg.lower() or "email_not_confirmed" in msg.lower()):
+            self._pending_confirm_email = self._email_var.get().strip()
+            self._resend_link.pack_forget()
+            self._resend_link.pack(anchor="center", pady=(4, 0))
+
         self._set_status(f"✕  {msg}", error=True)
+
+    def _toggle_pass(self) -> None:
+        self._pass_visible = not self._pass_visible
+        self._pass_entry.configure(show="" if self._pass_visible else "•")
+        self._pass_eye.configure(fg=C["accent"] if self._pass_visible else C["subtext"])
+
+    def _toggle_confirm(self) -> None:
+        show = self._confirm_entry.cget("show") == "•"
+        self._confirm_entry.configure(show="" if show else "•")
+        self._confirm_eye.configure(fg=C["accent"] if show else C["subtext"])
+
+    def _forgot_password(self) -> None:
+        email = self._email_var.get().strip()
+        if not email:
+            self._set_status("Enter your email address above first.", error=True)
+            return
+        self._set_status("Sending reset email…", error=False)
+
+        def _run():
+            ok, msg = self._auth.reset_password(email)
+            self._root.after(0, self._set_status, msg, not ok)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _resend_confirmation(self) -> None:
+        email = self._pending_confirm_email or self._email_var.get().strip()
+        if not email:
+            self._set_status("Enter your email address above first.", error=True)
+            return
+        self._set_status("Resending confirmation email…", error=False)
+
+        def _run():
+            ok, msg = self._auth.resend_confirmation(email)
+            self._root.after(0, self._set_status, msg, not ok)
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _finish(self) -> None:
         self._root.destroy()
