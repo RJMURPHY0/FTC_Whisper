@@ -23,7 +23,7 @@ C = {
 }
 
 WINDOW_W = 400
-WINDOW_H = 500
+WINDOW_H = 560
 
 
 class LoginWindow:
@@ -199,6 +199,30 @@ class LoginWindow:
         self._resend_link.bind("<Enter>", lambda _e: self._resend_link.configure(fg=C["accent"]))
         self._resend_link.bind("<Leave>", lambda _e: self._resend_link.configure(fg=C["subtext"]))
 
+        # Divider
+        self._divider_frame = tk.Frame(self._card, bg=C["surface"])
+        tk.Frame(self._divider_frame, bg=C["divider"], height=1).pack(
+            side="left", fill="x", expand=True, pady=(0, 0)
+        )
+        tk.Label(
+            self._divider_frame, text="  or  ",
+            fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 9),
+        ).pack(side="left")
+        tk.Frame(self._divider_frame, bg=C["divider"], height=1).pack(
+            side="left", fill="x", expand=True,
+        )
+
+        # Google sign-in button
+        self._google_btn = tk.Label(
+            self._card, text="Continue with Google",
+            fg=C["text"], bg=C["input_bg"],
+            font=("Segoe UI", 11), padx=16, pady=9,
+            cursor="hand2",
+        )
+        self._google_btn.bind("<Button-1>", lambda _e: self._sign_in_google())
+        self._google_btn.bind("<Enter>", lambda _e: self._google_btn.configure(bg=C["divider"]))
+        self._google_btn.bind("<Leave>", lambda _e: self._google_btn.configure(bg=C["input_bg"]))
+
         # Enter key submits
         self._root.bind("<Return>", lambda _e: self._submit())
 
@@ -264,6 +288,8 @@ class LoginWindow:
             self._signup_tab.configure(fg=C["accent"], bg=C["surface"])
             self._confirm_section.pack(fill="x", before=self._submit_btn)
             self._submit_btn.configure(text="Create Account")
+        self._divider_frame.pack(fill="x", pady=(12, 0))
+        self._google_btn.pack(fill="x", pady=(8, 0))
         if clear_status:
             self._status_var.set("")
             self._status_frame.pack_forget()
@@ -364,6 +390,99 @@ class LoginWindow:
         def _run():
             ok, msg = self._auth.resend_confirmation(email)
             self._root.after(0, self._set_status, msg, not ok)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _sign_in_google(self) -> None:
+        import http.server
+        import random
+        import urllib.parse
+        import webbrowser
+
+        port = random.randint(50100, 59900)
+        redirect_uri = f"http://localhost:{port}/callback"
+        tokens: dict = {}
+        done = threading.Event()
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/callback":
+                    self.send_response(200)
+                    self.send_header("Content-type", "text/html")
+                    self.end_headers()
+                    # Supabase puts tokens in the URL fragment — JS posts them back
+                    html = (
+                        "<html><body><script>"
+                        "var p=new URLSearchParams(window.location.hash.slice(1));"
+                        "fetch('/token?at='+encodeURIComponent(p.get('access_token')||'')"
+                        "+'&rt='+encodeURIComponent(p.get('refresh_token')||''));"
+                        "document.write('<h2 style=\"font-family:sans-serif\">Signed in! You can close this tab.</h2>');"
+                        "</script></body></html>"
+                    )
+                    self.wfile.write(html.encode())
+                elif self.path.startswith("/token"):
+                    qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    tokens["access_token"] = qs.get("at", [""])[0]
+                    tokens["refresh_token"] = qs.get("rt", [""])[0]
+                    self.send_response(200)
+                    self.end_headers()
+                    done.set()
+
+            def log_message(self, *_):
+                pass
+
+        server = http.server.HTTPServer(("localhost", port), _Handler)
+
+        def _serve():
+            while not done.is_set():
+                server.handle_request()
+            server.server_close()
+
+        threading.Thread(target=_serve, daemon=True).start()
+
+        try:
+            client = self._auth._get_client()
+            result = client.auth.sign_in_with_oauth(
+                {"provider": "google", "options": {"redirect_to": redirect_uri}}
+            )
+            webbrowser.open(result.url)
+            self._set_status("Browser opened — sign in with Google…", error=False)
+        except Exception as e:
+            self._set_status(f"Google sign-in failed: {e}", error=True)
+            return
+
+        def _wait():
+            if done.wait(timeout=120):
+                at = tokens.get("access_token", "")
+                rt = tokens.get("refresh_token", "")
+                if at:
+                    self._root.after(0, self._handle_oauth_tokens, at, rt)
+                else:
+                    self._root.after(0, self._set_status, "Google sign-in failed — no tokens received.", True)
+            else:
+                self._root.after(0, self._set_status, "Google sign-in timed out.", True)
+
+        threading.Thread(target=_wait, daemon=True).start()
+
+    def _handle_oauth_tokens(self, access_token: str, refresh_token: str) -> None:
+        def _run():
+            try:
+                client = self._auth._get_client()
+                r = client.auth.set_session(access_token, refresh_token)
+                if r and r.user:
+                    self._auth._user = r.user
+                    self._auth._save_session(
+                        r.session
+                        or type(
+                            "S", (),
+                            {"access_token": access_token, "refresh_token": refresh_token},
+                        )()
+                    )
+                    self._root.after(0, self._handle_result, True, f"Welcome, {r.user.email}")
+                else:
+                    self._root.after(0, self._set_status, "Google sign-in failed — could not verify session.", True)
+            except Exception as e:
+                self._root.after(0, self._set_status, f"Google sign-in error: {e}", True)
 
         threading.Thread(target=_run, daemon=True).start()
 
