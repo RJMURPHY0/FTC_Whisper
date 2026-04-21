@@ -915,45 +915,24 @@ def main() -> None:
 
     auth_enabled = bool(config.supabase_url and config.supabase_key)
 
-    # Track whether this loop iteration follows an explicit sign-out.
-    # Silent sign-in is only allowed on startup — after a sign-out the user
-    # must always see the login page so they can switch accounts.
-    explicit_signout = False
-
     while True:
         if auth_enabled:
             if not auth.try_restore_session():
-                # Silent sign-in on startup only (admin convenience — skipped
-                # after explicit sign-out so the login page is always shown).
-                if not explicit_signout and config.supabase_email and config.supabase_password:
-                    ok, msg = auth.sign_in(
-                        config.supabase_email, config.supabase_password
-                    )
-                    if ok:
-                        print(f"[App] Silent sign-in OK ({config.supabase_email})")
-                    else:
-                        print(f"[App] Silent sign-in failed: {msg}")
-
-                # If still not authenticated, show login/create-account window
-                if not auth.is_authenticated:
-                    print("[App] Showing login window...")
-                    LoginWindow(auth, on_success=lambda _auth: None).run()
+                print("[App] Showing login window...")
+                LoginWindow(auth, on_success=lambda _auth: None).run()
 
                 if not auth.is_authenticated:
                     print("[App] Authentication was cancelled. Exiting.")
                     return
         else:
-            # Supabase auth disabled in config; run in local-only mode.
             auth.sign_in_offline()
 
-        explicit_signout = False  # reset — successful auth clears the flag
         app = WhisperFlowApp(auth, config)
         app.run()
 
         if not app._restart_for_reauth:
             break
 
-        explicit_signout = True  # user pressed Sign Out — force login page next
         print("[App] Signed out. Returning to login screen...")
 
 

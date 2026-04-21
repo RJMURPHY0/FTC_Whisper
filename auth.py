@@ -252,14 +252,16 @@ class AuthManager:
                 return True, f"Welcome back, {result.user.email}"
             return False, "Sign-in failed — please check your email and password."
         except Exception as e:
-            msg = str(e)
-            print(f"[Auth] Sign-in error: {msg}")
+            # Supabase wraps the real message in several ways
+            msg = getattr(e, "message", None) or getattr(e, "args", [""])[0] if e.args else str(e)
+            msg = str(msg)
+            print(f"[Auth] Sign-in error: {msg!r}")
             if "email not confirmed" in msg.lower() or "email_not_confirmed" in msg.lower():
-                return False, "Email not confirmed — check your inbox and click the confirmation link first."
+                return False, "Email not confirmed — an admin needs to confirm your account first."
             if "invalid" in msg.lower() or "credentials" in msg.lower() or "wrong" in msg.lower():
                 return False, "Incorrect email or password."
             if "user not found" in msg.lower() or "no user" in msg.lower():
-                return False, "No account found with that email. Try Create Account."
+                return False, "No account found with that email."
             return False, f"Sign-in failed: {msg or 'unknown error — check your connection.'}"
 
     def reset_password(self, email: str) -> tuple[bool, str]:
