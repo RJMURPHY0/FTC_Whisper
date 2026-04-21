@@ -246,7 +246,11 @@ class AuthManager:
 
     def sign_in(self, email: str, password: str) -> tuple[bool, str]:
         try:
-            client = self._get_client()
+            # Always use a fresh client for sign-in to avoid stale connection state
+            from supabase import create_client
+            self._client = create_client(self._url, self._key)
+            client = self._client
+            print(f"[Auth] Signing in as {email}...")
             result = client.auth.sign_in_with_password(
                 {"email": email, "password": password}
             )
