@@ -677,7 +677,8 @@ class WhisperFlowApp:
 
     def _sign_out(self) -> None:
         print("[App] Signing out...")
-        self._auth.sign_out()
+        # Sign out Supabase in background so it never blocks the main thread
+        threading.Thread(target=self._auth.sign_out, daemon=True).start()
         self._restart_for_reauth = True
         self.hotkey_manager.unregister()
         self.refine_hotkey_manager.unregister()
@@ -687,7 +688,9 @@ class WhisperFlowApp:
         self.tray.set_user_email("")
         self.tray.stop()
         if self.app_window._root:
-            self.app_window._root.after(0, self.app_window._root.destroy)
+            # quit() exits mainloop cleanly; the while loop in main() then
+            # destroys the root before creating the login window's fresh Tk()
+            self.app_window._root.after(0, self.app_window._root.quit)
 
     def _shutdown(self) -> None:
         print("[App] Shutting down...")

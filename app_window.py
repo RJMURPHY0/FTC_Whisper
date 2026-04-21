@@ -103,6 +103,12 @@ class AppWindow:
         self._root.after(50, self._fire_authenticated)
 
         self._root.mainloop()
+        # Destroy after mainloop exits (quit() was called on sign-out)
+        try:
+            self._root.destroy()
+        except Exception:
+            pass
+        self._root = None
 
     def show(self) -> None:
         if self._root:
