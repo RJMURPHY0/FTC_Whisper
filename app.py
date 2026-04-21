@@ -677,8 +677,7 @@ class WhisperFlowApp:
 
     def _sign_out(self) -> None:
         print("[App] Signing out...")
-        # Sign out Supabase in background so it never blocks the main thread
-        threading.Thread(target=self._auth.sign_out, daemon=True).start()
+        self._auth.sign_out()
         self._restart_for_reauth = True
         self.hotkey_manager.unregister()
         self.refine_hotkey_manager.unregister()

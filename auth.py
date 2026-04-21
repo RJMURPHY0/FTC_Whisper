@@ -291,10 +291,17 @@ class AuthManager:
             return False, "Could not resend — please try again."
 
     def sign_out(self) -> None:
-        try:
-            self._get_client().auth.sign_out()
-        except Exception:
-            pass
+        # Grab client before clearing so we can revoke server-side in background
+        client = self._client
         self._clear_session()
-        self._client = None  # force fresh client on next sign-in
+        self._client = None
+
+        def _revoke():
+            try:
+                if client:
+                    client.auth.sign_out()
+            except Exception:
+                pass
+
+        threading.Thread(target=_revoke, daemon=True).start()
         print("[Auth] Signed out.")
