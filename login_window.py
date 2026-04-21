@@ -223,6 +223,10 @@ class LoginWindow:
         self._google_btn.bind("<Enter>", lambda _e: self._google_btn.configure(bg=C["divider"]))
         self._google_btn.bind("<Leave>", lambda _e: self._google_btn.configure(bg=C["input_bg"]))
 
+        # Divider + Google button always visible — packed once here
+        self._divider_frame.pack(fill="x", pady=(12, 0))
+        self._google_btn.pack(fill="x", pady=(8, 0))
+
         # Enter key submits
         self._root.bind("<Return>", lambda _e: self._submit())
 
@@ -288,8 +292,6 @@ class LoginWindow:
             self._signup_tab.configure(fg=C["accent"], bg=C["surface"])
             self._confirm_section.pack(fill="x", before=self._submit_btn)
             self._submit_btn.configure(text="Create Account")
-        self._divider_frame.pack(fill="x", pady=(12, 0))
-        self._google_btn.pack(fill="x", pady=(8, 0))
         if clear_status:
             self._status_var.set("")
             self._status_frame.pack_forget()

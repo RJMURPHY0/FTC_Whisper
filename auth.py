@@ -260,7 +260,7 @@ class AuthManager:
                 return False, "Incorrect email or password."
             if "user not found" in msg.lower() or "no user" in msg.lower():
                 return False, "No account found with that email. Try Create Account."
-            return False, f"Sign-in failed: {msg}"
+            return False, f"Sign-in failed: {msg or 'unknown error — check your connection.'}"
 
     def reset_password(self, email: str) -> tuple[bool, str]:
         try:
@@ -290,4 +290,5 @@ class AuthManager:
         except Exception:
             pass
         self._clear_session()
+        self._client = None  # force fresh client on next sign-in
         print("[Auth] Signed out.")
