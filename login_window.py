@@ -403,31 +403,24 @@ class LoginWindow:
 
         port = random.randint(50100, 59900)
         redirect_uri = f"http://localhost:{port}/callback"
-        tokens: dict = {}
+        code_holder: dict = {}
         done = threading.Event()
 
         class _Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
-                if self.path == "/callback":
-                    self.send_response(200)
-                    self.send_header("Content-type", "text/html")
-                    self.end_headers()
-                    # Supabase puts tokens in the URL fragment — JS posts them back
-                    html = (
-                        "<html><body><script>"
-                        "var p=new URLSearchParams(window.location.hash.slice(1));"
-                        "fetch('/token?at='+encodeURIComponent(p.get('access_token')||'')"
-                        "+'&rt='+encodeURIComponent(p.get('refresh_token')||''));"
-                        "document.write('<h2 style=\"font-family:sans-serif\">Signed in! You can close this tab.</h2>');"
-                        "</script></body></html>"
-                    )
-                    self.wfile.write(html.encode())
-                elif self.path.startswith("/token"):
-                    qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-                    tokens["access_token"] = qs.get("at", [""])[0]
-                    tokens["refresh_token"] = qs.get("rt", [""])[0]
-                    self.send_response(200)
-                    self.end_headers()
+                parsed = urllib.parse.urlparse(self.path)
+                params = urllib.parse.parse_qs(parsed.query)
+                code = params.get("code", [""])[0]
+                self.send_response(200)
+                self.send_header("Content-type", "text/html")
+                self.end_headers()
+                self.wfile.write(
+                    b"<html><body style='font-family:sans-serif;padding:40px'>"
+                    b"<h2>Signed in! You can close this tab and return to FTC Whisper.</h2>"
+                    b"</body></html>"
+                )
+                if code:
+                    code_holder["code"] = code
                     done.set()
 
             def log_message(self, *_):
@@ -455,31 +448,24 @@ class LoginWindow:
 
         def _wait():
             if done.wait(timeout=120):
-                at = tokens.get("access_token", "")
-                rt = tokens.get("refresh_token", "")
-                if at:
-                    self._root.after(0, self._handle_oauth_tokens, at, rt)
+                code = code_holder.get("code", "")
+                if code:
+                    self._root.after(0, self._exchange_oauth_code, code)
                 else:
-                    self._root.after(0, self._set_status, "Google sign-in failed — no tokens received.", True)
+                    self._root.after(0, self._set_status, "Google sign-in failed — no code received.", True)
             else:
                 self._root.after(0, self._set_status, "Google sign-in timed out.", True)
 
         threading.Thread(target=_wait, daemon=True).start()
 
-    def _handle_oauth_tokens(self, access_token: str, refresh_token: str) -> None:
+    def _exchange_oauth_code(self, code: str) -> None:
         def _run():
             try:
                 client = self._auth._get_client()
-                r = client.auth.set_session(access_token, refresh_token)
-                if r and r.user:
+                r = client.auth.exchange_code_for_session({"auth_code": code})
+                if r and r.user and r.session:
                     self._auth._user = r.user
-                    self._auth._save_session(
-                        r.session
-                        or type(
-                            "S", (),
-                            {"access_token": access_token, "refresh_token": refresh_token},
-                        )()
-                    )
+                    self._auth._save_session(r.session)
                     self._root.after(0, self._handle_result, True, f"Welcome, {r.user.email}")
                 else:
                     self._root.after(0, self._set_status, "Google sign-in failed — could not verify session.", True)
