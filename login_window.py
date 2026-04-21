@@ -402,7 +402,7 @@ class LoginWindow:
         import webbrowser
 
         port = random.randint(50100, 59900)
-        redirect_uri = f"http://localhost:{port}/callback"
+        redirect_uri = f"http://localhost:{port}"
         code_holder: dict = {}
         done = threading.Event()
 
