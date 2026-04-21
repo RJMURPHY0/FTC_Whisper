@@ -1,6 +1,6 @@
 # FTC Whisper
 
-> **[⬇ Install FTC Whisper](https://github.com/RJMURPHY0/FTC_Whisper/releases/latest/download/FTC-Whisper-v4.exe)**
+> **[⬇ Install FTC Whisper](https://github.com/RJMURPHY0/FTC_Whisper/releases/latest)**
 
 ---
 
