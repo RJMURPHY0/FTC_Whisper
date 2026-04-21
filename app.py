@@ -294,15 +294,13 @@ class WhisperFlowApp:
 
         self.feedback.transcription_complete(transcribed_text)
         self.hotkey_manager.set_idle()
-        self.db.log_transcription(transcribed_text)
+        threading.Thread(target=self.db.log_transcription, args=(transcribed_text,), daemon=True).start()
 
         # ── Popup always shown — works as manual-insert fallback if inject failed ─
         self.popup.show_cursor_icon(
             transcribed_text,
             on_insert=lambda t=transcribed_text, h=hwnd: self._insert_text(t, h),
-            on_replace=lambda new_text, t=transcribed_text: self._replace_text(
-                new_text, hwnd, t
-            ),
+            on_replace=lambda new_text, t=transcribed_text, h=hwnd: self._replace_text(new_text, h, t),
             inserted=result,
             hwnd=hwnd,
             cursor_x=0,
@@ -586,58 +584,35 @@ class WhisperFlowApp:
 
     def _on_refine_selection(self) -> None:
         """Fires when the refine-selection hotkey is pressed."""
-        import traceback
-        _log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "refine_debug.log")
-
-        def _dbg(msg):
-            try:
-                with open(_log, "a", encoding="utf-8") as _f:
-                    _f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
-            except Exception:
-                pass
-
         try:
-            _dbg("=== refine_selection fired ===")
             if self.hotkey_manager.state != AppState.IDLE:
-                _dbg("skip: not idle")
                 return
 
-            # 1. Capture target window immediately
             hwnd = ctypes.windll.user32.GetForegroundWindow()
-            _dbg(f"Target hwnd={hwnd:#x}")
-
             if hwnd and hwnd == self.popup._popup_hwnd:
-                _dbg("skip: popup is foreground")
                 return
 
-            # Capture cursor pos
             pt = ctypes.wintypes.POINT()
             ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
             cx, cy = pt.x, pt.y
 
-            # 2. Force focus to target before copying
             self._focus_window(hwnd)
             time.sleep(0.1)
 
             from injector import _Input, _KbdInput, _INPUT_KEYBOARD, _KEYEVENTF_KEYUP, _u32, _get_focused_child
             u32 = ctypes.windll.user32
 
-            # Clear clipboard
             if _u32.OpenClipboard(None):
                 _u32.EmptyClipboard()
                 _u32.CloseClipboard()
-                _dbg("clipboard cleared")
 
-            # Try WM_COPY
             WM_COPY = 0x0301
             child = _get_focused_child(hwnd)
-            _dbg(f"Sending WM_COPY to child={child:#x}")
             u32.SendMessageW(child, WM_COPY, 0, 0)
             time.sleep(0.15)
             text = self._read_clipboard().strip()
 
             if not text:
-                _dbg("WM_COPY empty, trying Ctrl+C")
                 VK_CTRL, VK_C = 0x11, 0x43
                 ctrl_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL))
                 c_dn    = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_C))
@@ -647,24 +622,17 @@ class WhisperFlowApp:
                 for _ in range(10):
                     time.sleep(0.05)
                     text = self._read_clipboard().strip()
-                    if text: break
+                    if text:
+                        break
 
             if not text:
-                _dbg("No text captured, aborting")
                 return
 
-            _dbg(f"Captured text: {len(text)} chars")
-
-            # _do_replace: put refined text in clipboard and Ctrl+V over the selection
             def _do_replace(new_text: str, _hwnd: int = hwnd) -> None:
-                _dbg(f"_do_replace: {len(new_text)} chars -> hwnd={_hwnd:#x}")
-                time.sleep(0.25)  # let popup withdraw so focus returns to target
+                time.sleep(0.25)
                 self._focus_window(_hwnd)
                 time.sleep(0.1)
-                # injector puts new_text in clipboard and sends Ctrl+V,
-                # which replaces the currently-selected text in virtually all apps.
                 self.injector.inject(new_text)
-                _dbg(f"replaced: {len(new_text)} chars injected")
 
             self.popup.show_cursor_icon(
                 text,
@@ -676,8 +644,8 @@ class WhisperFlowApp:
                 cursor_y=cy,
             )
 
-        except Exception:
-            _dbg("EXCEPTION:\n" + traceback.format_exc())
+        except Exception as e:
+            print(f"[App] Refine selection error: {e}")
 
     def _read_clipboard(self) -> str:
         """Read text from clipboard using properly typed ctypes (64-bit safe)."""

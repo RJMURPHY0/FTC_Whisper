@@ -41,7 +41,8 @@ class Recorder:
 
     @property
     def is_recording(self) -> bool:
-        return self._recording
+        with self._lock:
+            return self._recording
 
     @property
     def active_sample_rate(self) -> int:

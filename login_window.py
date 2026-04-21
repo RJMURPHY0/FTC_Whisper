@@ -401,7 +401,10 @@ class LoginWindow:
         import urllib.parse
         import webbrowser
 
-        port = random.randint(50100, 59900)
+        # Port 0 lets the OS pick a free port — no collision risk
+        server = http.server.HTTPServer(("localhost", 0), None)
+        port = server.server_address[1]
+        server.server_close()
         redirect_uri = f"http://localhost:{port}"
         code_holder: dict = {}
         done = threading.Event()
@@ -426,7 +429,7 @@ class LoginWindow:
             def log_message(self, *_):
                 pass
 
-        server = http.server.HTTPServer(("localhost", port), _Handler)
+        server = http.server.HTTPServer(("localhost", port), _Handler)  # type: ignore[arg-type]
 
         def _serve():
             while not done.is_set():

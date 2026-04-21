@@ -151,7 +151,11 @@ class AuthManager:
                     data = json.loads(raw.decode())
 
                 client = self._get_client()
-                r = client.auth.set_session(data["access_token"], data["refresh_token"])
+                at = data.get("access_token") or data.get("access_token", "")
+                rt = data.get("refresh_token") or data.get("refresh_token", "")
+                if not at or not rt:
+                    raise KeyError("Missing tokens in session file")
+                r = client.auth.set_session(at, rt)
                 if r and r.user:
                     self._user = r.user
                     # Re-save with encryption in case it was a legacy file
