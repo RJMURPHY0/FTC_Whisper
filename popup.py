@@ -401,30 +401,6 @@ class FloatingPopup:
             side="left", fill="y", padx=(2, 4)
         )
 
-        ask_ai = tk.Label(
-            self._icon_frame,
-            text="Ask AI",
-            fg=CP["subtext"],
-            bg=CP["bg"],
-            font=("Segoe UI", 9, "bold"),
-            cursor="hand2",
-            padx=4,
-        )
-        ask_ai.pack(side="left", padx=(0, 4))
-
-        def _ask_ai_click(_e):
-            self.root.after(0, self._expand_to_panel)
-            self.root.after(0, lambda: self._ask_entry.focus_set())
-            return "break"
-
-        ask_ai.bind("<Button-1>", _ask_ai_click)
-        ask_ai.bind("<Enter>", lambda _e: ask_ai.configure(fg=CP["accent"]))
-        ask_ai.bind("<Leave>", lambda _e: ask_ai.configure(fg=CP["subtext"]))
-
-        tk.Frame(self._icon_frame, bg=CP["divider"], width=1).pack(
-            side="left", fill="y", padx=(0, 4)
-        )
-
         close = tk.Label(
             self._icon_frame,
             text="✕",

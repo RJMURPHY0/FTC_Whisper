@@ -4,6 +4,7 @@ Loads the model once on startup and exposes a simple transcribe() method.
 """
 
 import multiprocessing
+import re
 import threading
 import numpy as np
 from faster_whisper import WhisperModel
@@ -166,6 +167,31 @@ class Transcriber:
         text = text.strip()
         if text and text[0].islower():
             text = text[0].upper() + text[1:]
+
+        # Remove filler words (whole-word matches only, case-insensitive)
+        fillers = (
+            r"\bum+\b", r"\buh+\b", r"\ber+\b", r"\bhmm+\b", r"\bmhm+\b",
+            r"\byou know\b", r"\bI mean\b", r"\blike,?\b", r"\bso,?\b",
+            r"\bbasically\b", r"\bliterally\b", r"\bactually\b", r"\bright\?\b",
+            r"\bokay so\b", r"\bso yeah\b", r"\byeah so\b", r"\byeah\b",
+        )
+        for filler in fillers:
+            text = re.sub(filler, "", text, flags=re.IGNORECASE)
+
+        # Collapse multiple spaces/commas left by removal
+        text = re.sub(r" {2,}", " ", text)
+        text = re.sub(r",\s*,", ",", text)
+        text = re.sub(r"\s+([.,!?])", r"\1", text)
+
+        # Ensure ends with punctuation
+        text = text.strip()
+        if text and text[-1] not in ".!?":
+            text += "."
+
+        # Re-capitalise first letter after cleanup
+        if text and text[0].islower():
+            text = text[0].upper() + text[1:]
+
         return text
 
     @staticmethod
