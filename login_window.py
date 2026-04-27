@@ -301,7 +301,6 @@ class LoginWindow:
     # ------------------------------------------------------------------
 
     def _submit(self) -> None:
-        print(f"[Login] _submit called, mode={self._mode}")
         email = self._email_var.get().strip()
         password = self._password_var.get()
 

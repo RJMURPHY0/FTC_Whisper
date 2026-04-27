@@ -583,121 +583,183 @@ class AppWindow:
         self._ghost_btn(top, "↻ Refresh", self._load_history).pack(side="right")
         self._ghost_btn(top, "✕ Clear",   self._confirm_clear_history).pack(side="right", padx=(0, 8))
 
-        # Scrollable area inside a rounded card
-        wrap_canvas = tk.Canvas(parent, bg=C["bg"], highlightthickness=0, bd=0)
-        wrap_canvas.pack(fill="both", expand=True, padx=20, pady=(0, 8))
+        # Rounded card background canvas
+        card_cv = tk.Canvas(parent, bg=C["bg"], highlightthickness=0, bd=0)
+        card_cv.pack(fill="both", expand=True, padx=20, pady=(0, 8))
 
-        def _draw_wrap(_event=None):
-            wrap_canvas.update_idletasks()
-            cw = wrap_canvas.winfo_width()
-            ch = wrap_canvas.winfo_height()
+        def _redraw_card(_e=None):
+            card_cv.update_idletasks()
+            cw, ch = card_cv.winfo_width(), card_cv.winfo_height()
             if cw < 2 or ch < 2:
                 return
-            wrap_canvas.delete("bg")
-            _rr(wrap_canvas, 0, 0, cw-1, ch-1, 10,
+            card_cv.delete("bg")
+            _rr(card_cv, 0, 0, cw-1, ch-1, 10,
                 fill=C["surface"], outline=C["border"], tags="bg")
-            wrap_canvas.tag_lower("bg")
+            card_cv.tag_lower("bg")
 
-        wrap_canvas.bind("<Configure>", _draw_wrap)
+        # Frame embedded in card canvas to hold the scrollable list
+        card_inner = tk.Frame(card_cv, bg=C["surface"])
+        card_win = card_cv.create_window(1, 1, window=card_inner, anchor="nw")
 
-        inner_wrap = tk.Frame(wrap_canvas, bg=C["surface"])
-        wrap_canvas.create_window(1, 1, window=inner_wrap, anchor="nw")
-        inner_wrap.bind("<Configure>", lambda e: wrap_canvas.configure(
-            scrollregion=wrap_canvas.bbox("all")))
+        def _sync_card(_e=None):
+            card_cv.update_idletasks()
+            cw, ch = card_cv.winfo_width(), card_cv.winfo_height()
+            if cw > 2 and ch > 2:
+                card_cv.itemconfigure(card_win, width=cw - 2, height=ch - 2)
+            _redraw_card()
 
-        sb = tk.Scrollbar(inner_wrap, bg=C["surface"], troughcolor=C["bg"],
-                          activebackground=C["scrollbar"])
-        self._history_text = tk.Text(
-            inner_wrap,
-            bg=C["surface"], fg=C["text"],
-            font=("Segoe UI", 10), wrap=tk.WORD,
-            relief="flat", bd=8,
-            state=tk.DISABLED, cursor="arrow",
-            yscrollcommand=sb.set,
-            selectbackground=C["surface_hover"],
-            inactiveselectbackground=C["surface_hover"],
-        )
-        sb.config(command=self._history_text.yview)
-        sb.pack(side="right", fill="y")
-        self._history_text.pack(side="left", fill="both", expand=True)
+        card_cv.bind("<Configure>", _sync_card)
 
-        self._history_text.tag_configure("ts",   foreground=C["subtext"], font=("Segoe UI", 8))
-        self._history_text.tag_configure("body", foreground=C["text"],    font=("Segoe UI", 10))
-        self._history_text.tag_configure("sep",  foreground=C["border"],  font=("Segoe UI", 6))
-        self._history_text.tag_configure("dim",  foreground=C["subtext"], font=("Segoe UI", 10, "italic"))
+        # Scrollable canvas + scrollbar inside card_inner
+        self._hist_sb = tk.Scrollbar(card_inner, orient="vertical",
+                                     troughcolor=C["surface"], bg=C["scrollbar"])
+        self._hist_cv = tk.Canvas(card_inner, bg=C["surface"],
+                                  highlightthickness=0, bd=0,
+                                  yscrollcommand=self._hist_sb.set)
+        self._hist_sb.config(command=self._hist_cv.yview)
+        self._hist_sb.pack(side="right", fill="y")
+        self._hist_cv.pack(side="left", fill="both", expand=True)
 
-        # Make the inner_wrap fill the canvas
-        def _resize_inner(_event=None):
-            wrap_canvas.update_idletasks()
-            cw = wrap_canvas.winfo_width()
-            if cw > 2:
-                wrap_canvas.itemconfigure(wrap_canvas.find_withtag("all")[0] if wrap_canvas.find_withtag("all") else 1,
-                                          width=cw - 2)
-        wrap_canvas.bind("<Configure>", lambda e: (_draw_wrap(e), _resize_inner(e)))
+        # Inner frame that holds one Frame per history row
+        self._hist_items = tk.Frame(self._hist_cv, bg=C["surface"])
+        self._hist_items_win = self._hist_cv.create_window(
+            0, 0, window=self._hist_items, anchor="nw")
+
+        self._hist_items.bind("<Configure>", lambda _e: self._hist_cv.configure(
+            scrollregion=self._hist_cv.bbox("all")))
+        self._hist_cv.bind("<Configure>", lambda e: self._hist_cv.itemconfigure(
+            self._hist_items_win, width=e.width))
+
+        self._hist_cv.bind("<MouseWheel>", self._hist_scroll)
+        self._hist_items.bind("<MouseWheel>", self._hist_scroll)
+
+    def _hist_scroll(self, event) -> None:
+        if hasattr(self, "_hist_cv"):
+            self._hist_cv.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     def _load_history(self) -> None:
-        self._history_write("Loading…\n", "dim")
-
+        self._hist_set_placeholder("Loading…")
         def _fetch():
             items = self._db.fetch_history() if self._db else []
             self._root.after(0, self._populate_history, items)
-
         threading.Thread(target=_fetch, daemon=True).start()
 
+    def _hist_set_placeholder(self, msg: str) -> None:
+        for w in self._hist_items.winfo_children():
+            w.destroy()
+        tk.Label(self._hist_items, text=msg,
+                 fg=C["subtext"], bg=C["surface"],
+                 font=("Segoe UI", 10, "italic"),
+                 padx=12, pady=16).pack(fill="x")
+
     def _populate_history(self, items: list) -> None:
-        t = self._history_text
-        t.configure(state=tk.NORMAL)
-        t.delete("1.0", tk.END)
-
+        for w in self._hist_items.winfo_children():
+            w.destroy()
         if not items:
-            t.insert(tk.END, "No transcriptions yet.\n", "dim")
-        else:
-            for item in items:
-                raw_ts = item.get("created_at", "")
-                try:
-                    dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
-                    ts = dt.astimezone().strftime("%d %b %Y  %H:%M")
-                except Exception:
-                    ts = raw_ts[:16]
+            self._hist_set_placeholder("No transcriptions yet.")
+            return
+        for i, item in enumerate(items):
+            self._make_history_row(i, item)
 
-                text = item.get("refined_text") or item.get("transcribed_text", "")
-                t.insert(tk.END, f"{ts}\n", "ts")
-                t.insert(tk.END, f"{text}\n", "body")
-                t.insert(tk.END, "─" * 44 + "\n", "sep")
+    def _make_history_row(self, index: int, item: dict) -> None:
+        text = item.get("refined_text") or item.get("transcribed_text", "")
+        raw_ts = item.get("created_at", "")
+        try:
+            dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+            ts_str = dt.astimezone().strftime("%d %b %Y  %H:%M")
+        except Exception:
+            ts_str = raw_ts[:16]
 
-        t.configure(state=tk.DISABLED)
+        if index > 0:
+            tk.Frame(self._hist_items, bg=C["border"], height=1).pack(fill="x")
+
+        row = tk.Frame(self._hist_items, bg=C["surface"])
+        row.pack(fill="x")
+
+        # Header: [▶ toggle]  [timestamp + preview]  [⎘ copy]
+        header = tk.Frame(row, bg=C["surface"])
+        header.pack(fill="x", padx=8, pady=(8, 6))
+
+        toggle = tk.Label(header, text="▶", fg=C["subtext"], bg=C["surface"],
+                          font=("Segoe UI", 8), cursor="hand2", width=2, anchor="w")
+        toggle.pack(side="left")
+
+        mid = tk.Frame(header, bg=C["surface"])
+        mid.pack(side="left", fill="x", expand=True, padx=(4, 4))
+
+        tk.Label(mid, text=ts_str, fg=C["subtext"], bg=C["surface"],
+                 font=("Segoe UI", 8), anchor="w").pack(fill="x")
+
+        preview = (text[:72] + "…") if len(text) > 72 else text
+        prev_lbl = tk.Label(mid, text=preview, fg=C["text"], bg=C["surface"],
+                            font=("Segoe UI", 9), anchor="w", justify="left")
+        prev_lbl.pack(fill="x")
+
+        copy_btn = tk.Label(header, text="⎘", fg=C["subtext"], bg=C["surface"],
+                            font=("Segoe UI", 13), cursor="hand2")
+        copy_btn.pack(side="right")
+        copy_btn.bind("<Button-1>",
+                      lambda _e, t=text, b=copy_btn: self._copy_to_clipboard(t, b))
+        copy_btn.bind("<Enter>", lambda _e: copy_btn.configure(fg=C["accent"]))
+        copy_btn.bind("<Leave>", lambda _e: copy_btn.configure(fg=C["subtext"]))
+
+        # Expanded detail (hidden until toggled)
+        detail = tk.Frame(row, bg=C["surface"])
+        detail_lbl = tk.Label(detail, text=text, fg=C["text"], bg=C["surface"],
+                              font=("Segoe UI", 9), anchor="w", justify="left",
+                              wraplength=300)
+        detail_lbl.pack(fill="x", padx=(22, 8), pady=(0, 8))
+
+        expanded = [False]
+
+        def _toggle(_e=None, _row=row, _detail=detail, _toggle_lbl=toggle):
+            if expanded[0]:
+                _detail.pack_forget()
+                _toggle_lbl.configure(text="▶", fg=C["subtext"])
+                expanded[0] = False
+            else:
+                _detail.pack(fill="x", after=header)
+                _toggle_lbl.configure(text="▼", fg=C["accent"])
+                expanded[0] = True
+
+        toggle.bind("<Button-1>", _toggle)
+        prev_lbl.bind("<Button-1>", _toggle)
+        mid.bind("<Button-1>", _toggle)
+
+        for w in (row, header, mid, toggle, prev_lbl, detail, detail_lbl):
+            w.bind("<MouseWheel>", self._hist_scroll)
+
+    def _copy_to_clipboard(self, text: str, btn=None) -> None:
+        if self._root:
+            self._root.clipboard_clear()
+            self._root.clipboard_append(text)
+        if btn:
+            btn.configure(text="✓", fg=C["success"])
+            self._root.after(1500, lambda: btn.configure(text="⎘", fg=C["subtext"]))
 
     def _confirm_clear_history(self) -> None:
-        self._history_write("Delete all history? ", "dim")
-        t = self._history_text
-        t.configure(state=tk.NORMAL)
-
-        def _do():
-            self._history_write("Clearing…\n", "dim")
-            threading.Thread(target=self._clear_history, daemon=True).start()
-
-        yes = tk.Label(t, text=" Yes, delete all ", fg=C["bg"], bg=C["error"],
+        for w in self._hist_items.winfo_children():
+            w.destroy()
+        frame = tk.Frame(self._hist_items, bg=C["surface"])
+        frame.pack(fill="x", padx=12, pady=12)
+        tk.Label(frame, text="Delete all history?", fg=C["text"], bg=C["surface"],
+                 font=("Segoe UI", 10)).pack(anchor="w")
+        btn_row = tk.Frame(frame, bg=C["surface"])
+        btn_row.pack(anchor="w", pady=(8, 0))
+        yes = tk.Label(btn_row, text=" Yes, delete all ", fg=C["bg"], bg=C["error"],
                        font=("Segoe UI", 9, "bold"), cursor="hand2")
-        yes.bind("<Button-1>", lambda _e: _do())
-        no = tk.Label(t, text=" Cancel ", fg=C["subtext"], bg=C["surface"],
+        yes.pack(side="left", padx=(0, 8))
+        yes.bind("<Button-1>",
+                 lambda _e: threading.Thread(target=self._clear_history, daemon=True).start())
+        no = tk.Label(btn_row, text=" Cancel ", fg=C["subtext"], bg=C["surface_hover"],
                       font=("Segoe UI", 9), cursor="hand2")
+        no.pack(side="left")
         no.bind("<Button-1>", lambda _e: self._load_history())
-        t.window_create(tk.END, window=yes)
-        t.insert(tk.END, "  ")
-        t.window_create(tk.END, window=no)
-        t.configure(state=tk.DISABLED)
 
     def _clear_history(self) -> None:
         if self._db:
             self._db.clear_history()
         self._root.after(0, self._load_history)
-
-    def _history_write(self, text: str, tag: str = "dim") -> None:
-        t = self._history_text
-        t.configure(state=tk.NORMAL)
-        t.delete("1.0", tk.END)
-        t.insert(tk.END, text, tag)
-        t.configure(state=tk.DISABLED)
 
     # ── Auth callbacks ────────────────────────────────────────────────────────
 
