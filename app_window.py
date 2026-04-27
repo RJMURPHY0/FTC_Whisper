@@ -630,12 +630,13 @@ class AppWindow:
         self._hist_cv.bind("<Configure>", lambda e: self._hist_cv.itemconfigure(
             self._hist_items_win, width=e.width))
 
-        self._hist_cv.bind("<MouseWheel>", self._hist_scroll)
-        self._hist_items.bind("<MouseWheel>", self._hist_scroll)
+        # bind_all while mouse is inside the card so every child widget scrolls
+        card_cv.bind("<Enter>", lambda _e: card_cv.bind_all("<MouseWheel>", self._hist_scroll))
+        card_cv.bind("<Leave>", lambda _e: card_cv.unbind_all("<MouseWheel>"))
 
     def _hist_scroll(self, event) -> None:
         if hasattr(self, "_hist_cv"):
-            self._hist_cv.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            self._hist_cv.yview_scroll(int(-1 * (event.delta / 40)), "units")
 
     def _load_history(self) -> None:
         self._hist_set_placeholder("Loading…")
@@ -680,6 +681,15 @@ class AppWindow:
         header = tk.Frame(row, bg=C["surface"])
         header.pack(fill="x", padx=8, pady=(8, 6))
 
+        # Pack copy button FIRST (side=right) so mid's expand never pushes it off
+        copy_btn = tk.Label(header, text="⎘", fg=C["subtext"], bg=C["surface"],
+                            font=("Segoe UI", 13), cursor="hand2")
+        copy_btn.pack(side="right")
+        copy_btn.bind("<Button-1>",
+                      lambda _e, t=text, b=copy_btn: self._copy_to_clipboard(t, b))
+        copy_btn.bind("<Enter>", lambda _e: copy_btn.configure(fg=C["accent"]))
+        copy_btn.bind("<Leave>", lambda _e: copy_btn.configure(fg=C["subtext"]))
+
         toggle = tk.Label(header, text="▶", fg=C["subtext"], bg=C["surface"],
                           font=("Segoe UI", 8), cursor="hand2", width=2, anchor="w")
         toggle.pack(side="left")
@@ -695,15 +705,7 @@ class AppWindow:
                             font=("Segoe UI", 9), anchor="w", justify="left")
         prev_lbl.pack(fill="x")
 
-        copy_btn = tk.Label(header, text="⎘", fg=C["subtext"], bg=C["surface"],
-                            font=("Segoe UI", 13), cursor="hand2")
-        copy_btn.pack(side="right")
-        copy_btn.bind("<Button-1>",
-                      lambda _e, t=text, b=copy_btn: self._copy_to_clipboard(t, b))
-        copy_btn.bind("<Enter>", lambda _e: copy_btn.configure(fg=C["accent"]))
-        copy_btn.bind("<Leave>", lambda _e: copy_btn.configure(fg=C["subtext"]))
-
-        # Expanded detail (hidden until toggled)
+        # Expanded detail (hidden until toggled; replaces preview to avoid duplication)
         detail = tk.Frame(row, bg=C["surface"])
         detail_lbl = tk.Label(detail, text=text, fg=C["text"], bg=C["surface"],
                               font=("Segoe UI", 9), anchor="w", justify="left",
@@ -712,12 +714,14 @@ class AppWindow:
 
         expanded = [False]
 
-        def _toggle(_e=None, _row=row, _detail=detail, _toggle_lbl=toggle):
+        def _toggle(_e=None, _detail=detail, _toggle_lbl=toggle, _prev=prev_lbl):
             if expanded[0]:
                 _detail.pack_forget()
+                _prev.pack(fill="x")
                 _toggle_lbl.configure(text="▶", fg=C["subtext"])
                 expanded[0] = False
             else:
+                _prev.pack_forget()
                 _detail.pack(fill="x", after=header)
                 _toggle_lbl.configure(text="▼", fg=C["accent"])
                 expanded[0] = True
@@ -726,8 +730,6 @@ class AppWindow:
         prev_lbl.bind("<Button-1>", _toggle)
         mid.bind("<Button-1>", _toggle)
 
-        for w in (row, header, mid, toggle, prev_lbl, detail, detail_lbl):
-            w.bind("<MouseWheel>", self._hist_scroll)
 
     def _copy_to_clipboard(self, text: str, btn=None) -> None:
         if self._root:
