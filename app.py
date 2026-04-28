@@ -81,6 +81,7 @@ class WhisperFlowApp:
             config=config,
             get_input_devices=self.recorder.get_input_devices,
             recorder=self.recorder,
+            transcriber=self.transcriber,
         )
 
         self.tray = TrayApp(
@@ -910,15 +911,17 @@ def main() -> None:
 
     auth_enabled = bool(config.supabase_url and config.supabase_key)
 
+    # On first launch always start offline — login is opt-in from within the app
+    show_login = False
+
     while True:
         if auth_enabled:
             if not auth.try_restore_session():
-                print("[App] Showing login window...")
-                LoginWindow(auth, on_success=lambda _auth: None).run()
-
+                if show_login:
+                    print("[App] Showing login window...")
+                    LoginWindow(auth, on_success=lambda _auth: None).run()
                 if not auth.is_authenticated:
-                    print("[App] Authentication was cancelled. Exiting.")
-                    return
+                    auth.sign_in_offline()
         else:
             auth.sign_in_offline()
 
@@ -928,7 +931,9 @@ def main() -> None:
         if not app._restart_for_reauth:
             break
 
-        print("[App] Signed out. Returning to login screen...")
+        # User clicked Sign In — show login on next iteration
+        show_login = True
+        print("[App] Returning to sign-in screen...")
 
 
 if __name__ == "__main__":
