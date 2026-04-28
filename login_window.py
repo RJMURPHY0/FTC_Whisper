@@ -382,7 +382,7 @@ class LoginWindow:
 
     def _use_offline(self) -> None:
         self._auth.sign_in_offline()
-        self._root.quit()
+        self._root.destroy()
         self._on_success(self._auth)
 
     def _forgot_password(self) -> None:
