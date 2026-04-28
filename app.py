@@ -922,6 +922,8 @@ def main() -> None:
 
     if not auth_enabled:
         auth.sign_in_offline()  # No Supabase configured — skip login
+    else:
+        auth.try_restore_session()  # Restore saved session so user stays logged in
 
     app = WhisperFlowApp(auth, config)
     app.run()

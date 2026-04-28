@@ -119,7 +119,7 @@ class Transcriber:
         segments, _ = self._model.transcribe(
             audio,
             language=None if is_en_model else self.language,
-            beam_size=1,  # fastest; quality nearly identical for English
+            beam_size=5,  # higher accuracy; large-v3-turbo is fast enough to handle this
             vad_filter=True,
             vad_parameters=dict(
                 min_silence_duration_ms=300,

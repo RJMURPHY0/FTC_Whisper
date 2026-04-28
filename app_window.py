@@ -115,8 +115,11 @@ class AppWindow:
         self._login_frame = tk.Frame(self._root, bg=C["bg"])
         self._build_embedded_login()
 
-        # Always require sign-in on launch
-        self._switch_to_login()
+        if self._auth.is_authenticated:
+            self._switch_to_dashboard()
+            self._fire_authenticated()
+        else:
+            self._switch_to_login()
 
         self._root.mainloop()
         # Destroy after mainloop exits (quit() was called on sign-out)
