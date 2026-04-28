@@ -1358,6 +1358,11 @@ class AppWindow:
         ).start()
 
     def _do_sign_out(self) -> None:
+        if self._auth.user_email:
+            import tkinter.messagebox as mb
+            if not mb.askyesno("Sign Out", "Are you sure you want to sign out?",
+                               parent=self._root):
+                return
         self._on_sign_out()
 
     def _do_quit(self) -> None:
