@@ -1384,7 +1384,6 @@ class AppWindow:
             return
         self._on_sign_out()
         self._apply_auth_ui()
-        self._do_sign_in()
 
     def _apply_auth_ui(self) -> None:
         """Update footer and settings tab to reflect current auth state. Safe to call via after()."""
