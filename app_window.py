@@ -1340,19 +1340,27 @@ class AppWindow:
         save_btn = self._surface_btn(save_wrap, "Save Settings", _save)
         save_btn.pack(side="right")
 
-        # ── Sign out (only shown when authenticated) ──────────────────────────
-        if self._auth.user_email:
-            signout_wrap = tk.Frame(parent, bg=C["bg"])
-            signout_wrap.pack(fill="x", padx=20, pady=(0, 8))
-            signout_btn = tk.Label(
-                signout_wrap, text="Sign Out",
-                fg=C["error"], bg=C["bg"],
-                font=("Segoe UI", 9), cursor="hand2", anchor="e",
-            )
-            signout_btn.pack(side="right")
-            signout_btn.bind("<Button-1>", lambda _e: self._do_sign_out())
-            signout_btn.bind("<Enter>", lambda _e: signout_btn.configure(fg="#ff8888"))
-            signout_btn.bind("<Leave>", lambda _e: signout_btn.configure(fg=C["error"]))
+        # ── Sign out / Sign in (settings tab) ────────────────────────────────
+        signout_wrap = tk.Frame(parent, bg=C["bg"])
+        signout_wrap.pack(fill="x", padx=20, pady=(0, 8))
+        email = self._auth.user_email or ""
+        self._settings_auth_btn = tk.Label(
+            signout_wrap,
+            text="Sign Out" if email else "Sign In",
+            fg=C["error"] if email else C["subtext"],
+            bg=C["bg"],
+            font=("Segoe UI", 9), cursor="hand2", anchor="e",
+        )
+        self._settings_auth_btn.pack(side="right")
+        self._settings_auth_btn.bind("<Button-1>", lambda _e: self._do_sign_action())
+        self._settings_auth_btn.bind(
+            "<Enter>",
+            lambda _e: self._settings_auth_btn.configure(
+                fg="#ff8888" if self._auth.user_email else C["text"]))
+        self._settings_auth_btn.bind(
+            "<Leave>",
+            lambda _e: self._settings_auth_btn.configure(
+                fg=C["error"] if self._auth.user_email else C["subtext"]))
 
     # ── Auth callbacks ────────────────────────────────────────────────────────
 
@@ -1378,12 +1386,17 @@ class AppWindow:
         self._apply_auth_ui()
 
     def _apply_auth_ui(self) -> None:
-        """Update footer to reflect current auth state. Safe to call from any thread via after()."""
+        """Update footer and settings tab to reflect current auth state. Safe to call via after()."""
         email = self._auth.user_email or ""
         if hasattr(self, "_email_display"):
             self._email_display.configure(text=email if email else "Not signed in")
         if hasattr(self, "_sign_btn"):
             self._sign_btn.configure(text="Sign Out" if email else "Sign In")
+        if hasattr(self, "_settings_auth_btn"):
+            self._settings_auth_btn.configure(
+                text="Sign Out" if email else "Sign In",
+                fg=C["error"] if email else C["subtext"],
+            )
 
     def _do_sign_in(self) -> None:
         from login_window import LoginWindow
