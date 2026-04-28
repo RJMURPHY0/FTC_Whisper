@@ -43,6 +43,28 @@ class LoginWindow:
         self._on_cancel = on_cancel
         self._mode = "login"  # "login" | "signup"
         self._pending_confirm_email: Optional[str] = None
+        self._embedded = False
+
+    def embed(self, frame: tk.Frame) -> None:
+        """Build login UI into an existing frame (in-window, no Toplevel)."""
+        self._embedded = True
+        self._root = frame.winfo_toplevel()
+        self._build_ui(container=frame)
+
+    def reset(self) -> None:
+        """Clear form fields and reset to login mode — call before showing again."""
+        if hasattr(self, "_email_var"):
+            self._email_var.set("")
+            self._password_var.set("")
+        if hasattr(self, "_confirm_var"):
+            self._confirm_var.set("")
+        self._pending_confirm_email = None
+        if hasattr(self, "_status_var"):
+            self._status_var.set("")
+            if hasattr(self, "_status_frame"):
+                self._status_frame.pack_forget()
+        if hasattr(self, "_mode"):
+            self._switch("login")
 
     def run(self, parent=None) -> None:
         """Build and run the window on the current thread (blocking).
@@ -87,11 +109,11 @@ class LoginWindow:
     # UI construction
     # ------------------------------------------------------------------
 
-    def _build_ui(self) -> None:
-        root = self._root
+    def _build_ui(self, container=None) -> None:
+        c = container or self._root
 
         # ── Logo / header ──────────────────────────────────────────────
-        header = tk.Frame(root, bg=C["bg"], pady=28)
+        header = tk.Frame(c, bg=C["bg"], pady=28)
         header.pack(fill="x")
 
         from logo_cache import get_logo_photo
@@ -110,7 +132,7 @@ class LoginWindow:
             ).pack()
 
         # ── Tab bar ────────────────────────────────────────────────────
-        tabs = tk.Frame(root, bg=C["surface"])
+        tabs = tk.Frame(c, bg=C["surface"])
         tabs.pack(fill="x", padx=32)
 
         self._login_tab = self._tab(tabs, "Sign In", lambda: self._switch("login"))
@@ -122,7 +144,7 @@ class LoginWindow:
         self._signup_tab.pack(side="left", expand=True, fill="x")
 
         # ── Form card ──────────────────────────────────────────────────
-        self._card = tk.Frame(root, bg=C["surface"], padx=32, pady=24)
+        self._card = tk.Frame(c, bg=C["surface"], padx=32, pady=24)
         self._card.pack(fill="both", expand=True, padx=32, pady=(0, 32))
 
         self._email_var = tk.StringVar()
@@ -503,11 +525,13 @@ class LoginWindow:
         threading.Thread(target=_run, daemon=True).start()
 
     def _finish(self) -> None:
-        self._root.destroy()
+        if not self._embedded:
+            self._root.destroy()
         self._on_success(self._auth)
 
     def _handle_close(self) -> None:
-        self._root.destroy()
+        if not self._embedded:
+            self._root.destroy()
         if self._on_cancel:
             self._on_cancel()
 

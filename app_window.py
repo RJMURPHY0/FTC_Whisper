@@ -107,23 +107,19 @@ class AppWindow:
         self._root.protocol("WM_DELETE_WINDOW", self._hide)
 
         self._apply_dark_titlebar()
-
         self._build_header()
 
         self._dash_frame = tk.Frame(self._root, bg=C["bg"])
         self._build_dashboard(self._dash_frame)
 
+        self._login_frame = tk.Frame(self._root, bg=C["bg"])
+        self._build_embedded_login()
+
         if self._auth.is_authenticated:
-            self._show_dashboard()
+            self._switch_to_dashboard()
             self._root.after(50, self._fire_authenticated)
         else:
-            def _cancel_to_offline():
-                self._auth.sign_in_offline()
-                self._root.deiconify()
-                self._show_dashboard()
-                self._apply_auth_ui()
-                self._fire_authenticated()
-            self._root.after(50, lambda: self._show_login_screen(after_cancel=_cancel_to_offline))
+            self._switch_to_login()
 
         self._root.mainloop()
         # Destroy after mainloop exits (quit() was called on sign-out)
@@ -165,7 +161,10 @@ class AppWindow:
     # ── Header ────────────────────────────────────────────────────────────────
 
     def _build_header(self) -> None:
-        header = tk.Frame(self._root, bg=C["bg"], pady=20)
+        # Wrap header + divider in a container so it can be hidden during login
+        self._header_outer = tk.Frame(self._root, bg=C["bg"])
+
+        header = tk.Frame(self._header_outer, bg=C["bg"], pady=20)
         header.pack(fill="x")
 
         # Gear icon — top right of header
@@ -192,8 +191,8 @@ class AppWindow:
                 font=("Segoe UI", 22, "bold"),
             ).pack()
 
-        # Hairline divider
-        tk.Frame(self._root, bg=C["divider"], height=1).pack(fill="x")
+        # Hairline divider — inside container so it hides with the header
+        tk.Frame(self._header_outer, bg=C["divider"], height=1).pack(fill="x")
 
     # ── Dashboard shell ───────────────────────────────────────────────────────
 
@@ -307,6 +306,31 @@ class AppWindow:
                     self._root.unbind_all("<MouseWheel>")
                 except Exception:
                     pass
+
+    def _build_embedded_login(self) -> None:
+        from login_window import LoginWindow
+
+        def _on_success(auth):
+            self._switch_to_dashboard()
+            self._fire_authenticated()
+            if self._on_sign_in:
+                threading.Thread(target=self._on_sign_in, args=(auth,), daemon=True).start()
+
+        self._login_ui = LoginWindow(self._auth, on_success=_on_success, on_cancel=self._do_quit)
+        self._login_ui.embed(self._login_frame)
+
+    def _switch_to_login(self) -> None:
+        self._header_outer.pack_forget()
+        self._dash_frame.pack_forget()
+        self._login_frame.pack(fill="both", expand=True)
+        self._resize(WINDOW_W, 560)
+        if hasattr(self, "_login_ui"):
+            self._login_ui.reset()
+
+    def _switch_to_dashboard(self) -> None:
+        self._login_frame.pack_forget()
+        self._header_outer.pack(fill="x")
+        self._show_dashboard()
 
     def _show_dashboard(self) -> None:
         self._dash_frame.pack(fill="both", expand=True)
@@ -1393,19 +1417,7 @@ class AppWindow:
                            parent=self._root):
             return
         self._on_sign_out()
-        self._dash_frame.pack_forget()
-
-        def _after_relogin(auth):
-            if self._on_sign_in:
-                threading.Thread(target=self._on_sign_in, args=(auth,), daemon=True).start()
-
-        def _after_cancel():
-            # Closed login without signing in — show dashboard in offline mode
-            self._root.deiconify()
-            self._show_dashboard()
-            self._apply_auth_ui()
-
-        self._show_login_screen(after_login=_after_relogin, after_cancel=_after_cancel)
+        self._switch_to_login()
 
     def _show_login_screen(self, after_login=None, after_cancel=None) -> None:
         """Hide main window, show login as the primary screen, restore on success."""
