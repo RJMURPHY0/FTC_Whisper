@@ -112,8 +112,18 @@ class AppWindow:
 
         self._dash_frame = tk.Frame(self._root, bg=C["bg"])
         self._build_dashboard(self._dash_frame)
-        self._show_dashboard()
-        self._root.after(50, self._fire_authenticated)
+
+        if self._auth.is_authenticated:
+            self._show_dashboard()
+            self._root.after(50, self._fire_authenticated)
+        else:
+            def _cancel_to_offline():
+                self._auth.sign_in_offline()
+                self._root.deiconify()
+                self._show_dashboard()
+                self._apply_auth_ui()
+                self._fire_authenticated()
+            self._root.after(50, lambda: self._show_login_screen(after_cancel=_cancel_to_offline))
 
         self._root.mainloop()
         # Destroy after mainloop exits (quit() was called on sign-out)

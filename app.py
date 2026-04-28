@@ -922,8 +922,9 @@ def main() -> None:
 
     if auth_enabled:
         auth.try_restore_session()
-    if not auth.is_authenticated:
-        auth.sign_in_offline()
+        # If no session restored, AppWindow will show the login screen
+    else:
+        auth.sign_in_offline()  # No Supabase configured — go straight offline
 
     app = WhisperFlowApp(auth, config)
     app.run()
