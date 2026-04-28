@@ -52,10 +52,16 @@ class LoginWindow:
             self._root.transient(parent)
             self._root.grab_set()
             parent.update_idletasks()
-            px, py = parent.winfo_x(), parent.winfo_y()
-            pw, ph = parent.winfo_width(), parent.winfo_height()
-            x = px + (pw - WINDOW_W) // 2
-            y = py + (ph - WINDOW_H) // 2
+            if parent.winfo_viewable():
+                px, py = parent.winfo_x(), parent.winfo_y()
+                pw, ph = parent.winfo_width(), parent.winfo_height()
+                x = px + (pw - WINDOW_W) // 2
+                y = py + (ph - WINDOW_H) // 2
+            else:
+                sw = parent.winfo_screenwidth()
+                sh = parent.winfo_screenheight()
+                x = (sw - WINDOW_W) // 2
+                y = (sh - WINDOW_H) // 2
         else:
             self._root = tk.Tk()
             self._root.update_idletasks()

@@ -1377,14 +1377,51 @@ class AppWindow:
 
     def _do_sign_out(self) -> None:
         if not self._auth.user_email:
-            return  # already offline, nothing to sign out of
+            return
         import tkinter.messagebox as mb
         if not mb.askyesno("Sign Out", "Are you sure you want to sign out?",
                            parent=self._root):
             return
         self._on_sign_out()
-        self._apply_auth_ui()
-        self._do_sign_in()
+        self._dash_frame.pack_forget()
+
+        def _after_relogin(auth):
+            if self._on_sign_in:
+                threading.Thread(target=self._on_sign_in, args=(auth,), daemon=True).start()
+
+        def _after_cancel():
+            # Closed login without signing in — show dashboard in offline mode
+            self._root.deiconify()
+            self._show_dashboard()
+            self._apply_auth_ui()
+
+        self._show_login_screen(after_login=_after_relogin, after_cancel=_after_cancel)
+
+    def _show_login_screen(self, after_login=None, after_cancel=None) -> None:
+        """Hide main window, show login as the primary screen, restore on success."""
+        from login_window import LoginWindow, WINDOW_W as LW, WINDOW_H as LH
+        sw = self._root.winfo_screenwidth()
+        sh = self._root.winfo_screenheight()
+        # Set root geometry to login size at screen center before withdrawing so
+        # LoginWindow can position its Toplevel correctly relative to the parent.
+        self._root.geometry(f"{LW}x{LH}+{(sw - LW) // 2}+{(sh - LH) // 2}")
+        self._root.withdraw()
+
+        def _on_success(auth):
+            self._root.deiconify()
+            self._show_dashboard()
+            self._apply_auth_ui()
+            self._fire_authenticated()
+            if after_login:
+                after_login(auth)
+
+        def _on_cancel():
+            if after_cancel:
+                after_cancel()
+            else:
+                self._do_quit()
+
+        LoginWindow(self._auth, on_success=_on_success, on_cancel=_on_cancel).run(parent=self._root)
 
     def _apply_auth_ui(self) -> None:
         """Update footer and settings tab to reflect current auth state. Safe to call via after()."""
