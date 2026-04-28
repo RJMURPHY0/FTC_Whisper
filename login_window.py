@@ -227,6 +227,17 @@ class LoginWindow:
         self._divider_frame.pack(fill="x", pady=(12, 0))
         self._google_btn.pack(fill="x", pady=(8, 0))
 
+        # Use offline link (no account / no connection)
+        self._offline_link = tk.Label(
+            self._card, text="Continue without account (offline mode)",
+            fg=C["subtext"], bg=C["surface"],
+            font=("Segoe UI", 8), cursor="hand2", pady=(4),
+        )
+        self._offline_link.pack(fill="x", pady=(10, 0))
+        self._offline_link.bind("<Button-1>", lambda _e: self._use_offline())
+        self._offline_link.bind("<Enter>", lambda _e: self._offline_link.configure(fg=C["text"]))
+        self._offline_link.bind("<Leave>", lambda _e: self._offline_link.configure(fg=C["subtext"]))
+
         # Enter key submits
         self._root.bind("<Return>", lambda _e: self._submit())
 
@@ -368,6 +379,11 @@ class LoginWindow:
         show = self._confirm_entry.cget("show") == "•"
         self._confirm_entry.configure(show="" if show else "•")
         self._confirm_eye.configure(fg=C["accent"] if show else C["subtext"])
+
+    def _use_offline(self) -> None:
+        self._auth.sign_in_offline()
+        self._root.quit()
+        self._on_success(self._auth)
 
     def _forgot_password(self) -> None:
         email = self._email_var.get().strip()

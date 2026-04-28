@@ -60,6 +60,10 @@ class AIRefiner:
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self._client = None
 
+    def update_api_key(self, api_key: str) -> None:
+        self.api_key = api_key.strip()
+        self._client = None  # force re-init with new key
+
     @property
     def is_available(self) -> bool:
         return bool(self.api_key)

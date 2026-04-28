@@ -77,6 +77,28 @@ class SupabaseLogger:
     # Internal
     # ------------------------------------------------------------------
 
+    def fetch_app_setting(self, key: str) -> str:
+        """Fetch a single value from the app_settings table (synchronous, 8 s timeout)."""
+        if not self._enabled:
+            return ""
+        result: list = [""]
+        def _fetch():
+            try:
+                r = (self._get_client()
+                     .table("app_settings")
+                     .select("value")
+                     .eq("key", key)
+                     .limit(1)
+                     .execute())
+                if r.data:
+                    result[0] = r.data[0].get("value", "")
+            except Exception as e:
+                print(f"[Supabase] fetch_app_setting({key!r}) failed: {e}")
+        t = threading.Thread(target=_fetch, daemon=True)
+        t.start()
+        t.join(timeout=8.0)
+        return result[0]
+
     def fetch_history(self, limit: int = 30) -> list:
         """Fetch recent transcriptions (synchronous, 10 s timeout)."""
         if not self._enabled:

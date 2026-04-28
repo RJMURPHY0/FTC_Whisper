@@ -74,9 +74,13 @@ class WhisperFlowApp:
             on_quit=self._shutdown,
             on_hotkey_change=self._on_hotkey_change,
             on_refine_hotkey_change=self._on_refine_hotkey_change,
+            on_settings_change=self._on_settings_change,
             db=self.db,
             hotkey=config.hotkey,
             refine_hotkey=config.refine_hotkey,
+            config=config,
+            get_input_devices=self.recorder.get_input_devices,
+            recorder=self.recorder,
         )
 
         self.tray = TrayApp(
@@ -153,10 +157,18 @@ class WhisperFlowApp:
 
         print(f"[App] Authenticated as {auth.user_email}")
 
+        # If no local API key, try to fetch from Supabase app_settings
+        if not self.ai_refiner.is_available and self.db.is_enabled:
+            key = self.db.fetch_app_setting("anthropic_api_key")
+            if key:
+                self.ai_refiner.update_api_key(key)
+                self.popup.set_ai_refiner(self.ai_refiner)
+                print("[App] Loaded Anthropic API key from Supabase.")
+
         if self.ai_refiner.is_available:
             print("[App] AI refinement enabled.")
         else:
-            print("[App] AI refinement disabled — set anthropic_api_key in config.")
+            print("[App] AI refinement disabled — set anthropic_api_key in config or add to Supabase app_settings.")
 
         if self.db.is_enabled:
             print(f"[App] Supabase logging enabled.")
@@ -189,6 +201,19 @@ class WhisperFlowApp:
         self.config.refine_hotkey = new_hotkey
         self.config.save()
         self.refine_hotkey_manager.update_hotkey(new_hotkey)
+
+    def _on_settings_change(self, key: str, value) -> None:
+        """Called when the user saves a setting in the Settings panel."""
+        print(f"[App] Setting changed: {key} = {value!r}")
+        setattr(self.config, key, value)
+        self.config.save()
+        if key == "anthropic_api_key":
+            self.ai_refiner.update_api_key(value)
+            self.popup.set_ai_refiner(self.ai_refiner)
+        elif key == "input_device":
+            self.recorder.input_device = value.strip() if value else ""
+        elif key == "sound_feedback":
+            self.feedback.sound_enabled = bool(value)
 
     # ------------------------------------------------------------------
     # Recording pipeline

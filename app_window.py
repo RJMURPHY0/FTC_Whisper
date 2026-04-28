@@ -62,9 +62,13 @@ class AppWindow:
         on_quit: Callable,
         on_hotkey_change: Callable,
         on_refine_hotkey_change: Callable = None,
+        on_settings_change: Callable = None,
         db=None,
         hotkey: str = "alt+v",
         refine_hotkey: str = "alt+r",
+        config=None,
+        get_input_devices: Callable = None,
+        recorder=None,
     ):
         self._auth                    = auth
         self._on_authenticated        = on_authenticated
@@ -73,7 +77,11 @@ class AppWindow:
         self._on_quit                 = on_quit
         self._on_hotkey_change        = on_hotkey_change
         self._on_refine_hotkey_change = on_refine_hotkey_change
+        self._on_settings_change      = on_settings_change
         self._db                      = db
+        self._config                  = config
+        self._get_input_devices       = get_input_devices
+        self._recorder                = recorder
         self._hotkey                  = hotkey.upper()
         self._refine_hotkey           = refine_hotkey.upper()
         self._root: Optional[tk.Tk] = None
@@ -145,6 +153,18 @@ class AppWindow:
         header = tk.Frame(self._root, bg=C["bg"], pady=20)
         header.pack(fill="x")
 
+        # Gear icon — top right of header
+        self._gear_btn = tk.Label(
+            header, text="⚙",
+            fg=C["subtext"], bg=C["bg"],
+            font=("Segoe UI", 15), cursor="hand2", padx=12,
+        )
+        self._gear_btn.pack(side="right", anchor="ne")
+        self._gear_btn.bind("<Button-1>", lambda _e: self._switch_dash_tab("settings"))
+        self._gear_btn.bind("<Enter>",    lambda _e: self._gear_btn.configure(fg=C["text"]))
+        self._gear_btn.bind("<Leave>",    lambda _e: self._gear_btn.configure(
+            fg=C["accent"] if getattr(self, "_current_tab", "") == "settings" else C["subtext"]))
+
         from logo_cache import get_logo_photo
         self._logo_photo = get_logo_photo(self._root, C["bg"], max_w=180, max_h=60)
 
@@ -196,13 +216,15 @@ class AppWindow:
         self._dash_content = tk.Frame(parent, bg=C["bg"])
         self._dash_content.pack(fill="both", expand=True, pady=(10, 0))
 
-        self._home_frame    = tk.Frame(self._dash_content, bg=C["bg"])
-        self._hotkey_frame  = tk.Frame(self._dash_content, bg=C["bg"])
-        self._history_frame = tk.Frame(self._dash_content, bg=C["bg"])
+        self._home_frame     = tk.Frame(self._dash_content, bg=C["bg"])
+        self._hotkey_frame   = tk.Frame(self._dash_content, bg=C["bg"])
+        self._history_frame  = tk.Frame(self._dash_content, bg=C["bg"])
+        self._settings_frame = tk.Frame(self._dash_content, bg=C["bg"])
 
         self._build_home_tab(self._home_frame)
         self._build_hotkey_tab(self._hotkey_frame)
         self._build_history_tab(self._history_frame)
+        self._build_settings_tab(self._settings_frame)
 
         # Footer
         footer = tk.Frame(parent, bg=C["bg"], padx=24, pady=10)
@@ -223,21 +245,39 @@ class AppWindow:
         self._switch_dash_tab("home")
 
     def _switch_dash_tab(self, name: str) -> None:
+        self._current_tab = name
+
         for n, frame in [("home",    self._home_frame),
                          ("hotkey",  self._hotkey_frame),
-                         ("history", self._history_frame)]:
+                         ("history", self._history_frame),
+                         ("settings", self._settings_frame)]:
             active = (n == name)
             if active:
                 frame.pack(fill="both", expand=True)
-                self._dash_tabs[n].configure(fg=C["accent"])
-                self._tab_indicators[n].configure(bg=C["accent"])
+                if n in self._dash_tabs:
+                    self._dash_tabs[n].configure(fg=C["accent"])
+                    self._tab_indicators[n].configure(bg=C["accent"])
             else:
                 frame.pack_forget()
-                self._dash_tabs[n].configure(fg=C["subtext"])
-                self._tab_indicators[n].configure(bg=C["bg"])
+                if n in self._dash_tabs:
+                    self._dash_tabs[n].configure(fg=C["subtext"])
+                    self._tab_indicators[n].configure(bg=C["bg"])
 
+        # Gear icon highlight
+        is_settings = (name == "settings")
+        self._gear_btn.configure(fg=C["accent"] if is_settings else C["subtext"])
+
+        # Bind scroll globally only while history tab is active
         if name == "history":
             self._load_history()
+            if self._root:
+                self._root.bind_all("<MouseWheel>", self._hist_scroll)
+        else:
+            if self._root:
+                try:
+                    self._root.unbind_all("<MouseWheel>")
+                except Exception:
+                    pass
 
     def _show_dashboard(self) -> None:
         self._dash_frame.pack(fill="both", expand=True)
@@ -630,9 +670,6 @@ class AppWindow:
         self._hist_cv.bind("<Configure>", lambda e: self._hist_cv.itemconfigure(
             self._hist_items_win, width=e.width))
 
-        # bind_all while mouse is inside the card so every child widget scrolls
-        card_cv.bind("<Enter>", lambda _e: card_cv.bind_all("<MouseWheel>", self._hist_scroll))
-        card_cv.bind("<Leave>", lambda _e: card_cv.unbind_all("<MouseWheel>"))
 
     def _hist_scroll(self, event) -> None:
         if hasattr(self, "_hist_cv"):
@@ -762,6 +799,232 @@ class AppWindow:
         if self._db:
             self._db.clear_history()
         self._root.after(0, self._load_history)
+
+    # ── Settings tab ─────────────────────────────────────────────────────────
+
+    def _build_settings_tab(self, parent: tk.Frame) -> None:
+        cfg = self._config
+
+        # ── Microphone ────────────────────────────────────────────────────────
+        mic_card = self._card(parent, margin=(0, 8))
+        tk.Label(mic_card, text="Microphone",
+                 fg=C["subtext"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
+
+        try:
+            devs = self._get_input_devices() if self._get_input_devices else []
+        except Exception:
+            devs = []
+
+        # Deduplicate by name, then sort: real mics first, virtual/system last
+        def _mic_rank(d):
+            n = d["name"].lower()
+            if any(x in n for x in ["stereo mix", "sound mapper", "primary sound",
+                                     "what u hear", "wave out", "pc speaker"]):
+                return 2
+            if any(x in n for x in ["microphone", "mic", "headset", "webcam",
+                                     "logi", "jabra", "yeti", "rode", "shure",
+                                     "usb audio", "array"]):
+                return 0
+            return 1
+
+        seen_names: set = set()
+        unique_devs = []
+        for d in devs:
+            if d["name"] not in seen_names:
+                seen_names.add(d["name"])
+                unique_devs.append(d)
+        unique_devs.sort(key=_mic_rank)
+
+        mic_options = ["Default"] + [d["name"] for d in unique_devs]
+        current_mic = (cfg.input_device or "") if cfg else ""
+        mic_var = tk.StringVar(value=current_mic if current_mic in mic_options else "Default")
+
+        mic_menu = tk.OptionMenu(mic_card, mic_var, *mic_options)
+        mic_menu.configure(bg=C["surface_hover"], fg=C["text"], relief="flat",
+                           font=("Segoe UI", 9), anchor="w", highlightthickness=0,
+                           activebackground=C["accent"], activeforeground=C["bg"])
+        mic_menu["menu"].configure(bg=C["surface"], fg=C["text"],
+                                   activebackground=C["accent"], activeforeground=C["bg"],
+                                   font=("Segoe UI", 9))
+        mic_menu.pack(fill="x", pady=(4, 0))
+
+        # ── Mic test button + level meter ─────────────────────────────────────
+        test_row = tk.Frame(mic_card, bg=C["surface"])
+        test_row.pack(fill="x", pady=(8, 0))
+
+        test_status = tk.Label(test_row, text="", fg=C["subtext"], bg=C["surface"],
+                               font=("Segoe UI", 8), anchor="w")
+        test_status.pack(side="left", fill="x", expand=True)
+
+        test_btn = tk.Label(test_row, text="Test Mic",
+                            fg=C["text"], bg=C["surface_hover"],
+                            font=("Segoe UI", 9), padx=10, pady=6, cursor="hand2")
+        test_btn.pack(side="right")
+        test_btn.bind("<Enter>", lambda _e: test_btn.configure(bg=C["accent"], fg=C["bg"]))
+        test_btn.bind("<Leave>", lambda _e: test_btn.configure(bg=C["surface_hover"], fg=C["text"]))
+
+        meter_cv = tk.Canvas(mic_card, height=6, bg=C["input_bg"], highlightthickness=0)
+        meter_fill_id = meter_cv.create_rectangle(0, 0, 0, 6, fill=C["success"], outline="")
+
+        mic_test_active = [False]
+        mic_test_job = [None]
+
+        def _poll_meter():
+            if not mic_test_active[0] or not self._recorder:
+                return
+            rms, _ = self._recorder.get_live_levels()
+            meter_cv.update_idletasks()
+            total_w = max(meter_cv.winfo_width(), 1)
+            bar_w = int(min(rms / 0.25, 1.0) * total_w)
+            color = C["success"] if rms > 0.06 else (C["accent"] if rms > 0.015 else C["subtext"])
+            meter_cv.coords(meter_fill_id, 0, 0, bar_w, 6)
+            meter_cv.itemconfigure(meter_fill_id, fill=color)
+            mic_test_job[0] = self._root.after(80, _poll_meter)
+
+        def _stop_test():
+            mic_test_active[0] = False
+            if mic_test_job[0]:
+                self._root.after_cancel(mic_test_job[0])
+                mic_test_job[0] = None
+            if self._recorder:
+                self._recorder.stop_monitor()
+            meter_cv.pack_forget()
+            meter_cv.coords(meter_fill_id, 0, 0, 0, 6)
+            test_btn.configure(text="Test Mic")
+            test_status.configure(text="")
+
+        def _start_test():
+            if not self._recorder:
+                test_status.configure(text="Recorder unavailable", fg=C["error"])
+                return
+            if self._recorder.is_recording:
+                test_status.configure(text="Stop recording first", fg=C["error"])
+                return
+            selected = mic_var.get()
+            device_name = "" if selected == "Default" else selected
+            try:
+                self._recorder.start_monitor(device_name)
+            except Exception:
+                test_status.configure(text="Could not open mic", fg=C["error"])
+                return
+            mic_test_active[0] = True
+            meter_cv.pack(fill="x", pady=(6, 0))
+            test_btn.configure(text="Stop")
+            test_status.configure(text="Say something…", fg=C["subtext"])
+            self._root.after(5000, lambda: _stop_test() if mic_test_active[0] else None)
+            _poll_meter()
+
+        def _toggle_test():
+            if mic_test_active[0]:
+                _stop_test()
+            else:
+                _start_test()
+
+        test_btn.bind("<Button-1>", lambda _e: _toggle_test())
+
+        # ── Whisper model ─────────────────────────────────────────────────────
+        model_card = self._card(parent, margin=(0, 0))
+        tk.Label(model_card, text="Transcription Model",
+                 fg=C["subtext"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
+        tk.Label(model_card, text="Larger = more accurate, slower to load",
+                 fg=C["subtext"], bg=C["surface"],
+                 font=("Segoe UI", 8), anchor="w").pack(fill="x")
+
+        model_options = ["tiny.en", "base.en", "small.en", "medium.en",
+                         "tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]
+        current_model = (cfg.whisper_model if cfg else "base.en") or "base.en"
+        model_var = tk.StringVar(value=current_model)
+
+        model_menu = tk.OptionMenu(model_card, model_var, *model_options)
+        model_menu.configure(bg=C["surface_hover"], fg=C["text"], relief="flat",
+                             font=("Segoe UI", 9), anchor="w", highlightthickness=0,
+                             activebackground=C["accent"], activeforeground=C["bg"])
+        model_menu["menu"].configure(bg=C["surface"], fg=C["text"],
+                                     activebackground=C["accent"], activeforeground=C["bg"],
+                                     font=("Segoe UI", 9))
+        model_menu.pack(fill="x", pady=(4, 0))
+
+        # ── Anthropic API Key ─────────────────────────────────────────────────
+        api_card = self._card(parent, margin=(0, 8))
+        tk.Label(api_card, text="Anthropic API Key",
+                 fg=C["subtext"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
+        tk.Label(api_card, text="Required for AI text refinement features",
+                 fg=C["subtext"], bg=C["surface"],
+                 font=("Segoe UI", 8), anchor="w").pack(fill="x")
+
+        api_row = tk.Frame(api_card, bg=C["surface"])
+        api_row.pack(fill="x", pady=(4, 0))
+
+        current_key = (cfg.anthropic_api_key if cfg else "") or ""
+        api_var = tk.StringVar(value=current_key)
+        api_entry = tk.Entry(api_row, textvariable=api_var, show="●",
+                             bg=C["input_bg"], fg=C["text"], insertbackground=C["text"],
+                             relief="flat", font=("Segoe UI", 9), bd=6)
+        api_entry.pack(side="left", fill="x", expand=True)
+
+        show_var = [False]
+        show_btn = tk.Label(api_row, text="Show", fg=C["subtext"], bg=C["surface"],
+                            font=("Segoe UI", 8), cursor="hand2", padx=6)
+        show_btn.pack(side="right")
+
+        def _toggle_show(_e=None):
+            show_var[0] = not show_var[0]
+            api_entry.configure(show="" if show_var[0] else "●")
+            show_btn.configure(text="Hide" if show_var[0] else "Show")
+        show_btn.bind("<Button-1>", _toggle_show)
+
+        # ── Sound feedback ────────────────────────────────────────────────────
+        sound_card = self._card(parent, margin=(0, 0))
+        sound_row = tk.Frame(sound_card, bg=C["surface"])
+        sound_row.pack(fill="x")
+        tk.Label(sound_row, text="Sound Feedback",
+                 fg=C["text"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(side="left", fill="x", expand=True)
+
+        current_sound = bool(cfg.sound_feedback if cfg else True)
+        sound_var = tk.BooleanVar(value=current_sound)
+
+        def _make_toggle_btn():
+            txt = "On" if sound_var.get() else "Off"
+            col = C["success"] if sound_var.get() else C["subtext"]
+            sound_toggle.configure(text=txt, fg=col)
+
+        sound_toggle = tk.Label(sound_row, text="", fg=C["subtext"], bg=C["surface"],
+                                font=("Segoe UI", 9, "bold"), cursor="hand2")
+        sound_toggle.pack(side="right")
+
+        def _toggle_sound(_e=None):
+            sound_var.set(not sound_var.get())
+            _make_toggle_btn()
+        sound_toggle.bind("<Button-1>", _toggle_sound)
+        _make_toggle_btn()
+
+        # ── Save button ───────────────────────────────────────────────────────
+        save_wrap = tk.Frame(parent, bg=C["bg"])
+        save_wrap.pack(fill="x", padx=20, pady=(12, 4))
+
+        self._settings_status = tk.Label(save_wrap, text="",
+                                         fg=C["success"], bg=C["bg"],
+                                         font=("Segoe UI", 9))
+        self._settings_status.pack(side="left")
+
+        def _save(_e=None):
+            if self._on_settings_change:
+                mic_val = mic_var.get()
+                self._on_settings_change("input_device",
+                                         "" if mic_val == "Default" else mic_val)
+                self._on_settings_change("whisper_model", model_var.get())
+                self._on_settings_change("anthropic_api_key", api_var.get().strip())
+                self._on_settings_change("sound_feedback", sound_var.get())
+            self._settings_status.configure(text="Saved ✓", fg=C["success"])
+            if self._root:
+                self._root.after(2500, lambda: self._settings_status.configure(text=""))
+
+        save_btn = self._surface_btn(save_wrap, "Save Settings", _save)
+        save_btn.pack(side="right")
 
     # ── Auth callbacks ────────────────────────────────────────────────────────
 
