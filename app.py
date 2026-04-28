@@ -719,8 +719,11 @@ class WhisperFlowApp:
     def _sign_out(self) -> None:
         print("[App] Signing out...")
         self._auth.sign_out()
+        self._auth.sign_in_offline()   # back to offline state immediately
         self.db.set_user(None)
         self.tray.set_user_email("")
+        if self.app_window._root:
+            self.app_window._root.after(0, self.app_window._apply_auth_ui)
         print("[App] Signed out — running in offline mode.")
 
     def _shutdown(self) -> None:
