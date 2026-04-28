@@ -44,24 +44,38 @@ class LoginWindow:
         self._mode = "login"  # "login" | "signup"
         self._pending_confirm_email: Optional[str] = None
 
-    def run(self) -> None:
-        """Build and run the window on the current thread (blocking)."""
-        self._root = tk.Tk()
+    def run(self, parent=None) -> None:
+        """Build and run the window on the current thread (blocking).
+        If parent is provided, opens as a modal Toplevel over the parent window."""
+        if parent is not None:
+            self._root = tk.Toplevel(parent)
+            self._root.transient(parent)
+            self._root.grab_set()
+            parent.update_idletasks()
+            px, py = parent.winfo_x(), parent.winfo_y()
+            pw, ph = parent.winfo_width(), parent.winfo_height()
+            x = px + (pw - WINDOW_W) // 2
+            y = py + (ph - WINDOW_H) // 2
+        else:
+            self._root = tk.Tk()
+            self._root.update_idletasks()
+            sw = self._root.winfo_screenwidth()
+            sh = self._root.winfo_screenheight()
+            x = (sw - WINDOW_W) // 2
+            y = (sh - WINDOW_H) // 2
+
         self._root.title("FTC Whisper")
         self._root.configure(bg=C["bg"])
         self._root.resizable(False, False)
         self._root.protocol("WM_DELETE_WINDOW", self._handle_close)
-
-        # Centre on screen
-        self._root.update_idletasks()
-        sw = self._root.winfo_screenwidth()
-        sh = self._root.winfo_screenheight()
-        x = (sw - WINDOW_W) // 2
-        y = (sh - WINDOW_H) // 2
         self._root.geometry(f"{WINDOW_W}x{WINDOW_H}+{x}+{y}")
 
         self._build_ui()
-        self._root.mainloop()
+
+        if parent is not None:
+            self._root.wait_window()
+        else:
+            self._root.mainloop()
 
     # ------------------------------------------------------------------
     # UI construction

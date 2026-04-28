@@ -64,6 +64,7 @@ class AppWindow:
         on_hotkey_change: Callable,
         on_refine_hotkey_change: Callable = None,
         on_settings_change: Callable = None,
+        on_sign_in: Callable = None,
         db=None,
         hotkey: str = "alt+v",
         refine_hotkey: str = "alt+r",
@@ -80,6 +81,7 @@ class AppWindow:
         self._on_hotkey_change        = on_hotkey_change
         self._on_refine_hotkey_change = on_refine_hotkey_change
         self._on_settings_change      = on_settings_change
+        self._on_sign_in              = on_sign_in
         self._db                      = db
         self._config                  = config
         self._get_input_devices       = get_input_devices
@@ -249,7 +251,8 @@ class AppWindow:
 
         self._ghost_btn(footer, "Quit", self._do_quit).pack(side="right", padx=(8, 0))
         sign_label = "Sign Out" if email else "Sign In"
-        self._ghost_btn(footer, sign_label, self._do_sign_out).pack(side="right")
+        self._sign_btn = self._ghost_btn(footer, sign_label, self._do_sign_action)
+        self._sign_btn.pack(side="right")
 
         tk.Frame(parent, bg=C["divider"], height=1).pack(fill="x", before=footer)
 
@@ -1357,13 +1360,32 @@ class AppWindow:
             target=self._on_authenticated, args=(self._auth,), daemon=True
         ).start()
 
-    def _do_sign_out(self) -> None:
+    def _do_sign_action(self) -> None:
         if self._auth.user_email:
-            import tkinter.messagebox as mb
-            if not mb.askyesno("Sign Out", "Are you sure you want to sign out?",
-                               parent=self._root):
-                return
+            self._do_sign_out()
+        else:
+            self._do_sign_in()
+
+    def _do_sign_out(self) -> None:
+        import tkinter.messagebox as mb
+        if not mb.askyesno("Sign Out", "Are you sure you want to sign out?",
+                           parent=self._root):
+            return
         self._on_sign_out()
+        self._email_display.configure(text="Not signed in")
+        self._sign_btn.configure(text="Sign In")
+
+    def _do_sign_in(self) -> None:
+        from login_window import LoginWindow
+
+        def _on_success(auth):
+            email = auth.user_email or ""
+            self._email_display.configure(text=email if email else "Not signed in")
+            self._sign_btn.configure(text="Sign Out" if email else "Sign In")
+            if self._on_sign_in:
+                threading.Thread(target=self._on_sign_in, args=(auth,), daemon=True).start()
+
+        LoginWindow(self._auth, on_success=_on_success).run(parent=self._root)
 
     def _do_quit(self) -> None:
         self._on_quit()

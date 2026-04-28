@@ -31,7 +31,7 @@ from ai_refiner import AIRefiner
 from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
-from login_window import LoginWindow
+
 
 
 class WhisperFlowApp:
@@ -70,6 +70,7 @@ class WhisperFlowApp:
             auth=auth,
             on_authenticated=self._on_authenticated,
             on_sign_out=self._sign_out,
+            on_sign_in=self._on_sign_in,
             on_open_config=self._open_config,
             on_quit=self._shutdown,
             on_hotkey_change=self._on_hotkey_change,
@@ -701,21 +702,26 @@ class WhisperFlowApp:
             os.startfile(config_path)
             print(f"[App] Opened config: {config_path}")
 
+    def _on_sign_in(self, auth) -> None:
+        """Called (on a daemon thread) after the user signs in via the overlay."""
+        if auth._client:
+            self.db.set_client(auth._client)
+        self.db.set_user(auth.user_id)
+        self.tray.set_user_email(auth.user_email or "")
+        print(f"[App] Signed in as {auth.user_email}")
+        if not self.ai_refiner.is_available and self.db.is_enabled:
+            key = self.db.fetch_app_setting("anthropic_api_key")
+            if key:
+                self.ai_refiner.update_api_key(key)
+                self.popup.set_ai_refiner(self.ai_refiner)
+                print("[App] Loaded Anthropic API key from Supabase.")
+
     def _sign_out(self) -> None:
         print("[App] Signing out...")
         self._auth.sign_out()
-        self._restart_for_reauth = True
-        self.hotkey_manager.unregister()
-        self.refine_hotkey_manager.unregister()
-        if self.recorder.is_recording:
-            self.recorder.stop()
         self.db.set_user(None)
         self.tray.set_user_email("")
-        self.tray.stop()
-        if self.app_window._root:
-            # quit() exits mainloop cleanly; the while loop in main() then
-            # destroys the root before creating the login window's fresh Tk()
-            self.app_window._root.after(0, self.app_window._root.quit)
+        print("[App] Signed out — running in offline mode.")
 
     def _shutdown(self) -> None:
         print("[App] Shutting down...")
@@ -911,29 +917,13 @@ def main() -> None:
 
     auth_enabled = bool(config.supabase_url and config.supabase_key)
 
-    # On first launch always start offline — login is opt-in from within the app
-    show_login = False
+    if auth_enabled:
+        auth.try_restore_session()
+    if not auth.is_authenticated:
+        auth.sign_in_offline()
 
-    while True:
-        if auth_enabled:
-            if not auth.try_restore_session():
-                if show_login:
-                    print("[App] Showing login window...")
-                    LoginWindow(auth, on_success=lambda _auth: None).run()
-                if not auth.is_authenticated:
-                    auth.sign_in_offline()
-        else:
-            auth.sign_in_offline()
-
-        app = WhisperFlowApp(auth, config)
-        app.run()
-
-        if not app._restart_for_reauth:
-            break
-
-        # User clicked Sign In — show login on next iteration
-        show_login = True
-        print("[App] Returning to sign-in screen...")
+    app = WhisperFlowApp(auth, config)
+    app.run()
 
 
 if __name__ == "__main__":
