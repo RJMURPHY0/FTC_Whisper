@@ -920,11 +920,8 @@ def main() -> None:
 
     auth_enabled = bool(config.supabase_url and config.supabase_key)
 
-    if auth_enabled:
-        auth.try_restore_session()
-        # If no session restored, AppWindow will show the login screen
-    else:
-        auth.sign_in_offline()  # No Supabase configured — go straight offline
+    if not auth_enabled:
+        auth.sign_in_offline()  # No Supabase configured — skip login
 
     app = WhisperFlowApp(auth, config)
     app.run()

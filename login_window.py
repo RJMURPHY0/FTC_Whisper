@@ -343,15 +343,15 @@ class LoginWindow:
     # ------------------------------------------------------------------
 
     def _submit(self) -> None:
-        email = self._email_var.get().strip()
-        password = self._password_var.get()
+        email = self._email_entry.get().strip()
+        password = self._pass_entry.get()
 
         if not email or not password:
             self._set_status("Please enter your email and password.", error=True)
             return
 
         if self._mode == "signup":
-            if password != self._confirm_var.get():
+            if password != self._confirm_entry.get():
                 self._set_status("Passwords do not match.", error=True)
                 return
             if len(password) < 6:
@@ -372,34 +372,49 @@ class LoginWindow:
         threading.Thread(target=_run, daemon=True).start()
 
     def _handle_result(self, ok: bool, msg: str) -> None:
-        self._submit_btn.configure(bg=C["accent"], cursor="hand2")
         print(f"[Login] ok={ok} msg={msg!r}")
 
         if ok and self._auth.is_authenticated:
             self._pending_confirm_email = None
-            self._set_status(f"✓  {msg}", error=False)
-            self._root.after(800, self._finish)
+            name = self._auth.user_email or "you"
+            self._submit_btn.configure(
+                text=f"✓  Welcome back, {name}!",
+                bg=C["success"],
+                fg=C["bg"],
+                cursor="",
+            )
+            self._root.after(1200, self._finish)
             return
 
+        self._submit_btn.configure(bg=C["accent"], cursor="hand2")
+
         if ok and self._mode == "signup":
-            email = self._email_var.get().strip()
+            email = self._email_entry.get().strip()
             self._pending_confirm_email = email
             self._set_status(
                 f"✉  Confirmation email sent to {email}\n"
                 "Check your inbox, click the link, then sign in here.",
                 error=False,
             )
-            self._password_var.set("")
-            self._confirm_var.set("")
+            self._pass_entry.delete(0, "end")
+            self._confirm_entry.delete(0, "end")
             self._switch("login", clear_status=False)
             return
 
         if not ok and ("email not confirmed" in msg.lower() or "email_not_confirmed" in msg.lower()):
-            self._pending_confirm_email = self._email_var.get().strip()
+            self._pending_confirm_email = self._email_entry.get().strip()
             self._resend_link.pack_forget()
             self._resend_link.pack(anchor="center", pady=(4, 0))
 
-        self._set_status(f"✕  {msg}", error=True)
+        self._submit_btn.configure(
+            text=f"✕  {msg}",
+            bg=C["error"],
+            fg=C["text"],
+            cursor="hand2",
+        )
+        self._root.after(3000, lambda: self._submit_btn.configure(
+            text="Sign In", bg=C["accent"], fg=C["bg"], cursor="hand2"
+        ))
 
     def _toggle_pass(self) -> None:
         self._pass_visible = not self._pass_visible
@@ -417,7 +432,7 @@ class LoginWindow:
         self._on_success(self._auth)
 
     def _forgot_password(self) -> None:
-        email = self._email_var.get().strip()
+        email = self._email_entry.get().strip()
         if not email:
             self._set_status("Enter your email address above first.", error=True)
             return
@@ -430,7 +445,7 @@ class LoginWindow:
         threading.Thread(target=_run, daemon=True).start()
 
     def _resend_confirmation(self) -> None:
-        email = self._pending_confirm_email or self._email_var.get().strip()
+        email = self._pending_confirm_email or self._email_entry.get().strip()
         if not email:
             self._set_status("Enter your email address above first.", error=True)
             return
