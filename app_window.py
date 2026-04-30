@@ -1019,28 +1019,59 @@ class AppWindow:
                     text="No signal detected — try speaking louder", fg=C["error"])
 
         def _run_scan():
+            import sounddevice as _sd
+            import numpy as _np
+
             mics_to_test = [d for d in unique_devs if _mic_rank(d) < 2]
-            results = {}
-            total = len(mics_to_test)
-            for i, d in enumerate(mics_to_test):
+            if not mics_to_test:
+                self._root.after(0, lambda: _scan_done(None, 0.0))
+                return
+
+            SR = 16000
+            chunks = {d["name"]: [] for d in mics_to_test}
+            streams = {}
+
+            for d in mics_to_test:
                 name = d["name"]
-                short = name if len(name) <= 24 else name[:21] + "…"
-                msg = f"Testing {i + 1}/{total}: {short}"
-                self._root.after(0, lambda m=msg: test_status.configure(
-                    text=m, fg=C["subtext"]))
                 try:
-                    self._recorder.start_monitor(name)
+                    def _cb(indata, frames, t, status, _n=name):
+                        chunks[_n].append(indata.copy())
+                    stream = _sd.InputStream(
+                        samplerate=SR, channels=1, dtype="float32",
+                        device=d["index"], callback=_cb, blocksize=1024,
+                    )
+                    streams[name] = stream
+                    stream.start()
+                except Exception as e:
+                    print(f"[MicScan] Could not open {d['name']}: {e}")
+
+            if not streams:
+                self._root.after(0, lambda: _scan_done(None, 0.0))
+                return
+
+            for remaining in range(3, 0, -1):
+                self._root.after(0, lambda r=remaining: test_status.configure(
+                    text=f"Recording all mics… {r}s", fg=C["accent"]))
+                time.sleep(1.0)
+
+            for stream in streams.values():
+                try:
+                    stream.stop()
+                    stream.close()
                 except Exception:
+                    pass
+
+            results = {}
+            for d in mics_to_test:
+                name = d["name"]
+                data = chunks[name]
+                if data:
+                    audio = _np.concatenate(data, axis=0).flatten()
+                    rms = float(_np.sqrt(_np.mean(audio ** 2)))
+                    results[name] = rms
+                else:
                     results[name] = 0.0
-                    continue
-                samples = []
-                for _ in range(15):
-                    time.sleep(0.1)
-                    rms, _ = self._recorder.get_live_levels()
-                    samples.append(rms)
-                self._recorder.stop_monitor()
-                results[name] = max(samples) if samples else 0.0
-                time.sleep(0.05)
+
             if results:
                 best = max(results, key=results.get)
                 self._root.after(0, lambda b=best, v=results[best]: _scan_done(b, v))
@@ -1063,10 +1094,26 @@ class AppWindow:
             scan_btn.configure(text="Scanning…", fg=C["subtext"],
                                bg=C["surface"], cursor="")
             scan_btn.unbind("<Button-1>")
+
+            countdown = [3]
+
+            def _tick():
+                countdown[0] -= 1
+                if countdown[0] > 0:
+                    test_status.configure(
+                        text=f"Get ready to speak — starting in {countdown[0]}s…",
+                        fg=C["accent"])
+                    self._root.after(1000, _tick)
+                else:
+                    test_status.configure(
+                        text=f"Speak now! Recording {len(mics_to_test)} mics at once…",
+                        fg=C["accent"])
+                    threading.Thread(target=_run_scan, daemon=True).start()
+
             test_status.configure(
-                text=f"Speak continuously! Testing {len(mics_to_test)} mics…",
+                text=f"Get ready to speak — starting in 3s…",
                 fg=C["accent"])
-            threading.Thread(target=_run_scan, daemon=True).start()
+            self._root.after(1000, _tick)
 
         scan_btn.bind("<Button-1>", lambda _e: _start_scan())
 
@@ -1376,6 +1423,15 @@ class AppWindow:
         # ── Sign out / Sign in (settings tab) ────────────────────────────────
         signout_wrap = tk.Frame(parent, bg=C["bg"])
         signout_wrap.pack(fill="x", padx=20, pady=(0, 8))
+
+        self._settings_email_lbl = tk.Label(
+            signout_wrap,
+            text=self._auth.user_email or "",
+            fg=C["subtext"], bg=C["bg"],
+            font=("Segoe UI", 9), anchor="w",
+        )
+        self._settings_email_lbl.pack(side="left", fill="x", expand=True)
+
         self._settings_auth_btn = tk.Label(
             signout_wrap,
             text="Sign Out",
@@ -1444,6 +1500,8 @@ class AppWindow:
         email = self._auth.user_email or ""
         if hasattr(self, "_email_display"):
             self._email_display.configure(text=email if email else "")
+        if hasattr(self, "_settings_email_lbl"):
+            self._settings_email_lbl.configure(text=email)
         if hasattr(self, "_sign_btn"):
             self._sign_btn.configure(text="Sign Out")
         if hasattr(self, "_settings_auth_btn"):
