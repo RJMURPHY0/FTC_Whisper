@@ -501,18 +501,18 @@ class FloatingPopup:
             bd=0,
         )
         self._ask_entry.pack(side="left", fill="x", expand=True, ipady=5, padx=(0, 6))
-        self._ask_entry.insert(0, "Ask AI — e.g. 'make this sound more urgent'")
+        self._ask_entry.insert(0, "Ask AI — e.g. 'change language to French' or 'make this shorter'")
         self._ask_entry.configure(fg=CP["subtext"])
 
         def _clear_placeholder(e):
-            if self._ask_entry.get() == "Ask AI — e.g. 'make this sound more urgent'":
+            if self._ask_entry.get() == "Ask AI — e.g. 'change language to French' or 'make this shorter'":
                 self._ask_entry.delete(0, "end")
                 self._ask_entry.configure(fg=CP["text"])
 
         def _restore_placeholder(e):
             if not self._ask_entry.get().strip():
                 self._ask_entry.delete(0, "end")
-                self._ask_entry.insert(0, "Ask AI — e.g. 'make this sound more urgent'")
+                self._ask_entry.insert(0, "Ask AI — e.g. 'change language to French' or 'make this shorter'")
                 self._ask_entry.configure(fg=CP["subtext"])
 
         self._ask_entry.bind("<FocusIn>", _clear_placeholder)
@@ -570,9 +570,11 @@ class FloatingPopup:
         self._result_scrollbar = tk.Scrollbar(
             txt_frame, orient="vertical",
             command=self._result_text.yview,
-            bg=CP["btn_bg"], troughcolor=CP["bg"],
-            activebackground=CP["accent"],
-            highlightthickness=0, bd=0,
+            bg="#3a3a3a", troughcolor=CP["bg"],
+            activebackground="#505050",
+            relief="flat", borderwidth=0,
+            elementborderwidth=0,
+            highlightthickness=0, bd=0, width=10,
         )
         self._result_text.configure(yscrollcommand=self._result_scrollbar.set)
         self._result_text.pack(side="left", fill="x", expand=True)
@@ -812,7 +814,7 @@ class FloatingPopup:
     def _run_ai_custom(self) -> None:
         """Run AI refinement with a custom instruction typed by the user."""
         instruction = self._ask_var.get().strip()
-        placeholder = "Ask AI — e.g. 'make this sound more urgent'"
+        placeholder = "Ask AI — e.g. 'change language to French' or 'make this shorter'"
         if not instruction or instruction == placeholder:
             self._ai_status.configure(text="⚠  Type an instruction first")
             return

@@ -704,8 +704,10 @@ class AppWindow:
 
         # Scrollable canvas + scrollbar inside card_inner
         self._hist_sb = tk.Scrollbar(card_inner, orient="vertical",
-                                     troughcolor=C["surface"], bg=C["scrollbar"],
-                                     width=14)
+                                     troughcolor=C["bg"], bg="#3a3a3a",
+                                     activebackground="#505050",
+                                     relief="flat", borderwidth=0,
+                                     elementborderwidth=0, width=10)
         self._hist_cv = tk.Canvas(card_inner, bg=C["surface"],
                                   highlightthickness=0, bd=0,
                                   yscrollcommand=self._hist_sb.set)
@@ -858,8 +860,10 @@ class AppWindow:
     def _build_settings_tab(self, parent: tk.Frame) -> None:
         # Scrollable container
         self._settings_sb = tk.Scrollbar(parent, orient="vertical",
-                                         troughcolor=C["surface"], bg=C["scrollbar"],
-                                         width=14)
+                                         troughcolor=C["bg"], bg="#3a3a3a",
+                                         activebackground="#505050",
+                                         relief="flat", borderwidth=0,
+                                         elementborderwidth=0, width=10)
         self._settings_cv = tk.Canvas(parent, bg=C["bg"], highlightthickness=0,
                                       bd=0, yscrollcommand=self._settings_sb.set)
         self._settings_sb.config(command=self._settings_cv.yview)
