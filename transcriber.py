@@ -119,16 +119,18 @@ class Transcriber:
         segments, _ = self._model.transcribe(
             audio,
             language=None if is_en_model else self.language,
-            beam_size=5,  # higher accuracy; large-v3-turbo is fast enough to handle this
+            beam_size=5,
             vad_filter=True,
             vad_parameters=dict(
-                min_silence_duration_ms=300,
-                threshold=0.50,   # raised from 0.30 — filters headset background noise
-                speech_pad_ms=100,
+                min_silence_duration_ms=200,  # was 300 — starts processing silence sooner
+                threshold=0.45,               # was 0.50 — slightly more sensitive to speech
+                speech_pad_ms=60,             # was 100 — tighter padding
             ),
-            no_speech_threshold=0.6,   # raised from 0.5 — fewer false positives
+            no_speech_threshold=0.6,
             condition_on_previous_text=False,
-            temperature=0.0,
+            temperature=[0.0],        # list disables temperature fallback retries entirely
+            repetition_penalty=1.1,   # discourages looping/repeated phrases
+            initial_prompt="Professional business conversation. Clear dictation.",
         )
 
         text = "".join(s.text for s in segments)
