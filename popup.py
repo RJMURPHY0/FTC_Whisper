@@ -100,6 +100,8 @@ class FloatingPopup:
         self._inserted_ok: bool = True
         self._ai_busy: bool = False
         self._popup_hwnd: int = 0
+        self._upgrading: bool = False
+        self._upgrade_result: Optional[str] = None
 
         # Waveform state
         self._mic_level: float = 0.0  # 0.0–1.0, updated by audio thread
@@ -142,6 +144,7 @@ class FloatingPopup:
         hwnd: int = 0,
         cursor_x: int = 0,
         cursor_y: int = 0,
+        upgrading: bool = False,
     ) -> None:
         self._on_insert = on_insert
         self._on_replace = on_replace
@@ -149,6 +152,8 @@ class FloatingPopup:
         self._target_hwnd = hwnd
         self._original_text = text
         self._current_result = None
+        self._upgrading = upgrading
+        self._upgrade_result = None
         # If explicit cursor coords are provided (e.g. refine-selection flow where
         # show_status was never called), also update _status_cx/cy so _enter_icon_mode
         # and _expand_to_panel position the popup on the correct monitor.
@@ -709,10 +714,20 @@ class FloatingPopup:
         self._set_no_activate(False)
         self._hide_all_frames()
         self._result_frame.pack_forget()
-        self._ai_status.configure(text="")
         self._refresh_insert_status()
         self._refine_frame.pack()
         self._mode = "refinement"
+
+        # Show upgrade state if accurate model is still running or already done
+        if self._upgrade_result:
+            self._ai_status.configure(text="")
+            self._show_ai_result(self._upgrade_result)
+        elif self._upgrading:
+            self._ai_status.configure(text="✦  Improving accuracy…")
+            self._ai_status.pack(anchor="w")
+        else:
+            self._ai_status.configure(text="")
+
         self._reposition(self._status_cx, self._status_cy)
         # Activate the window so keyboard input works
         self.root.deiconify()
@@ -760,11 +775,27 @@ class FloatingPopup:
         self._unregister_space_dismiss()
         self._mode = None
         self._ai_busy = False
+        self._upgrading = False
+        self._upgrade_result = None
         self._ai_status.configure(text="")
         self._ai_status.pack_forget()
         self._result_frame.pack_forget()
         self._hide_all_frames()
         self.root.withdraw()
+
+    def set_upgrade_result(self, accurate_text: str) -> None:
+        """Called from background thread when the accurate model finishes."""
+        if self.root:
+            self.root.after(0, lambda: self._on_upgrade_ready(accurate_text))
+
+    def _on_upgrade_ready(self, accurate_text: str) -> None:
+        self._upgrading = False
+        self._upgrade_result = accurate_text
+        if self._mode == "refinement":
+            self._ai_status.configure(text="")
+            self._ai_status.pack_forget()
+            self._show_ai_result(accurate_text)
+        # In icon mode: result is stored and shown automatically when user expands
 
     # ── Actions ────────────────────────────────────────────────────────────────
 

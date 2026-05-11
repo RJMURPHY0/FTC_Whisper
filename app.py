@@ -55,6 +55,8 @@ class WhisperFlowApp:
             model_size=config.whisper_model,
             language=config.language,
         )
+        # Fast model: injects text immediately; accurate model refines in background
+        self.fast_transcriber = Transcriber(model_size="base.en")
         self.recorder = Recorder(
             sample_rate=config.sample_rate,
             input_device=getattr(config, "input_device", ""),
@@ -118,11 +120,12 @@ class WhisperFlowApp:
             on_trigger=self._on_refine_selection,
         )
 
-        # ── Pre-load Whisper model immediately in background ───────────
-        # Auth and model loading now run in parallel — model will be
-        # ready (or close to it) by the time the user first presses the hotkey.
+        # ── Pre-load both models immediately in background ────────────
         threading.Thread(
             target=self.transcriber.load_model, daemon=True, name="model-preload"
+        ).start()
+        threading.Thread(
+            target=self.fast_transcriber.load_model, daemon=True, name="fast-model-preload"
         ).start()
 
     # ------------------------------------------------------------------
@@ -245,6 +248,9 @@ class WhisperFlowApp:
     def _on_stop_recording(self) -> None:
         transcribed_text: str = ""
         hwnd = self._recording_hwnd
+        upgrading = False
+        final_audio = None
+        capture_rate = 1
 
         try:
             audio = self.recorder.stop()
@@ -264,16 +270,22 @@ class WhisperFlowApp:
             print(
                 f"[App] Transcribing {len(final_audio) / capture_rate:.1f}s of audio at {capture_rate} Hz..."
             )
-            text = self.transcriber.transcribe(final_audio, capture_rate)
-            print(f"[App] Transcription: '{text}'")
-
-            if not text.strip():
-                print("[App] Empty transcription result.")
-                self.hotkey_manager.set_idle()
-                self.feedback.error_occurred("No speech detected")
-                return
-
-            transcribed_text = text.strip()
+            # Fast pass — inject immediately so user isn't blocked
+            fast_text = self.fast_transcriber.transcribe(final_audio, capture_rate).strip()
+            if fast_text:
+                transcribed_text = fast_text
+                upgrading = True
+                print(f"[App] Fast transcription: '{fast_text}'")
+            else:
+                # Fast model found nothing — wait for accurate model
+                text = self.transcriber.transcribe(final_audio, capture_rate).strip()
+                if not text:
+                    print("[App] Empty transcription result.")
+                    self.hotkey_manager.set_idle()
+                    self.feedback.error_occurred("No speech detected")
+                    return
+                transcribed_text = text
+                print(f"[App] Transcription: '{text}'")
 
         except Exception as e:
             print(f"[App] Transcription pipeline error: {e}")
@@ -332,7 +344,18 @@ class WhisperFlowApp:
             hwnd=hwnd,
             cursor_x=0,
             cursor_y=0,
+            upgrading=upgrading,
         )
+
+        # If fast model was used, run accurate transcription in background and offer upgrade
+        if upgrading and final_audio is not None:
+            _fast = transcribed_text
+            def _upgrade(_audio=final_audio, _rate=capture_rate, _ft=_fast):
+                accurate = self.transcriber.transcribe(_audio, _rate).strip()
+                if accurate and accurate != _ft:
+                    print(f"[App] Accurate transcription: '{accurate}'")
+                    self.popup.set_upgrade_result(accurate)
+            threading.Thread(target=_upgrade, daemon=True, name="accurate-transcription").start()
 
     def _on_cancel_recording(self) -> None:
         try:
