@@ -881,6 +881,10 @@ class AppWindow:
         parent = inner
         cfg = self._config
 
+        # Placeholder shown when an update is available (populated by show_update_banner)
+        self._update_banner_frame = tk.Frame(parent, bg=C["bg"])
+        self._update_banner_frame.pack(fill="x")
+
         # ── Microphone ────────────────────────────────────────────────────────
         mic_card = self._card(parent, margin=(0, 8))
         tk.Label(mic_card, text="Microphone",
@@ -1449,6 +1453,98 @@ class AppWindow:
             lambda _e: self._settings_auth_btn.configure(fg="#ff8888"))
         self._settings_auth_btn.bind("<Leave>",
             lambda _e: self._settings_auth_btn.configure(fg=C["error"]))
+
+    # ── Update banner ─────────────────────────────────────────────────────────
+
+    def show_update_banner(self, version: str, download_url: str) -> None:
+        """Populate and reveal the update banner at the top of the Settings tab."""
+        if not self._root or not hasattr(self, "_update_banner_frame"):
+            return
+
+        for w in self._update_banner_frame.winfo_children():
+            w.destroy()
+
+        card = self._card(self._update_banner_frame, margin=(0, 4))
+
+        top_row = tk.Frame(card, bg=C["surface"])
+        top_row.pack(fill="x")
+
+        tk.Label(
+            top_row,
+            text=f"Update available → {version}",
+            fg=C["accent"], bg=C["surface"],
+            font=("Segoe UI", 10, "bold"), anchor="w",
+        ).pack(side="left")
+
+        update_btn = tk.Label(
+            top_row,
+            text="Update Now",
+            fg=C["bg"], bg=C["accent"],
+            font=("Segoe UI", 9, "bold"), cursor="hand2",
+            padx=10, pady=3,
+        )
+        update_btn.pack(side="right")
+
+        prog_frame = tk.Frame(card, bg=C["surface"])
+        prog_lbl = tk.Label(
+            prog_frame, text="Downloading...",
+            fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 9),
+        )
+        prog_lbl.pack(side="left")
+
+        prog_cv = tk.Canvas(prog_frame, bg="#2d2d2d", highlightthickness=0,
+                            height=6, width=160)
+        prog_cv.pack(side="right", padx=(8, 0))
+        prog_bar = prog_cv.create_rectangle(0, 0, 0, 6, fill=C["accent"], width=0)
+
+        def _start_download(_e=None):
+            import os
+            import tempfile
+            from updater import apply_update, current_exe_path, download_update
+
+            update_btn.configure(bg=C["accent_dim"], fg=C["subtext"], cursor="")
+            update_btn.unbind("<Button-1>")
+            update_btn.unbind("<Enter>")
+            update_btn.unbind("<Leave>")
+            prog_frame.pack(fill="x", pady=(6, 0))
+
+            exe = current_exe_path()
+
+            def _progress(done, total):
+                if total > 0:
+                    frac = min(done / total, 1.0)
+                    self._root.after(
+                        0,
+                        lambda f=frac: prog_cv.coords(prog_bar, 0, 0, int(160 * f), 6),
+                    )
+
+            def _worker():
+                dest = os.path.join(tempfile.gettempdir(), "FTC-Whisper-update.exe")
+                try:
+                    download_update(download_url, dest, _progress)
+                    if exe:
+                        self._root.after(0, lambda: apply_update(dest, exe))
+                    else:
+                        self._root.after(
+                            0,
+                            lambda: prog_lbl.configure(
+                                text="Downloaded — replace FTC Whisper.exe manually.",
+                                fg=C["success"],
+                            ),
+                        )
+                except Exception as err:
+                    self._root.after(
+                        0,
+                        lambda e=err: prog_lbl.configure(
+                            text=f"Download failed: {e}", fg=C["error"]
+                        ),
+                    )
+
+            threading.Thread(target=_worker, daemon=True, name="update-download").start()
+
+        update_btn.bind("<Button-1>", _start_download)
+        update_btn.bind("<Enter>", lambda _e: update_btn.configure(bg=C["accent_hover"]))
+        update_btn.bind("<Leave>", lambda _e: update_btn.configure(bg=C["accent"]))
 
     # ── Auth callbacks ────────────────────────────────────────────────────────
 

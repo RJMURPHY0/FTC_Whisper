@@ -31,25 +31,27 @@ jobs:
         shell: pwsh
         run: Copy-Item "config_default.json" "config.json" -Force
 
+      - name: Read APP_VERSION
+        id: version
+        shell: pwsh
+        run: |
+          $v = python -c "import re; print(re.search(r'APP_VERSION = \x22(.+?)\x22', open('app.py').read()).group(1))"
+          echo "VERSION=$v" >> $env:GITHUB_OUTPUT
+
       - name: Build executable
         run: pyinstaller --noconfirm --clean "ftc_whisper.spec"
 
-      - name: Prepare release asset name
+      - name: Rename release asset
         shell: pwsh
-        run: |
-          Copy-Item "dist\FTC Whisper.exe" "dist\FTC-Whisper.exe" -Force
-          Copy-Item "dist\FTC Whisper.exe" "dist\FTC-Whisper-v3.exe" -Force
+        run: Copy-Item "dist\FTC Whisper.exe" "dist\FTC-Whisper.exe" -Force
 
-      - name: Publish latest release asset
+      - name: Publish versioned release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
-          name: FTC Whisper Latest
+          tag_name: v${{ steps.version.outputs.VERSION }}
+          name: FTC Whisper v${{ steps.version.outputs.VERSION }}
           prerelease: false
           make_latest: true
-          files: |
-            dist/FTC-Whisper.exe
-            dist/FTC-Whisper-v3.exe
+          files: dist/FTC-Whisper.exe
           overwrite_files: true
           generate_release_notes: true
-          append_body: true

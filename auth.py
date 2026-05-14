@@ -9,7 +9,6 @@ import ctypes
 import ctypes.wintypes
 import json
 import os
-import sys
 import threading
 from typing import Optional
 
@@ -81,11 +80,12 @@ def _dpapi_decrypt(ciphertext: bytes) -> bytes:
 
 
 def _session_path() -> str:
-    if getattr(sys, "frozen", False):
-        base = os.path.dirname(sys.executable)
-    else:
-        base = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base, ".session")
+    # Store in %APPDATA%\FTC Whisper so the session survives EXE reinstalls
+    # or moves to a different folder.
+    app_data = os.environ.get("APPDATA") or os.path.expanduser("~")
+    folder = os.path.join(app_data, "FTC Whisper")
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, ".session")
 
 
 # ---------------------------------------------------------------------------
@@ -104,12 +104,25 @@ class AuthManager:
         if not self._client:
             try:
                 from supabase import create_client
-
                 self._client = create_client(self._url, self._key)
+                self._attach_auth_listener(self._client)
             except Exception as e:
                 print(f"[Auth] ERROR creating Supabase client: {e}")
                 raise
         return self._client
+
+    def _attach_auth_listener(self, client) -> None:
+        """Save session to disk whenever Supabase refreshes tokens."""
+        def _on_state_change(event, session) -> None:
+            if session:
+                event_str = str(event)
+                if "TOKEN_REFRESHED" in event_str or "SIGNED_IN" in event_str:
+                    self._save_session(session)
+                    print(f"[Auth] Session auto-saved ({event_str})")
+        try:
+            client.auth.on_auth_state_change(_on_state_change)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Session persistence (DPAPI-encrypted binary file)
@@ -249,6 +262,7 @@ class AuthManager:
             # Always use a fresh client for sign-in to avoid stale connection state
             from supabase import create_client
             self._client = create_client(self._url, self._key)
+            self._attach_auth_listener(self._client)
             client = self._client
             print(f"[Auth] Signing in as {email}...")
             result = client.auth.sign_in_with_password(

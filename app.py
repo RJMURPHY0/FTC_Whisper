@@ -32,6 +32,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
+APP_VERSION = "1.0.1"
 
 
 class WhisperFlowApp:
@@ -192,6 +193,20 @@ class WhisperFlowApp:
 
         # Start tray in daemon thread (safe on Windows)
         threading.Thread(target=self.tray.run, daemon=True, name="tray").start()
+
+        # Check for updates in the background; show banner in Settings if found
+        self._start_update_check()
+
+    def _start_update_check(self) -> None:
+        from updater import check_for_update
+
+        def _on_update_found(version: str, url: str) -> None:
+            print(f"[App] Update available: {version}")
+            self.app_window._root.after(
+                0, lambda: self.app_window.show_update_banner(version, url)
+            )
+
+        check_for_update(APP_VERSION, _on_update_found)
 
     def _on_hotkey_change(self, new_hotkey: str) -> None:
         """Called when the user saves a new hotkey in the dashboard."""
