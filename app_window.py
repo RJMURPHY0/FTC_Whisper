@@ -1406,60 +1406,6 @@ class AppWindow:
         sound_toggle.bind("<Button-1>", _toggle_sound)
         _make_toggle_btn()
 
-        # ── Save button ───────────────────────────────────────────────────────
-        save_wrap = tk.Frame(parent, bg=C["bg"])
-        save_wrap.pack(fill="x", padx=20, pady=(12, 4))
-
-        self._settings_status = tk.Label(save_wrap, text="",
-                                         fg=C["success"], bg=C["bg"],
-                                         font=("Segoe UI", 9))
-        self._settings_status.pack(side="left")
-
-        def _save(_e=None):
-            if self._on_settings_change:
-                mic_val = mic_var.get()
-                self._on_settings_change("input_device",
-                                         "" if mic_val == "Default" else mic_val)
-                self._on_settings_change("whisper_model", model_var.get())
-                self._on_settings_change("anthropic_api_key", api_var.get().strip())
-                self._on_settings_change("sound_feedback", sound_var.get())
-            self._settings_status.configure(text="Saved ✓", fg=C["success"])
-            if self._root:
-                self._root.after(2500, lambda: self._settings_status.configure(text=""))
-
-        save_btn = self._surface_btn(save_wrap, "Save Settings", _save)
-        save_btn.pack(side="right")
-
-        # ── Account card ──────────────────────────────────────────────────────
-        acct_card = self._card(parent, margin=(0, 4))
-        tk.Label(acct_card, text="Account",
-                 fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
-
-        acct_row = tk.Frame(acct_card, bg=C["surface"])
-        acct_row.pack(fill="x", pady=(6, 0))
-
-        self._settings_email_lbl = tk.Label(
-            acct_row,
-            text=self._auth.user_email or "Not signed in",
-            fg=C["text"], bg=C["surface"],
-            font=("Segoe UI", 10), anchor="w",
-        )
-        self._settings_email_lbl.pack(side="left", fill="x", expand=True)
-
-        self._settings_auth_btn = tk.Label(
-            acct_row,
-            text="Sign Out",
-            fg=C["error"], bg=C["surface"],
-            font=("Segoe UI", 9), cursor="hand2", anchor="e",
-        )
-        self._settings_auth_btn.pack(side="right")
-        self._settings_auth_btn.bind("<Button-1>", lambda _e: self._do_sign_out())
-        self._settings_auth_btn.bind("<Enter>",
-            lambda _e: self._settings_auth_btn.configure(fg="#ff8888"))
-        self._settings_auth_btn.bind("<Leave>",
-            lambda _e: self._settings_auth_btn.configure(fg=C["error"]))
-
         # ── Version / update card ─────────────────────────────────────────────
         ver_card = self._card(parent, margin=(0, 4))
         ver_row = tk.Frame(ver_card, bg=C["surface"])
@@ -1503,6 +1449,60 @@ class AppWindow:
             lambda _e: self._update_check_btn.configure(fg=C["accent_hover"]))
         self._update_check_btn.bind("<Leave>",
             lambda _e: self._update_check_btn.configure(fg=C["accent"]))
+
+        # ── Account card ──────────────────────────────────────────────────────
+        acct_card = self._card(parent, margin=(0, 4))
+        tk.Label(acct_card, text="Account",
+                 fg=C["subtext"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
+
+        acct_row = tk.Frame(acct_card, bg=C["surface"])
+        acct_row.pack(fill="x", pady=(6, 0))
+
+        self._settings_email_lbl = tk.Label(
+            acct_row,
+            text=self._auth.user_email or "Not signed in",
+            fg=C["text"], bg=C["surface"],
+            font=("Segoe UI", 10), anchor="w",
+        )
+        self._settings_email_lbl.pack(side="left", fill="x", expand=True)
+
+        self._settings_auth_btn = tk.Label(
+            acct_row,
+            text="Sign Out",
+            fg=C["error"], bg=C["surface"],
+            font=("Segoe UI", 9), cursor="hand2", anchor="e",
+        )
+        self._settings_auth_btn.pack(side="right")
+        self._settings_auth_btn.bind("<Button-1>", lambda _e: self._do_sign_out())
+        self._settings_auth_btn.bind("<Enter>",
+            lambda _e: self._settings_auth_btn.configure(fg="#ff8888"))
+        self._settings_auth_btn.bind("<Leave>",
+            lambda _e: self._settings_auth_btn.configure(fg=C["error"]))
+
+        # ── Save button ───────────────────────────────────────────────────────
+        save_wrap = tk.Frame(parent, bg=C["bg"])
+        save_wrap.pack(fill="x", padx=20, pady=(12, 8))
+
+        self._settings_status = tk.Label(save_wrap, text="",
+                                         fg=C["success"], bg=C["bg"],
+                                         font=("Segoe UI", 9))
+        self._settings_status.pack(side="left")
+
+        def _save(_e=None):
+            if self._on_settings_change:
+                mic_val = mic_var.get()
+                self._on_settings_change("input_device",
+                                         "" if mic_val == "Default" else mic_val)
+                self._on_settings_change("whisper_model", model_var.get())
+                self._on_settings_change("anthropic_api_key", api_var.get().strip())
+                self._on_settings_change("sound_feedback", sound_var.get())
+            self._settings_status.configure(text="Saved ✓", fg=C["success"])
+            if self._root:
+                self._root.after(2500, lambda: self._settings_status.configure(text=""))
+
+        save_btn = self._surface_btn(save_wrap, "Save Settings", _save)
+        save_btn.pack(side="right")
 
     # ── Update banner ─────────────────────────────────────────────────────────
 
