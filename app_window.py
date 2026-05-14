@@ -301,6 +301,10 @@ class AppWindow:
             if self._root and hasattr(self, "_settings_cv"):
                 self._root.bind_all("<MouseWheel>", lambda e: self._settings_cv.yview_scroll(
                     int(-1 * (e.delta / 40)), "units"))
+            if hasattr(self, "_update_check_btn") and hasattr(self, "_do_update_check"):
+                self._update_check_btn.configure(
+                    text="Check for Updates", fg=C["accent"], cursor="hand2")
+                self._update_check_btn.bind("<Button-1>", self._do_update_check)
         else:
             if self._root:
                 try:
@@ -1444,6 +1448,7 @@ class AppWindow:
             check_for_update(self._version, _done)
             threading.Thread(target=_no_update_fallback, daemon=True).start()
 
+        self._do_update_check = _check_now
         self._update_check_btn.bind("<Button-1>", _check_now)
         self._update_check_btn.bind("<Enter>",
             lambda _e: self._update_check_btn.configure(fg=C["accent_hover"]))
