@@ -72,7 +72,9 @@ class AppWindow:
         get_input_devices: Callable = None,
         recorder=None,
         transcriber=None,
+        version: str = "",
     ):
+        self._version                 = version
         self._auth                    = auth
         self._on_authenticated        = on_authenticated
         self._on_sign_out             = on_sign_out
@@ -1428,23 +1430,27 @@ class AppWindow:
         save_btn = self._surface_btn(save_wrap, "Save Settings", _save)
         save_btn.pack(side="right")
 
-        # ── Sign out / Sign in (settings tab) ────────────────────────────────
-        signout_wrap = tk.Frame(parent, bg=C["bg"])
-        signout_wrap.pack(fill="x", padx=20, pady=(0, 8))
+        # ── Account card ──────────────────────────────────────────────────────
+        acct_card = self._card(parent, margin=(0, 4))
+        tk.Label(acct_card, text="Account",
+                 fg=C["subtext"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
+
+        acct_row = tk.Frame(acct_card, bg=C["surface"])
+        acct_row.pack(fill="x", pady=(6, 0))
 
         self._settings_email_lbl = tk.Label(
-            signout_wrap,
-            text=self._auth.user_email or "",
-            fg=C["subtext"], bg=C["bg"],
-            font=("Segoe UI", 9), anchor="w",
+            acct_row,
+            text=self._auth.user_email or "Not signed in",
+            fg=C["text"], bg=C["surface"],
+            font=("Segoe UI", 10), anchor="w",
         )
         self._settings_email_lbl.pack(side="left", fill="x", expand=True)
 
         self._settings_auth_btn = tk.Label(
-            signout_wrap,
+            acct_row,
             text="Sign Out",
-            fg=C["error"],
-            bg=C["bg"],
+            fg=C["error"], bg=C["surface"],
             font=("Segoe UI", 9), cursor="hand2", anchor="e",
         )
         self._settings_auth_btn.pack(side="right")
@@ -1453,6 +1459,50 @@ class AppWindow:
             lambda _e: self._settings_auth_btn.configure(fg="#ff8888"))
         self._settings_auth_btn.bind("<Leave>",
             lambda _e: self._settings_auth_btn.configure(fg=C["error"]))
+
+        # ── Version / update card ─────────────────────────────────────────────
+        ver_card = self._card(parent, margin=(0, 4))
+        ver_row = tk.Frame(ver_card, bg=C["surface"])
+        ver_row.pack(fill="x")
+
+        ver_lbl_text = f"Version {self._version}" if self._version else "FTC Whisper"
+        tk.Label(ver_row, text=ver_lbl_text,
+                 fg=C["text"], bg=C["surface"],
+                 font=("Segoe UI", 10), anchor="w").pack(side="left")
+
+        self._update_check_btn = tk.Label(
+            ver_row, text="Check for Updates",
+            fg=C["accent"], bg=C["surface"],
+            font=("Segoe UI", 9), cursor="hand2", anchor="e",
+        )
+        self._update_check_btn.pack(side="right")
+
+        def _check_now(_e=None):
+            self._update_check_btn.configure(text="Checking...", fg=C["subtext"],
+                                             cursor="")
+            self._update_check_btn.unbind("<Button-1>")
+
+            from updater import check_for_update
+
+            def _done(version, url):
+                self._root.after(0, lambda: self._update_check_btn.configure(
+                    text=f"Update available: {version}", fg=C["accent"]))
+                self.show_update_banner(version, url)
+
+            def _no_update_fallback():
+                import time; time.sleep(6)
+                if self._update_check_btn.cget("text") == "Checking...":
+                    self._root.after(0, lambda: self._update_check_btn.configure(
+                        text="Up to date ✓", fg=C["success"]))
+
+            check_for_update(self._version, _done)
+            threading.Thread(target=_no_update_fallback, daemon=True).start()
+
+        self._update_check_btn.bind("<Button-1>", _check_now)
+        self._update_check_btn.bind("<Enter>",
+            lambda _e: self._update_check_btn.configure(fg=C["accent_hover"]))
+        self._update_check_btn.bind("<Leave>",
+            lambda _e: self._update_check_btn.configure(fg=C["accent"]))
 
     # ── Update banner ─────────────────────────────────────────────────────────
 

@@ -32,7 +32,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 
 
 class WhisperFlowApp:
@@ -86,6 +86,7 @@ class WhisperFlowApp:
             get_input_devices=self.recorder.get_input_devices,
             recorder=self.recorder,
             transcriber=self.transcriber,
+            version=APP_VERSION,
         )
 
         self.tray = TrayApp(
