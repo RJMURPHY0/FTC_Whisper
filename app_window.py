@@ -1491,6 +1491,9 @@ class AppWindow:
         self._update_check_btn.bind("<Leave>",
             lambda _e: self._update_check_btn.configure(fg=C["accent"]))
 
+        # Inline update-action row — shown by show_update_banner when update found
+        self._ver_update_row = tk.Frame(ver_card, bg=C["surface"])
+
         # ── Account card ──────────────────────────────────────────────────────
         acct_card = self._card(parent, margin=(0, 4))
         tk.Label(acct_card, text="Account",
@@ -1549,55 +1552,35 @@ class AppWindow:
     # ── Update banner ─────────────────────────────────────────────────────────
 
     def show_update_banner(self, version: str, download_url: str) -> None:
-        """Populate and reveal the update banner at the top of the Settings tab."""
-        if not self._root or not hasattr(self, "_update_banner_frame"):
+        """Show update banner at top of Settings and an inline button in the version card."""
+        if not self._root:
             return
 
-        for w in self._update_banner_frame.winfo_children():
-            w.destroy()
+        # Shared download state — prevents double-trigger
+        _downloading = [False]
 
-        card = self._card(self._update_banner_frame, margin=(0, 4))
+        # Collect all "Update Now" buttons so they can all be disabled at once
+        _update_btns = []
 
-        top_row = tk.Frame(card, bg=C["surface"])
-        top_row.pack(fill="x")
-
-        tk.Label(
-            top_row,
-            text=f"Update available → {version}",
-            fg=C["accent"], bg=C["surface"],
-            font=("Segoe UI", 10, "bold"), anchor="w",
-        ).pack(side="left")
-
-        update_btn = tk.Label(
-            top_row,
-            text="Update Now",
-            fg=C["bg"], bg=C["accent"],
-            font=("Segoe UI", 9, "bold"), cursor="hand2",
-            padx=10, pady=3,
-        )
-        update_btn.pack(side="right")
-
-        prog_frame = tk.Frame(card, bg=C["surface"])
-        prog_lbl = tk.Label(
-            prog_frame, text="Downloading...",
-            fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 9),
-        )
-        prog_lbl.pack(side="left")
-
-        prog_cv = tk.Canvas(prog_frame, bg="#2d2d2d", highlightthickness=0,
-                            height=6, width=160)
-        prog_cv.pack(side="right", padx=(8, 0))
-        prog_bar = prog_cv.create_rectangle(0, 0, 0, 6, fill=C["accent"], width=0)
+        def _disable_all_btns():
+            for b in _update_btns:
+                try:
+                    b.configure(bg=C["accent_dim"], fg=C["subtext"], cursor="")
+                    b.unbind("<Button-1>")
+                    b.unbind("<Enter>")
+                    b.unbind("<Leave>")
+                except Exception:
+                    pass
 
         def _start_download(_e=None):
             import os
             import tempfile
             from updater import apply_update, current_exe_path, download_update
 
-            update_btn.configure(bg=C["accent_dim"], fg=C["subtext"], cursor="")
-            update_btn.unbind("<Button-1>")
-            update_btn.unbind("<Enter>")
-            update_btn.unbind("<Leave>")
+            if _downloading[0]:
+                return
+            _downloading[0] = True
+            _disable_all_btns()
             prog_frame.pack(fill="x", pady=(6, 0))
 
             exe = current_exe_path()
@@ -1634,9 +1617,69 @@ class AppWindow:
 
             threading.Thread(target=_worker, daemon=True, name="update-download").start()
 
-        update_btn.bind("<Button-1>", _start_download)
-        update_btn.bind("<Enter>", lambda _e: update_btn.configure(bg=C["accent_hover"]))
-        update_btn.bind("<Leave>", lambda _e: update_btn.configure(bg=C["accent"]))
+        # ── Top banner ────────────────────────────────────────────────────────
+        if hasattr(self, "_update_banner_frame"):
+            for w in self._update_banner_frame.winfo_children():
+                w.destroy()
+
+            card = self._card(self._update_banner_frame, margin=(0, 4))
+
+            top_row = tk.Frame(card, bg=C["surface"])
+            top_row.pack(fill="x")
+
+            tk.Label(
+                top_row,
+                text=f"Update available → {version}",
+                fg=C["accent"], bg=C["surface"],
+                font=("Segoe UI", 10, "bold"), anchor="w",
+            ).pack(side="left")
+
+            banner_btn = tk.Label(
+                top_row,
+                text="Update Now",
+                fg=C["bg"], bg=C["accent"],
+                font=("Segoe UI", 9, "bold"), cursor="hand2",
+                padx=10, pady=3,
+            )
+            banner_btn.pack(side="right")
+            _update_btns.append(banner_btn)
+
+            prog_frame = tk.Frame(card, bg=C["surface"])
+            prog_lbl = tk.Label(
+                prog_frame, text="Downloading...",
+                fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 9),
+            )
+            prog_lbl.pack(side="left")
+
+            prog_cv = tk.Canvas(prog_frame, bg="#2d2d2d", highlightthickness=0,
+                                height=6, width=160)
+            prog_cv.pack(side="right", padx=(8, 0))
+            prog_bar = prog_cv.create_rectangle(0, 0, 0, 6, fill=C["accent"], width=0)
+
+            banner_btn.bind("<Button-1>", _start_download)
+            banner_btn.bind("<Enter>", lambda _e: banner_btn.configure(bg=C["accent_hover"]))
+            banner_btn.bind("<Leave>", lambda _e: banner_btn.configure(bg=C["accent"]))
+
+        # ── Inline button in version card ─────────────────────────────────────
+        if hasattr(self, "_ver_update_row"):
+            for w in self._ver_update_row.winfo_children():
+                w.destroy()
+
+            ver_btn = tk.Label(
+                self._ver_update_row,
+                text="Update Now",
+                fg=C["bg"], bg=C["accent"],
+                font=("Segoe UI", 9, "bold"), cursor="hand2",
+                padx=10, pady=4,
+            )
+            ver_btn.pack(side="right")
+            _update_btns.append(ver_btn)
+
+            ver_btn.bind("<Button-1>", _start_download)
+            ver_btn.bind("<Enter>", lambda _e: ver_btn.configure(bg=C["accent_hover"]))
+            ver_btn.bind("<Leave>", lambda _e: ver_btn.configure(bg=C["accent"]))
+
+            self._ver_update_row.pack(fill="x", pady=(8, 0))
 
     # ── Auth callbacks ────────────────────────────────────────────────────────
 

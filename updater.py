@@ -97,15 +97,33 @@ def download_update(
 
 def apply_update(new_exe: str, current_exe: str) -> None:
     """
-    Write a detached batch script that waits for this process to exit,
+    Write a detached batch script that polls until this process exits,
     replaces the EXE, relaunches it, then self-deletes. Exits the app.
     """
+    import os as _os
+    pid = _os.getpid()
     bat = os.path.join(tempfile.gettempdir(), "ftc_whisper_update.bat")
+    # Wait for PID to disappear (process fully exited), retry copy in case
+    # the file handle is briefly still held, then relaunch.
     script = (
         "@echo off\n"
-        "timeout /t 3 /nobreak > nul\n"
-        f'copy /y "{new_exe}" "{current_exe}"\n'
-        f'start "" "{current_exe}"\n'
+        f"set TARGET_PID={pid}\n"
+        ":waitloop\n"
+        'tasklist /FI "PID eq %TARGET_PID%" 2>nul | find "%TARGET_PID%" >nul\n'
+        "if not errorlevel 1 (\n"
+        "    timeout /t 1 /nobreak >nul\n"
+        "    goto waitloop\n"
+        ")\n"
+        "timeout /t 1 /nobreak >nul\n"
+        f'set "NEWEXE={new_exe}"\n'
+        f'set "CUREXE={current_exe}"\n'
+        ":copyloop\n"
+        'copy /y "%NEWEXE%" "%CUREXE%" >nul\n'
+        "if errorlevel 1 (\n"
+        "    timeout /t 1 /nobreak >nul\n"
+        "    goto copyloop\n"
+        ")\n"
+        'start "" "%CUREXE%"\n'
         'del "%~f0"\n'
     )
     with open(bat, "w") as f:
