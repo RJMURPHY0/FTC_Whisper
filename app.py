@@ -13,6 +13,7 @@ import os
 import sys
 import threading
 import time
+from collections import deque
 
 # Fix Windows console encoding
 # Removed stdout wrapping for clear logging
@@ -107,6 +108,10 @@ class WhisperFlowApp:
         self._recording_hwnd: int = 0
         self._mic_loop_running = threading.Event()
         self._mic_level_smooth = 0.0
+
+        # Rolling context: last ~30 words from recent transcriptions fed into Whisper initial_prompt
+        self._context_deque: deque = deque(maxlen=30)
+        self._context_lock = threading.Lock()
 
         self.hotkey_manager = HotkeyManager(
             hotkey=config.hotkey,
@@ -287,20 +292,25 @@ class WhisperFlowApp:
                 f"[App] Transcribing {len(final_audio) / capture_rate:.1f}s of audio at {capture_rate} Hz..."
             )
             # Fast pass — inject immediately so user isn't blocked
-            fast_text = self.fast_transcriber.transcribe(final_audio, capture_rate).strip()
+            _ctx = self._get_context_words()
+            _hw  = self._get_hotwords()
+            fast_text = self.fast_transcriber.transcribe(
+                final_audio, capture_rate, context_words=_ctx, hotwords_str=_hw).strip()
             if fast_text:
                 transcribed_text = fast_text
                 upgrading = True
                 print(f"[App] Fast transcription: '{fast_text}'")
             else:
                 # Fast model found nothing — wait for accurate model
-                text = self.transcriber.transcribe(final_audio, capture_rate).strip()
+                text = self.transcriber.transcribe(
+                    final_audio, capture_rate, context_words=_ctx, hotwords_str=_hw).strip()
                 if not text:
                     print("[App] Empty transcription result.")
                     self.hotkey_manager.set_idle()
                     self.feedback.error_occurred("No speech detected")
                     return
                 transcribed_text = text
+                self._update_context(text)
                 print(f"[App] Transcription: '{text}'")
 
         except Exception as e:
@@ -363,14 +373,30 @@ class WhisperFlowApp:
             upgrading=upgrading,
         )
 
-        # If fast model was used, run accurate transcription in background and offer upgrade
+        # If fast model was used, run accurate transcription + LLM context-fix in background
         if upgrading and final_audio is not None:
             _fast = transcribed_text
-            def _upgrade(_audio=final_audio, _rate=capture_rate, _ft=_fast):
-                accurate = self.transcriber.transcribe(_audio, _rate).strip()
-                if accurate and accurate != _ft:
-                    print(f"[App] Accurate transcription: '{accurate}'")
-                    self.popup.set_upgrade_result(accurate)
+            _upg_ctx = _ctx
+            _upg_hw  = _hw
+            def _upgrade(_audio=final_audio, _rate=capture_rate, _ft=_fast,
+                         _ctx=_upg_ctx, _hw=_upg_hw):
+                accurate = self.transcriber.transcribe(
+                    _audio, _rate, context_words=_ctx, hotwords_str=_hw).strip()
+                if not accurate:
+                    return
+                final = accurate
+                if self.ai_refiner.is_available:
+                    try:
+                        fixed = self.ai_refiner.context_fix(accurate)
+                        if fixed and fixed != accurate:
+                            print(f"[App] LLM context-fix: '{accurate}' -> '{fixed}'")
+                            final = fixed
+                    except Exception as e:
+                        print(f"[App] LLM context-fix error, using Whisper result: {e}")
+                self._update_context(final)
+                if final != _ft:
+                    print(f"[App] Accurate transcription: '{final}'")
+                    self.popup.set_upgrade_result(final)
             threading.Thread(target=_upgrade, daemon=True, name="accurate-transcription").start()
 
     def _on_cancel_recording(self) -> None:
@@ -383,6 +409,17 @@ class WhisperFlowApp:
             print(f"[App] Error cancelling recording: {e}")
         finally:
             self.hotkey_manager.set_idle()
+
+    def _get_context_words(self) -> str:
+        with self._context_lock:
+            return " ".join(self._context_deque)
+
+    def _update_context(self, text: str) -> None:
+        with self._context_lock:
+            self._context_deque.extend(text.split()[-30:])
+
+    def _get_hotwords(self) -> str:
+        return (getattr(self.config, "custom_vocabulary", "") or "").strip()
 
     def _on_state_change(self, state: AppState) -> None:
         self.app_window.update_status(

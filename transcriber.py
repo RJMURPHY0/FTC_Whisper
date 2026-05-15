@@ -84,7 +84,8 @@ class Transcriber:
             print("[Transcriber] Model ready.")
 
     def transcribe(
-        self, audio: np.ndarray, sample_rate: int = 16000, blocking: bool = True
+        self, audio: np.ndarray, sample_rate: int = 16000, blocking: bool = True,
+        context_words: str = "", hotwords_str: str = "",
     ) -> str:
         """
         Transcribe audio to text.
@@ -92,6 +93,8 @@ class Transcriber:
         Args:
             blocking: If False, skip and return "" when another transcription is
                       already running (used by the streaming preview loop).
+            context_words: Recent transcription words to include in initial_prompt.
+            hotwords_str: Comma-separated terms to boost via Whisper hotwords param.
         """
         if self._model is None:
             self.load_model()
@@ -110,12 +113,17 @@ class Transcriber:
         if not acquired:
             return ""  # streaming preview bails out rather than queuing
         try:
-            return self._run(audio, sample_rate)
+            return self._run(audio, sample_rate, context_words=context_words, hotwords_str=hotwords_str)
         finally:
             self._transcribe_lock.release()
 
-    def _run(self, audio: np.ndarray, _sample_rate: int) -> str:
+    def _run(self, audio: np.ndarray, _sample_rate: int,
+             context_words: str = "", hotwords_str: str = "") -> str:
         is_en_model = self.model_size.endswith(".en")
+        base_prompt = "Professional business conversation. Clear dictation."
+        vocab_hint = hotwords_str.replace(",", " ").strip() if hotwords_str else ""
+        parts = [p for p in [context_words, vocab_hint, base_prompt] if p]
+        prompt = " ".join(parts)
         segments, _ = self._model.transcribe(
             audio,
             language=None if is_en_model else self.language,
@@ -130,7 +138,8 @@ class Transcriber:
             condition_on_previous_text=False,
             temperature=[0.0],        # list disables temperature fallback retries entirely
             repetition_penalty=1.1,   # discourages looping/repeated phrases
-            initial_prompt="Professional business conversation. Clear dictation.",
+            initial_prompt=prompt,
+            hotwords=hotwords_str or None,
         )
 
         text = "".join(s.text for s in segments)

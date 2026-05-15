@@ -44,6 +44,18 @@ REFINE_PROMPTS = {
         "Transform the text below into a clear, precise prompt ready to paste into any AI. "
         "Preserve the intent exactly. Return only the optimised prompt text, nothing else." + _NO_FORMAT
     ),
+    "context_fix": (
+        "You are a transcription corrector. Fix ONLY words that were misheard or garbled "
+        "by speech recognition — homophones, similar-sounding words, garbled words that "
+        "make no sense in context.\n\n"
+        "STRICT RULES:\n"
+        "- Do NOT change any word that could be correct as-is\n"
+        "- Do NOT add, remove, or reorder any words\n"
+        "- Do NOT change punctuation, grammar, or sentence structure\n"
+        "- Do NOT paraphrase or improve wording\n"
+        "- When uncertain, leave the word exactly as-is\n\n"
+        "Return ONLY the corrected text. If nothing needs fixing, return it unchanged."
+    ),
 }
 
 
@@ -120,3 +132,15 @@ class AIRefiner:
         except Exception as e:
             print(f"[AIRefiner] Error during refinement: {e}")
             return text
+
+    def context_fix(self, text: str) -> str:
+        """Fix misheard words using sentence context. Rejects result if word count changes."""
+        if len(text.split()) < 4:
+            return text
+        result = self.refine(text, mode="context_fix")
+        if result == text:
+            return text
+        if len(result.split()) != len(text.split()):
+            print(f"[AIRefiner] context_fix rejected: word count changed {len(text.split())} -> {len(result.split())}, using original")
+            return text
+        return result

@@ -52,6 +52,7 @@ class Config:
     sound_feedback: bool = True
     auto_start: bool = False
     anthropic_api_key: str = ""  # Optional — enables AI text refinement
+    custom_vocabulary: str = ""  # Comma-separated terms to boost in Whisper (names, acronyms, domain words)
     supabase_url: str = ""  # Optional — enables transcription logging
     supabase_key: str = ""  # Publishable (anon) key
     supabase_email: str = ""  # Account email for silent background auth

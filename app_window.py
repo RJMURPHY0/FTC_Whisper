@@ -1377,8 +1377,24 @@ class AppWindow:
             show_btn.configure(text="Hide" if show_var[0] else "Show")
         show_btn.bind("<Button-1>", _toggle_show)
 
+        # ── Custom Vocabulary ─────────────────────────────────────────────────
+        vocab_card = self._card(parent, margin=(0, 8))
+        tk.Label(vocab_card, text="Custom Vocabulary",
+                 fg=C["subtext"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
+        tk.Label(vocab_card,
+                 text="Comma-separated names, acronyms, or terms to boost (e.g. FTC, Salesforce, CRM)",
+                 fg=C["subtext"], bg=C["surface"],
+                 font=("Segoe UI", 8), anchor="w", wraplength=360).pack(fill="x")
+        current_vocab = (cfg.custom_vocabulary if cfg else "") or ""
+        vocab_var = tk.StringVar(value=current_vocab)
+        vocab_entry = tk.Entry(vocab_card, textvariable=vocab_var,
+                               bg=C["input_bg"], fg=C["text"], insertbackground=C["text"],
+                               relief="flat", font=("Segoe UI", 9), bd=6)
+        vocab_entry.pack(fill="x", pady=(4, 0))
+
         # ── Sound feedback ────────────────────────────────────────────────────
-        sound_card = self._card(parent, margin=(0, 0))
+        sound_card = self._card(parent, margin=(0, 4))
         sound_row = tk.Frame(sound_card, bg=C["surface"])
         sound_row.pack(fill="x")
 
@@ -1420,6 +1436,7 @@ class AppWindow:
                  fg=C["text"], bg=C["surface"],
                  font=("Segoe UI", 10), anchor="w").pack(side="left")
 
+        # "Check for Updates" button — always visible and clickable
         self._update_check_btn = tk.Label(
             ver_row, text="Check for Updates",
             fg=C["accent"], bg=C["surface"],
@@ -1427,23 +1444,42 @@ class AppWindow:
         )
         self._update_check_btn.pack(side="right")
 
+        # Status label — shows "Up to date ✓" or "Update available: X.X.X"
+        self._update_status_lbl = tk.Label(
+            ver_row, text="",
+            fg=C["success"], bg=C["surface"],
+            font=("Segoe UI", 9), anchor="e",
+        )
+        self._update_status_lbl.pack(side="right", padx=(0, 8))
+
+        def _restore_check_btn():
+            self._update_check_btn.configure(
+                text="Check for Updates", fg=C["accent"], cursor="hand2")
+            self._update_check_btn.bind("<Button-1>", _check_now)
+
         def _check_now(_e=None):
-            self._update_check_btn.configure(text="Checking...", fg=C["subtext"],
-                                             cursor="")
+            self._update_check_btn.configure(text="Checking...", fg=C["subtext"], cursor="")
             self._update_check_btn.unbind("<Button-1>")
+            self._update_status_lbl.configure(text="")
 
             from updater import check_for_update
 
             def _done(version, url):
-                self._root.after(0, lambda: self._update_check_btn.configure(
-                    text=f"Update available: {version}", fg=C["accent"]))
+                def _apply():
+                    self._update_status_lbl.configure(
+                        text=f"Update available: {version}", fg=C["accent"])
+                    _restore_check_btn()
+                self._root.after(0, _apply)
                 self.show_update_banner(version, url)
 
             def _no_update_fallback():
                 import time; time.sleep(6)
                 if self._update_check_btn.cget("text") == "Checking...":
-                    self._root.after(0, lambda: self._update_check_btn.configure(
-                        text="Up to date ✓", fg=C["success"]))
+                    def _apply():
+                        self._update_status_lbl.configure(
+                            text="Up to date ✓", fg=C["success"])
+                        _restore_check_btn()
+                    self._root.after(0, _apply)
 
             check_for_update(self._version, _done)
             threading.Thread(target=_no_update_fallback, daemon=True).start()
@@ -1501,6 +1537,7 @@ class AppWindow:
                                          "" if mic_val == "Default" else mic_val)
                 self._on_settings_change("whisper_model", model_var.get())
                 self._on_settings_change("anthropic_api_key", api_var.get().strip())
+                self._on_settings_change("custom_vocabulary", vocab_var.get().strip())
                 self._on_settings_change("sound_feedback", sound_var.get())
             self._settings_status.configure(text="Saved ✓", fg=C["success"])
             if self._root:
