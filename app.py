@@ -33,7 +33,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 
 
 class WhisperFlowApp:
@@ -821,31 +821,37 @@ class WhisperFlowApp:
 # ------------------------------------------------------------------
 
 
+_SINGLETON_MUTEX = None  # kept alive at module level so the handle isn't GC'd
+
+
 def _ensure_single_instance() -> None:
-    """Kill any previous instance using a PID file, then record our own PID."""
-    pid_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".ftc_pid")
+    """
+    Use a named Windows mutex to enforce one running instance.
+    If another instance already owns the mutex, bring its window to the
+    foreground and exit immediately instead of launching a second copy.
+    """
+    global _SINGLETON_MUTEX
+    ERROR_ALREADY_EXISTS = 183
+    MUTEX_NAME = "Global\\FTC_Whisper_SingleInstance"
+
     kernel32 = ctypes.windll.kernel32
+    user32 = ctypes.windll.user32
 
-    if os.path.exists(pid_file):
-        try:
-            with open(pid_file) as f:
-                old_pid = int(f.read().strip())
-            if old_pid and old_pid != os.getpid():
-                PROCESS_TERMINATE = 0x0001
-                handle = kernel32.OpenProcess(PROCESS_TERMINATE, False, old_pid)
-                if handle:
-                    kernel32.TerminateProcess(handle, 0)
-                    kernel32.CloseHandle(handle)
-                    print(f"[App] Killed previous instance (PID {old_pid})")
-                    time.sleep(0.6)  # let Win32 release the RegisterHotKey
-        except Exception as e:
-            print(f"[App] Single-instance cleanup: {e}")
+    mutex = kernel32.CreateMutexW(None, True, MUTEX_NAME)
+    err = kernel32.GetLastError()
 
-    try:
-        with open(pid_file, "w") as f:
-            f.write(str(os.getpid()))
-    except Exception:
-        pass
+    if err == ERROR_ALREADY_EXISTS:
+        # Another instance is running — surface its window and exit.
+        hwnd = user32.FindWindowW(None, "FTC Whisper")
+        if hwnd:
+            user32.ShowWindow(hwnd, 9)   # SW_RESTORE (un-minimise if needed)
+            user32.ShowWindow(hwnd, 5)   # SW_SHOW    (un-hide if withdrawn to tray)
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+        sys.exit(0)
+
+    # We are the first instance — hold the mutex for the process lifetime.
+    _SINGLETON_MUTEX = mutex
 
 
 def _ensure_startup_task() -> None:
