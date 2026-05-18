@@ -138,19 +138,22 @@ class AppWindow:
     def _do_show(self) -> None:
         self._root.deiconify()
         try:
-            hwnd = self._root.winfo_id()
-            u32  = ctypes.windll.user32
+            u32 = ctypes.windll.user32
+            # FindWindowW by title is more reliable than winfo_id() which can
+            # return a child HWND rather than the actual top-level window handle.
+            hwnd = u32.FindWindowW(None, "FTC Whisper")
+            if not hwnd:
+                hwnd = u32.GetParent(self._root.winfo_id()) or self._root.winfo_id()
             HWND_TOPMOST   = -1
             HWND_NOTOPMOST = -2
             SWP_NOMOVE     = 0x0002
             SWP_NOSIZE     = 0x0001
-            # Flash to topmost then back — bypasses Windows focus-steal prevention.
-            # SetWindowPos(TOPMOST) always succeeds even from a background process;
-            # immediately reverting to NOTOPMOST keeps the window in front without
-            # locking it as always-on-top.
+            u32.ShowWindow(hwnd, 9)   # SW_RESTORE — un-minimise first
+            u32.ShowWindow(hwnd, 5)   # SW_SHOW    — un-hide if withdrawn to tray
+            # Flash TOPMOST→NOTOPMOST: bypasses Windows focus-steal prevention.
+            # Must happen after ShowWindow so the window is visible when raised.
             u32.SetWindowPos(hwnd, HWND_TOPMOST,   0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
             u32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
-            u32.ShowWindow(hwnd, 9)        # SW_RESTORE — un-minimise if needed
             u32.SetForegroundWindow(hwnd)
         except Exception:
             self._root.lift()
