@@ -110,7 +110,7 @@ class WhisperFlowApp:
         self._mic_level_smooth = 0.0
 
         # Rolling context: last ~30 words from recent transcriptions fed into Whisper initial_prompt
-        self._context_deque: deque = deque(maxlen=30)
+        self._context_deque: deque = deque(maxlen=150)
         self._context_lock = threading.Lock()
 
         self.hotkey_manager = HotkeyManager(
@@ -134,6 +134,9 @@ class WhisperFlowApp:
         threading.Thread(
             target=self.fast_transcriber.load_model, daemon=True, name="fast-model-preload"
         ).start()
+
+        # ── Local HTTP server so the web app can detect + surface this window ──
+        _start_local_server(self.app_window, APP_VERSION)
 
     # ------------------------------------------------------------------
     # Startup
@@ -822,6 +825,69 @@ class WhisperFlowApp:
 
 
 _SINGLETON_MUTEX = None  # kept alive at module level so the handle isn't GC'd
+_LOCAL_PORT = 47832
+
+
+def _start_local_server(app_window, version: str) -> None:
+    """
+    Tiny localhost-only HTTP server so the FTC web app can detect whether
+    FTC Whisper is running and surface its window without needing a custom
+    URL protocol registration.  Binds to 127.0.0.1 only — not reachable
+    from the network.
+
+    Endpoints:
+      GET /ping  → {"ok": true, "version": "x.y.z"}
+      GET /show  → brings the window to the front, returns {"ok": true}
+    """
+    import http.server
+    import json
+    import socketserver
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass  # silence access log spam
+
+        def _cors(self):
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+        def do_OPTIONS(self):
+            self.send_response(204)
+            self._cors()
+            self.end_headers()
+
+        def do_GET(self):
+            if self.path.startswith("/show"):
+                app_window.show()
+                self.send_response(200)
+                self._cors()
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+            elif self.path.startswith("/ping"):
+                self.send_response(200)
+                self._cors()
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps({"ok": True, "version": version}).encode()
+                )
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+    class _Server(socketserver.TCPServer):
+        allow_reuse_address = True
+
+    try:
+        server = _Server(("127.0.0.1", _LOCAL_PORT), _Handler)
+        threading.Thread(
+            target=server.serve_forever, daemon=True, name="local-server"
+        ).start()
+        print(f"[App] Local server listening on http://127.0.0.1:{_LOCAL_PORT}")
+    except OSError as e:
+        print(f"[App] Local server unavailable (port {_LOCAL_PORT} in use?): {e}")
 
 
 def _ensure_single_instance() -> None:
@@ -942,6 +1008,32 @@ def _ensure_startup_task() -> None:
         _ensure_startup_registry_fallback()
 
 
+def _register_url_protocol() -> None:
+    """
+    Register ftcwhisper:// as a Windows URL protocol so browsers can launch the app.
+    Runs each startup so the path stays current after an update or move.
+    """
+    import winreg
+
+    if getattr(sys, "frozen", False):
+        cmd = f'"{sys.executable}" "%1"'
+    else:
+        pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        script  = os.path.abspath(__file__)
+        cmd     = f'"{pythonw}" "{script}" "%1"'
+
+    try:
+        base = r"Software\Classes\ftcwhisper"
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base) as k:
+            winreg.SetValueEx(k, "",             0, winreg.REG_SZ, "URL:FTC Whisper")
+            winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base + r"\shell\open\command") as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, cmd)
+        print("[App] Registered ftcwhisper:// URL protocol handler.")
+    except Exception as e:
+        print(f"[App] Could not register URL protocol: {e}")
+
+
 def _ensure_startup_registry_fallback() -> None:
     """Registry Run key fallback — used only if Task Scheduler is unavailable."""
     import winreg
@@ -978,6 +1070,7 @@ def main() -> None:
     if sys.platform == "win32":
         _ensure_single_instance()
         _ensure_startup_task()
+        _register_url_protocol()
         # Boost process to above-normal priority so Whisper model loads
         # faster and hotkey response isn't delayed by competing startup apps.
         try:
