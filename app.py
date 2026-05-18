@@ -33,7 +33,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.1.0"
 
 
 class WhisperFlowApp:
@@ -873,6 +873,28 @@ def _start_local_server(app_window, version: str) -> None:
                 self.wfile.write(
                     json.dumps({"ok": True, "version": version}).encode()
                 )
+            elif self.path.startswith("/update"):
+                from updater import get_latest_release, is_newer, current_exe_path
+                info = get_latest_release()
+                if info and is_newer(info["version"], version) and current_exe_path():
+                    ver, url = info["version"], info["download_url"]
+                    if app_window._root:
+                        app_window._root.after(
+                            0, lambda v=ver, u=url: app_window.show_update_banner(v, u)
+                        )
+                    app_window.show()
+                    self.send_response(200)
+                    self._cors()
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"ok":true,"action":"updating"}')
+                else:
+                    # Already up to date or running from source — tell web app to download directly
+                    self.send_response(200)
+                    self._cors()
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"ok":false,"action":"download"}')
             else:
                 self.send_response(404)
                 self.end_headers()
