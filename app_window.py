@@ -137,8 +137,24 @@ class AppWindow:
 
     def _do_show(self) -> None:
         self._root.deiconify()
-        self._root.lift()
-        self._root.focus_force()
+        try:
+            hwnd = self._root.winfo_id()
+            u32  = ctypes.windll.user32
+            HWND_TOPMOST   = -1
+            HWND_NOTOPMOST = -2
+            SWP_NOMOVE     = 0x0002
+            SWP_NOSIZE     = 0x0001
+            # Flash to topmost then back — bypasses Windows focus-steal prevention.
+            # SetWindowPos(TOPMOST) always succeeds even from a background process;
+            # immediately reverting to NOTOPMOST keeps the window in front without
+            # locking it as always-on-top.
+            u32.SetWindowPos(hwnd, HWND_TOPMOST,   0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
+            u32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
+            u32.ShowWindow(hwnd, 9)        # SW_RESTORE — un-minimise if needed
+            u32.SetForegroundWindow(hwnd)
+        except Exception:
+            self._root.lift()
+            self._root.focus_force()
 
     def update_status(self, state: str) -> None:
         if self._root and hasattr(self, "_status_lbl"):
@@ -294,7 +310,8 @@ class AppWindow:
 
         # Bind scroll to the appropriate scrollable area
         if name == "history":
-            self._load_history()
+            if not getattr(self, "_history_loaded", False):
+                self._load_history()
             if self._root:
                 self._root.bind_all("<MouseWheel>", self._hist_scroll)
         elif name == "settings":
@@ -737,6 +754,7 @@ class AppWindow:
             self._hist_cv.yview_scroll(int(-1 * (event.delta / 40)), "units")
 
     def _load_history(self) -> None:
+        self._history_loaded = False
         self._hist_set_placeholder("Loading…")
         def _fetch():
             items = self._db.fetch_history() if self._db else []
@@ -752,6 +770,7 @@ class AppWindow:
                  padx=12, pady=16).pack(fill="x")
 
     def _populate_history(self, items: list) -> None:
+        self._history_loaded = True
         for w in self._hist_items.winfo_children():
             w.destroy()
         if not items:
