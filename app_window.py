@@ -923,11 +923,6 @@ class AppWindow:
                  fg=C["subtext"], bg=C["surface"],
                  font=("Segoe UI", 9), anchor="w").pack(fill="x")
 
-        try:
-            devs = self._get_input_devices() if self._get_input_devices else []
-        except Exception:
-            devs = []
-
         # Deduplicate by name, then sort: real mics first, virtual/system last
         def _mic_rank(d):
             n = d["name"].lower()
@@ -940,19 +935,11 @@ class AppWindow:
                 return 0
             return 1
 
-        seen_names: set = set()
         unique_devs = []
-        for d in devs:
-            if d["name"] not in seen_names:
-                seen_names.add(d["name"])
-                unique_devs.append(d)
-        unique_devs.sort(key=_mic_rank)
-
-        mic_options = ["Default"] + [d["name"] for d in unique_devs]
         current_mic = (cfg.input_device or "") if cfg else ""
-        mic_var = tk.StringVar(value=current_mic if current_mic in mic_options else "Default")
+        mic_var = tk.StringVar(value=current_mic if current_mic else "Default")
 
-        mic_menu = tk.OptionMenu(mic_card, mic_var, *mic_options)
+        mic_menu = tk.OptionMenu(mic_card, mic_var, "Default")
         mic_menu.configure(bg=C["surface_hover"], fg=C["text"], relief="flat",
                            font=("Segoe UI", 9), anchor="w", highlightthickness=0,
                            activebackground=C["accent"], activeforeground=C["bg"])
@@ -961,7 +948,8 @@ class AppWindow:
                                    font=("Segoe UI", 9))
         mic_menu.pack(fill="x", pady=(4, 0))
 
-        mic_name_lbl = tk.Label(mic_card, text="", fg=C["subtext"], bg=C["surface"],
+        mic_name_lbl = tk.Label(mic_card, text="Scanning microphones…",
+                                fg=C["subtext"], bg=C["surface"],
                                 font=("Segoe UI", 8), anchor="w")
         mic_name_lbl.pack(fill="x")
 
@@ -969,7 +957,34 @@ class AppWindow:
             val = mic_var.get()
             mic_name_lbl.configure(text=val if val and val != "Default" else "Using system default")
         mic_var.trace_add("write", _refresh_mic_label)
-        _refresh_mic_label()
+
+        def _populate_mic_menu(devs):
+            seen_names: set = set()
+            for d in devs:
+                if d["name"] not in seen_names:
+                    seen_names.add(d["name"])
+                    unique_devs.append(d)
+            unique_devs.sort(key=_mic_rank)
+            options = ["Default"] + [d["name"] for d in unique_devs]
+            menu = mic_menu["menu"]
+            menu.delete(0, "end")
+            for opt in options:
+                menu.add_command(label=opt, command=lambda v=opt: mic_var.set(v))
+            if current_mic and current_mic in options:
+                mic_var.set(current_mic)
+            else:
+                mic_var.set("Default")
+            _refresh_mic_label()
+
+        def _load_devices_bg():
+            try:
+                devs = self._get_input_devices() if self._get_input_devices else []
+            except Exception:
+                devs = []
+            if self._root:
+                self._root.after(0, lambda: _populate_mic_menu(devs))
+
+        threading.Thread(target=_load_devices_bg, daemon=True, name="mic-device-scan").start()
 
         # ── Mic test button + level meter ─────────────────────────────────────
         btn_row = tk.Frame(mic_card, bg=C["surface"])
