@@ -130,7 +130,7 @@ for ($i = 0; $i -lt 20; $i++) {{
 }}
 # Launch from the installed location if copy succeeded, else from temp
 $launch = if ($ok) {{ $CurExe }} else {{ $NewExe }}
-Start-Process -FilePath $launch
+Start-Process -FilePath $launch -ArgumentList '--minimized'
 Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
 """
     with open(ps_file, "w", encoding="utf-8") as f:

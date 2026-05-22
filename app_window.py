@@ -5,6 +5,7 @@ Dashboard: Home / Hotkey / History tabs.
 Dark theme with rounded-corner cards via Canvas.
 """
 
+import sys
 import threading
 import time
 import tkinter as tk
@@ -122,6 +123,9 @@ class AppWindow:
             self._fire_authenticated()
         else:
             self._switch_to_login()
+
+        if "--minimized" in sys.argv:
+            self._root.iconify()
 
         self._root.mainloop()
         # Destroy after mainloop exits (quit() was called on sign-out)
