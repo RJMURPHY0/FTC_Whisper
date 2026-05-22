@@ -86,7 +86,7 @@ class FloatingPopup:
         self._ready = threading.Event()
         self._thread = threading.Thread(target=self._run_tk, daemon=True)
         self._thread.start()
-        self._ready.wait()
+        self._ready.wait(timeout=15.0)
 
         self._mode: Optional[str] = None
         self._on_insert: Optional[Callable] = None

@@ -85,9 +85,20 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
+splash = Splash(
+    os.path.join(APP_DIR, 'logo.png'),
+    binaries=a.binaries,
+    datas=a.datas,
+    text_pos=None,
+    minify_script=True,
+    always_on_top=True,
+)
+
 exe = EXE(
     pyz,
     a.scripts,
+    splash,
+    splash.binaries,
     a.binaries,
     a.zipfiles,
     a.datas,

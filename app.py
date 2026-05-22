@@ -33,7 +33,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.2"
 
 
 class WhisperFlowApp:
@@ -316,9 +316,10 @@ class WhisperFlowApp:
                 self.feedback.error_occurred("Recording too short")
                 return
 
-            # Cap to 60 s — enough for any reasonable dictation
-            MAX_SECS = 60.0
-            max_samples = int(capture_rate * MAX_SECS)
+            # When streaming was active, match its 30 s window so _stream_extension
+            # can find the extension point; otherwise cap at 60 s.
+            _window_secs = 30.0 if _stream_count > 0 else 60.0
+            max_samples = int(capture_rate * _window_secs)
             final_audio = audio[-max_samples:] if len(audio) > max_samples else audio
             print(
                 f"[App] Transcribing {len(final_audio) / capture_rate:.1f}s of audio at {capture_rate} Hz..."
@@ -1252,6 +1253,12 @@ def main() -> None:
                 )
         except Exception:
             pass
+
+    try:
+        import pyi_splash  # type: ignore
+        pyi_splash.close()
+    except ImportError:
+        pass
 
     config = Config.load()
     auth = AuthManager(config.supabase_url, config.supabase_key)
