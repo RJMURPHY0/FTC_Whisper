@@ -124,9 +124,6 @@ class AppWindow:
         else:
             self._switch_to_login()
 
-        if "--minimized" in sys.argv:
-            self._root.iconify()
-
         self._root.mainloop()
         # Destroy after mainloop exits (quit() was called on sign-out)
         try:
