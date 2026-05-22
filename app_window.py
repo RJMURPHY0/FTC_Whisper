@@ -1604,6 +1604,9 @@ class AppWindow:
             _downloading[0] = True
             _disable_all_btns()
             prog_frame.pack(fill="x", pady=(6, 0))
+            # Scroll settings to the top so the progress bar is immediately visible
+            if hasattr(self, "_settings_cv"):
+                self._root.after(0, lambda: self._settings_cv.yview_moveto(0))
 
             exe = current_exe_path()
 
