@@ -33,7 +33,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 
 
 class WhisperFlowApp:
@@ -1228,7 +1228,11 @@ def _ensure_startup_registry_fallback() -> None:
 def main() -> None:
     if sys.platform == "win32":
         _ensure_single_instance()
-        _ensure_startup_task()
+        # Run in background — schtasks can be slow on first launch and there's
+        # no reason to block the UI thread waiting for a Task Scheduler write.
+        threading.Thread(
+            target=_ensure_startup_task, daemon=True, name="startup-task"
+        ).start()
         _register_url_protocol()
         # Boost process to above-normal priority so Whisper model loads
         # faster and hotkey response isn't delayed by competing startup apps.

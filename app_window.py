@@ -5,7 +5,6 @@ Dashboard: Home / Hotkey / History tabs.
 Dark theme with rounded-corner cards via Canvas.
 """
 
-import sys
 import threading
 import time
 import tkinter as tk
@@ -110,19 +109,49 @@ class AppWindow:
         self._root.protocol("WM_DELETE_WINDOW", self._hide)
 
         self._apply_dark_titlebar()
-        self._build_header()
 
-        self._dash_frame = tk.Frame(self._root, bg=C["bg"])
-        self._build_dashboard(self._dash_frame)
+        try:
+            self._build_header()
 
-        self._login_frame = tk.Frame(self._root, bg=C["bg"])
-        self._build_embedded_login()
+            self._dash_frame = tk.Frame(self._root, bg=C["bg"])
+            self._build_dashboard(self._dash_frame)
 
-        if self._auth.is_authenticated:
-            self._switch_to_dashboard()
-            self._fire_authenticated()
-        else:
-            self._switch_to_login()
+            self._login_frame = tk.Frame(self._root, bg=C["bg"])
+            self._build_embedded_login()
+
+            if self._auth.is_authenticated:
+                self._switch_to_dashboard()
+                self._fire_authenticated()
+            else:
+                self._switch_to_login()
+
+        except Exception:
+            import traceback
+            tb = traceback.format_exc()
+            print(f"[AppWindow] Startup error:\n{tb}")
+            # Show the error in-window instead of leaving a blank window
+            self._root.geometry(f"{WINDOW_W}x480+100+100")
+            err_frame = tk.Frame(self._root, bg=C["bg"])
+            err_frame.pack(fill="both", expand=True, padx=16, pady=16)
+            tk.Label(
+                err_frame, text="FTC Whisper — Startup Error",
+                fg=C["error"], bg=C["bg"],
+                font=("Segoe UI", 12, "bold"), anchor="w",
+            ).pack(fill="x", pady=(0, 8))
+            tk.Label(
+                err_frame, text=tb,
+                fg=C["subtext"], bg=C["bg"],
+                font=("Courier New", 8), anchor="w",
+                justify="left", wraplength=388,
+            ).pack(fill="both", expand=True)
+
+        # Force all pending geometry/paint before entering the event loop.
+        # Prevents the blank-white-window issue on some Windows configurations
+        # where the window appears before tkinter has drawn its first frame.
+        try:
+            self._root.update()
+        except Exception:
+            pass
 
         self._root.mainloop()
         # Destroy after mainloop exits (quit() was called on sign-out)
