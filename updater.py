@@ -134,6 +134,8 @@ for ($i = 0; $i -lt 20; $i++) {{
 }}
 # Launch from the installed location if copy succeeded, else from temp
 $launch = if ($ok) {{ $CurExe }} else {{ $NewExe }}
+# Strip the "downloaded from internet" mark so SmartScreen doesn't block the relaunch
+Unblock-File -Path $launch -ErrorAction SilentlyContinue
 Start-Process -FilePath $launch
 Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
 if ($ok) {{ Remove-Item -Path $NewExe -Force -ErrorAction SilentlyContinue }}
