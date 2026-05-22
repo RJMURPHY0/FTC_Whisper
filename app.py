@@ -33,7 +33,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.2.3"
+APP_VERSION = "1.2.4"
 
 
 class WhisperFlowApp:
@@ -80,7 +80,7 @@ class WhisperFlowApp:
             on_hotkey_change=self._on_hotkey_change,
             on_refine_hotkey_change=self._on_refine_hotkey_change,
             on_settings_change=self._on_settings_change,
-            on_popup_ready=self.popup.setup,
+            on_popup_ready=lambda root: self.popup.setup(root),
             db=self.db,
             hotkey=config.hotkey,
             refine_hotkey=config.refine_hotkey,
