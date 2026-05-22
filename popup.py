@@ -83,10 +83,7 @@ def _apply_popup_corners(hwnd: int, w: int, h: int, r: int = POPUP_RADIUS) -> No
 
 class FloatingPopup:
     def __init__(self):
-        self._ready = threading.Event()
-        self._thread = threading.Thread(target=self._run_tk, daemon=True)
-        self._thread.start()
-        self._ready.wait(timeout=15.0)
+        self.root: Optional[tk.Tk] = None
 
         self._mode: Optional[str] = None
         self._on_insert: Optional[Callable] = None
@@ -179,8 +176,15 @@ class FloatingPopup:
 
     # ── Tkinter setup ──────────────────────────────────────────────────────────
 
-    def _run_tk(self) -> None:
-        self.root = tk.Tk()
+    def setup(self, main_root: tk.Tk) -> None:
+        """
+        Attach the popup to the main Tk root as a Toplevel.
+        Must be called from the main thread before mainloop starts.
+        Using Toplevel (not a second tk.Tk) keeps a single Tcl interpreter
+        and a single event loop, which prevents the blank-window instability
+        that occurred when two tk.Tk() instances competed at startup.
+        """
+        self.root = tk.Toplevel(main_root)
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", 0.97)
@@ -192,10 +196,6 @@ class FloatingPopup:
         self._popup_hwnd = self.root.winfo_id()
 
         # WS_EX_NOACTIVATE: popup can never steal focus from the foreground app.
-        # This is the critical fix for ChatGPT / browser inputs — without it the
-        # recording pill steals focus from Chrome, which clears the ProseMirror /
-        # contenteditable focus state so Ctrl+V lands nowhere.
-        # Mouse clicks on the popup's own buttons still work normally.
         try:
             GWL_EXSTYLE      = -20
             WS_EX_NOACTIVATE = 0x08000000
@@ -210,9 +210,6 @@ class FloatingPopup:
         self._build_refinement_frame()
 
         self.root.bind("<Configure>", self._on_popup_configure)
-
-        self._ready.set()
-        self.root.mainloop()
 
     def _set_no_activate(self, enabled: bool) -> None:
         """Enable or disable WS_EX_NOACTIVATE on the popup window."""

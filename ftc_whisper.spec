@@ -85,8 +85,29 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
+# ── Generate splash image with a dark background so no white/purple shows ────
+import tempfile
+try:
+    from PIL import Image
+    _logo = Image.open(os.path.join(APP_DIR, 'logo.png')).convert('RGBA')
+    _sw, _sh = 400, 240
+    _splash_img = Image.new('RGBA', (_sw, _sh), (13, 13, 13, 255))  # #0d0d0d
+    _scale = min(_sw * 0.7 / _logo.width, _sh * 0.7 / _logo.height)
+    _lw = int(_logo.width * _scale)
+    _lh = int(_logo.height * _scale)
+    _logo_r = _logo.resize((_lw, _lh), Image.LANCZOS)
+    _x = (_sw - _lw) // 2
+    _y = (_sh - _lh) // 2
+    _splash_img.paste(_logo_r, (_x, _y), _logo_r)
+    _splash_path = os.path.join(tempfile.gettempdir(), 'ftc_whisper_splash.png')
+    _splash_img.convert('RGB').save(_splash_path)
+    print(f"[spec] Splash image generated: {_splash_path}")
+except Exception as _e:
+    print(f"[spec] Could not generate splash image, using logo.png directly: {_e}")
+    _splash_path = os.path.join(APP_DIR, 'logo.png')
+
 splash = Splash(
-    os.path.join(APP_DIR, 'logo.png'),
+    _splash_path,
     binaries=a.binaries,
     datas=a.datas,
     text_pos=None,
