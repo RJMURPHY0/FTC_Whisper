@@ -279,7 +279,7 @@ class AuthManager:
             msg = str(msg)
             print(f"[Auth] Sign-in error: {msg!r}")
             if "email not confirmed" in msg.lower() or "email_not_confirmed" in msg.lower():
-                return False, "Email not confirmed — an admin needs to confirm your account first."
+                return False, "Email not confirmed — check your inbox and click the confirmation link."
             if "invalid" in msg.lower() or "credentials" in msg.lower() or "wrong" in msg.lower():
                 return False, "Incorrect email or password."
             if "user not found" in msg.lower() or "no user" in msg.lower():

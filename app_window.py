@@ -957,6 +957,16 @@ class AppWindow:
                                    font=("Segoe UI", 9))
         mic_menu.pack(fill="x", pady=(4, 0))
 
+        mic_name_lbl = tk.Label(mic_card, text="", fg=C["subtext"], bg=C["surface"],
+                                font=("Segoe UI", 8), anchor="w")
+        mic_name_lbl.pack(fill="x")
+
+        def _refresh_mic_label(*_):
+            val = mic_var.get()
+            mic_name_lbl.configure(text=val if val and val != "Default" else "Using system default")
+        mic_var.trace_add("write", _refresh_mic_label)
+        _refresh_mic_label()
+
         # ── Mic test button + level meter ─────────────────────────────────────
         btn_row = tk.Frame(mic_card, bg=C["surface"])
         btn_row.pack(fill="x", pady=(8, 0))
@@ -1048,8 +1058,10 @@ class AppWindow:
             scan_btn.bind("<Button-1>", lambda _e: _start_scan())
             if best_name and best_level > 0.005:
                 short = best_name if len(best_name) <= 30 else best_name[:27] + "…"
-                test_status.configure(text=f"Best mic: {short} ✓", fg=C["success"])
+                test_status.configure(text=f"Best mic: {short} — applied ✓", fg=C["success"])
                 mic_var.set(best_name)
+                if self._on_settings_change:
+                    self._on_settings_change("input_device", best_name)
             else:
                 test_status.configure(
                     text="No signal detected — try speaking louder", fg=C["error"])
@@ -1369,35 +1381,6 @@ class AppWindow:
 
         bench_btn.bind("<Button-1>", lambda _e: _start_benchmark())
 
-        # ── Anthropic API Key ─────────────────────────────────────────────────
-        api_card = self._card(parent, margin=(0, 8))
-        tk.Label(api_card, text="Anthropic API Key",
-                 fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
-        tk.Label(api_card, text="Optional — enables AI text refinement (filler word removal, cleanup)",
-                 fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 8), anchor="w").pack(fill="x")
-
-        api_row = tk.Frame(api_card, bg=C["surface"])
-        api_row.pack(fill="x", pady=(4, 0))
-
-        current_key = (cfg.anthropic_api_key if cfg else "") or ""
-        api_var = tk.StringVar(value=current_key)
-        api_entry = tk.Entry(api_row, textvariable=api_var, show="●",
-                             bg=C["input_bg"], fg=C["text"], insertbackground=C["text"],
-                             relief="flat", font=("Segoe UI", 9), bd=6)
-        api_entry.pack(side="left", fill="x", expand=True)
-
-        show_var = [False]
-        show_btn = tk.Label(api_row, text="Show", fg=C["subtext"], bg=C["surface"],
-                            font=("Segoe UI", 8), cursor="hand2", padx=6)
-        show_btn.pack(side="right")
-
-        def _toggle_show(_e=None):
-            show_var[0] = not show_var[0]
-            api_entry.configure(show="" if show_var[0] else "●")
-            show_btn.configure(text="Hide" if show_var[0] else "Show")
-        show_btn.bind("<Button-1>", _toggle_show)
 
         # ── Custom Vocabulary ─────────────────────────────────────────────────
         vocab_card = self._card(parent, margin=(0, 8))
@@ -1561,7 +1544,6 @@ class AppWindow:
                 self._on_settings_change("input_device",
                                          "" if mic_val == "Default" else mic_val)
                 self._on_settings_change("whisper_model", model_var.get())
-                self._on_settings_change("anthropic_api_key", api_var.get().strip())
                 self._on_settings_change("custom_vocabulary", vocab_var.get().strip())
                 self._on_settings_change("sound_feedback", sound_var.get())
             self._settings_status.configure(text="Saved ✓", fg=C["success"])

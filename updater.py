@@ -97,53 +97,56 @@ def download_update(
 
 def apply_update(new_exe: str, current_exe: str) -> None:
     """
-    Write a detached batch script that polls until this process exits,
-    replaces the EXE, relaunches it, then self-deletes. Exits the app.
+    Launch a detached PowerShell script that waits for this process to exit,
+    copies the new exe over the current one (with retries for AV file locks),
+    relaunches, then self-deletes. Falls back to launching from temp if the
+    copy keeps failing. Exits the current process immediately via os._exit.
     """
     import os as _os
     pid = _os.getpid()
-    bat = os.path.join(tempfile.gettempdir(), "ftc_whisper_update.bat")
-    # Wait for PID to disappear, then wait 3 s for AV to release the file,
-    # retry copy up to 20 times. If copy keeps failing, launch the downloaded
-    # exe directly from temp as a fallback so the user still gets the update.
-    script = (
-        "@echo off\n"
-        f"set TARGET_PID={pid}\n"
-        f'set "NEWEXE={new_exe}"\n'
-        f'set "CUREXE={current_exe}"\n'
-        "set RETRY=0\n"
-        ":waitloop\n"
-        'tasklist /FI "PID eq %TARGET_PID%" 2>nul | find "%TARGET_PID%" >nul\n'
-        "if not errorlevel 1 (\n"
-        "    timeout /t 1 /nobreak >nul\n"
-        "    goto waitloop\n"
-        ")\n"
-        "timeout /t 3 /nobreak >nul\n"
-        ":copyloop\n"
-        "set /a RETRY+=1\n"
-        'copy /y "%NEWEXE%" "%CUREXE%" >nul\n'
-        "if not errorlevel 1 goto :launch\n"
-        "if %RETRY% geq 20 goto :launch_temp\n"
-        "timeout /t 1 /nobreak >nul\n"
-        "goto :copyloop\n"
-        ":launch\n"
-        'start "" "%CUREXE%"\n'
-        'del "%~f0"\n'
-        "exit /b 0\n"
-        ":launch_temp\n"
-        'start "" "%NEWEXE%"\n'
-        'del "%~f0"\n'
-        "exit /b 0\n"
-    )
-    with open(bat, "w") as f:
+    # Escape single quotes in paths for PowerShell single-quoted strings
+    new_ps  = new_exe.replace("'", "''")
+    cur_ps  = current_exe.replace("'", "''")
+    ps_file = os.path.join(tempfile.gettempdir(), "ftc_whisper_update.ps1")
+    script = f"""
+$NewExe = '{new_ps}'
+$CurExe = '{cur_ps}'
+# Wait for the old process to fully exit
+while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{
+    Start-Sleep -Milliseconds 500
+}}
+# Extra pause so AV/Defender releases any file handles
+Start-Sleep -Seconds 3
+# Try to overwrite (up to 20 retries, 1 s apart)
+$ok = $false
+for ($i = 0; $i -lt 20; $i++) {{
+    try {{
+        Copy-Item -Path $NewExe -Destination $CurExe -Force -ErrorAction Stop
+        $ok = $true
+        break
+    }} catch {{
+        Start-Sleep -Seconds 1
+    }}
+}}
+# Launch from the installed location if copy succeeded, else from temp
+$launch = if ($ok) {{ $CurExe }} else {{ $NewExe }}
+Start-Process -FilePath $launch
+Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+"""
+    with open(ps_file, "w", encoding="utf-8") as f:
         f.write(script)
 
     subprocess.Popen(
-        ["cmd", "/c", bat],
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-WindowStyle", "Hidden",
+            "-File", ps_file,
+        ],
         creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
     )
-    # os._exit bypasses Python cleanup — guarantees the process actually dies
-    # so the batch script's PID-wait loop unblocks immediately.
+    # os._exit guarantees the process dies immediately so the PS script unblocks
     _os._exit(0)
 
 
