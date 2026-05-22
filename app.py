@@ -33,7 +33,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 
 
 class WhisperFlowApp:
@@ -112,6 +112,13 @@ class WhisperFlowApp:
         # Rolling context: last ~30 words from recent transcriptions fed into Whisper initial_prompt
         self._context_deque: deque = deque(maxlen=150)
         self._context_lock = threading.Lock()
+
+        # Streaming transcription state
+        self._stream_last_text: str = ""
+        self._stream_inject_count: int = 0
+        self._stream_lock = threading.Lock()
+        self._stream_stop_event = threading.Event()
+        self._stream_thread = None
 
         self.hotkey_manager = HotkeyManager(
             hotkey=config.hotkey,
@@ -264,17 +271,39 @@ class WhisperFlowApp:
                 self._rec_cursor_x, self._rec_cursor_y = 0, 0
             self.recorder.start()
             self.feedback.recording_started()
+            # Start streaming transcription loop
+            self._stream_stop_event.clear()
+            self._stream_last_text = ""
+            self._stream_inject_count = 0
+            self._stream_thread = threading.Thread(
+                target=self._streaming_loop,
+                args=(self._recording_hwnd, self._stream_stop_event),
+                daemon=True,
+                name="streaming-loop",
+            )
+            self._stream_thread.start()
         except Exception as e:
             print(f"[App] Failed to start recording: {e}")
             self.feedback.error_occurred(str(e))
             self.hotkey_manager.set_idle()
 
     def _on_stop_recording(self) -> None:
+        # Stop streaming loop and capture its final state before anything else
+        self._stream_stop_event.set()
+        _st = self._stream_thread
+        if _st is not None and _st.is_alive():
+            _st.join(timeout=1.5)
+        with self._stream_lock:
+            _stream_last = self._stream_last_text
+            _stream_count = self._stream_inject_count
+
         transcribed_text: str = ""
         hwnd = self._recording_hwnd
         upgrading = False
         final_audio = None
         capture_rate = 1
+        _inject_text = ""
+        _total_inject_count = 0
 
         try:
             audio = self.recorder.stop()
@@ -294,7 +323,7 @@ class WhisperFlowApp:
             print(
                 f"[App] Transcribing {len(final_audio) / capture_rate:.1f}s of audio at {capture_rate} Hz..."
             )
-            # Fast pass — inject immediately so user isn't blocked
+            # Fast pass — inject only the delta beyond what streaming already inserted
             _ctx = self._get_context_words()
             _hw  = self._get_hotwords()
             fast_text = self.fast_transcriber.transcribe(
@@ -303,6 +332,18 @@ class WhisperFlowApp:
                 transcribed_text = fast_text
                 upgrading = True
                 print(f"[App] Fast transcription: '{fast_text}'")
+                if _stream_count > 0 and _stream_last:
+                    delta = self._stream_extension(_stream_last, fast_text)
+                    if delta:
+                        _inject_text = delta
+                        _total_inject_count = _stream_count + 1
+                    else:
+                        # Streaming covered it all (or Whisper revised — avoid double-inject)
+                        _inject_text = ""
+                        _total_inject_count = _stream_count
+                else:
+                    _inject_text = fast_text
+                    _total_inject_count = 1
             else:
                 # Fast model found nothing — wait for accurate model
                 text = self.transcriber.transcribe(
@@ -315,6 +356,17 @@ class WhisperFlowApp:
                 transcribed_text = text
                 self._update_context(text)
                 print(f"[App] Transcription: '{text}'")
+                if _stream_count > 0 and _stream_last:
+                    delta = self._stream_extension(_stream_last, text)
+                    if delta:
+                        _inject_text = delta
+                        _total_inject_count = _stream_count + 1
+                    else:
+                        _inject_text = ""
+                        _total_inject_count = _stream_count
+                else:
+                    _inject_text = text
+                    _total_inject_count = 1
 
         except Exception as e:
             print(f"[App] Transcription pipeline error: {e}")
@@ -354,9 +406,12 @@ class WhisperFlowApp:
 
         result = False
         try:
-            print(f"[App] Injecting {len(transcribed_text)} chars")
-            result = self.injector.inject(transcribed_text)
-            print(f"[App] Inject result: {result}")
+            if _inject_text:
+                print(f"[App] Injecting delta: {len(_inject_text)} chars")
+                result = self.injector.inject(_inject_text)
+                print(f"[App] Inject result: {result}")
+            elif _stream_count > 0:
+                result = True  # streaming already injected successfully
         except Exception as e:
             print(f"[App] Injection error (popup will still appear): {e}")
 
@@ -365,10 +420,11 @@ class WhisperFlowApp:
         threading.Thread(target=self.db.log_transcription, args=(transcribed_text,), daemon=True).start()
 
         # ── Popup always shown — works as manual-insert fallback if inject failed ─
+        _undo_n = max(1, _total_inject_count)
         self.popup.show_cursor_icon(
             transcribed_text,
             on_insert=lambda t=transcribed_text, h=hwnd: self._insert_text(t, h),
-            on_replace=lambda new_text, t=transcribed_text, h=hwnd: self._replace_text(new_text, h, t),
+            on_replace=lambda new_text, t=transcribed_text, h=hwnd, uc=_undo_n: self._replace_text(new_text, h, t, undo_count=uc),
             inserted=result,
             hwnd=hwnd,
             cursor_x=0,
@@ -403,11 +459,25 @@ class WhisperFlowApp:
             threading.Thread(target=_upgrade, daemon=True, name="accurate-transcription").start()
 
     def _on_cancel_recording(self) -> None:
+        self._stream_stop_event.set()
         try:
             if self.recorder.is_recording:
                 self.recorder.stop()
+            _st = self._stream_thread
+            if _st is not None and _st.is_alive():
+                _st.join(timeout=1.0)
+            with self._stream_lock:
+                _stream_count = self._stream_inject_count
             self.feedback.recording_stopped()
             print("[App] Recording cancelled (short tap).")
+            if _stream_count > 0:
+                hwnd = self._recording_hwnd
+                self._focus_window(hwnd, short=True)
+                import keyboard as kb
+                for _ in range(_stream_count):
+                    kb.send("ctrl+z")
+                    time.sleep(0.04)
+                print(f"[App] Undid {_stream_count} streaming injection(s)")
         except Exception as e:
             print(f"[App] Error cancelling recording: {e}")
         finally:
@@ -423,6 +493,68 @@ class WhisperFlowApp:
 
     def _get_hotwords(self) -> str:
         return (getattr(self.config, "custom_vocabulary", "") or "").strip()
+
+    def _streaming_loop(self, hwnd: int, stop_event: threading.Event) -> None:
+        """Append-only live transcription: inject new words every ~900 ms while recording."""
+        TICK_INTERVAL = 0.9
+        MIN_AUDIO_SECS = 0.6
+
+        last_text = ""
+        inject_count = 0
+
+        for _ in range(25):
+            if self.recorder.is_recording:
+                break
+            time.sleep(0.04)
+
+        while not stop_event.is_set() and self.recorder.is_recording:
+            tick_start = time.time()
+            try:
+                audio = self.recorder.get_current_audio(max_seconds=30.0)
+                rate = self.recorder.active_sample_rate
+                if audio is not None and len(audio) >= rate * MIN_AUDIO_SECS:
+                    ctx = self._get_context_words()
+                    hw = self._get_hotwords()
+                    result = self.fast_transcriber.transcribe(
+                        audio, rate,
+                        context_words=ctx,
+                        hotwords_str=hw,
+                        blocking=False,
+                    ).strip()
+                    if result:
+                        new_words = self._stream_extension(last_text, result)
+                        if new_words:
+                            # Strip trailing punctuation — mid-sentence chunks shouldn't end with a period
+                            suffix = new_words.rstrip(".,!?;:") + " "
+                            self.injector.inject_immediate(suffix)
+                            inject_count += 1
+                            last_text = result
+                            print(f"[Stream] +'{new_words}'")
+            except Exception as e:
+                print(f"[Stream] Tick error: {e}")
+
+            elapsed = time.time() - tick_start
+            remaining = TICK_INTERVAL - elapsed
+            if remaining > 0:
+                stop_event.wait(remaining)
+
+        with self._stream_lock:
+            self._stream_last_text = last_text
+            self._stream_inject_count = inject_count
+        print(f"[Stream] Ended — {inject_count} injection(s), last='{last_text[:60]}'")
+
+    @staticmethod
+    def _stream_extension(prev: str, curr: str) -> str:
+        """Return the new words if curr cleanly extends prev; empty string if not."""
+        prev_words = prev.split()
+        curr_words = curr.split()
+        if len(curr_words) <= len(prev_words):
+            return ""
+        prev_norm = [w.rstrip(".,!?;:") for w in prev_words]
+        curr_norm = [w.rstrip(".,!?;:") for w in curr_words]
+        if curr_norm[: len(prev_words)] == prev_norm:
+            return " ".join(curr_words[len(prev_words) :])
+        return ""
 
     def _on_state_change(self, state: AppState) -> None:
         self.app_window.update_status(
@@ -676,13 +808,13 @@ class WhisperFlowApp:
         self.injector.inject(text)
         print(f"[App] Manual insert: {len(text)} chars")
 
-    def _replace_text(self, new_text: str, hwnd: int, original_text: str = "") -> None:
+    def _replace_text(self, new_text: str, hwnd: int, original_text: str = "", undo_count: int = 1) -> None:
         import keyboard as kb
 
         self._focus_window(hwnd)
-        kb.send("ctrl+z")
-        time.sleep(0.05)
-        # Use the injector's native clipboard method (no pyperclip dependency)
+        for _ in range(max(1, undo_count)):
+            kb.send("ctrl+z")
+            time.sleep(0.05)
         self.injector.inject(new_text)
         print(f"[App] Replaced with refined text: '{new_text}'")
         if original_text:

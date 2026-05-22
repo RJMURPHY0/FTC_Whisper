@@ -17,8 +17,8 @@ _NO_FORMAT = (
 
 REFINE_PROMPTS = {
     "punctuation": (
-        "Fix the punctuation, capitalisation, and spacing in this transcribed speech. "
-        "Correct obvious errors but keep the original wording and meaning intact. "
+        "Fix the punctuation, capitalisation, spacing, grammar, and spelling in this transcribed speech. "
+        "Correct all errors but keep the original wording and meaning intact. "
         "Return only the corrected text, nothing else." + _NO_FORMAT
     ),
     "email": (

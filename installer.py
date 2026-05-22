@@ -137,6 +137,22 @@ def add_to_startup() -> None:
         print(f"  [WARN] Startup shortcut failed: {e}")
 
 
+def register_url_protocol() -> None:
+    """Register ftcwhisper:// URL protocol so browsers can launch the app."""
+    try:
+        import winreg
+        cmd = f'"{PYTHON}" "{APP_PY}" "%1"'
+        base = r"Software\Classes\ftcwhisper"
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base) as k:
+            winreg.SetValueEx(k, "",             0, winreg.REG_SZ, "URL:FTC Whisper")
+            winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base + r"\shell\open\command") as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, cmd)
+        print("  [OK] Registered ftcwhisper:// URL protocol.")
+    except Exception as e:
+        print(f"  [WARN] URL protocol registration failed: {e}")
+
+
 def main() -> None:
     print()
     print("  ==============================================")
@@ -154,6 +170,9 @@ def main() -> None:
 
     _banner("Adding to Windows startup...")
     add_to_startup()
+
+    _banner("Registering browser launch protocol...")
+    register_url_protocol()
 
     print()
     print("  ==============================================")

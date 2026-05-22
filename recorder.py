@@ -134,6 +134,31 @@ class Recorder:
         print(f"[Recorder] Captured {duration:.1f}s of audio.")
         return audio
 
+    def start_monitor(self, device_name: str = "") -> None:
+        """Open a non-recording stream just to read live levels (mic test)."""
+        self.stop_monitor()
+        old_device = self.input_device
+        self.input_device = device_name.strip()
+        try:
+            self._monitor_stream = self._open_best_input_stream()
+            self._monitor_stream.start()
+        except Exception:
+            self.input_device = old_device
+            self._monitor_stream = None
+            raise
+        self.input_device = old_device
+
+    def stop_monitor(self) -> None:
+        """Close the mic-test monitor stream if open."""
+        stream = getattr(self, "_monitor_stream", None)
+        if stream is not None:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:
+                pass
+            self._monitor_stream = None
+
     def get_input_devices(self) -> list[dict]:
         """List available input audio devices."""
         devices = sd.query_devices()

@@ -473,7 +473,7 @@ class FloatingPopup:
             ("✉ Email", "email"),
             ("🎩 Formal", "formal"),
             ("💬 Casual", "casual"),
-            ("✨ Fix", "punctuation"),
+            ("✨ Fix All", "punctuation"),
             ("✂ Short", "concise"),
             ("⚡ Optimise", "prompt_optimiser"),
         ]:
