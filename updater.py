@@ -111,12 +111,16 @@ def apply_update(new_exe: str, current_exe: str) -> None:
     script = f"""
 $NewExe = '{new_ps}'
 $CurExe = '{cur_ps}'
+$AppName = [System.IO.Path]::GetFileNameWithoutExtension($CurExe)
 # Wait for the old process to fully exit
 while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{
     Start-Sleep -Milliseconds 500
 }}
-# Extra pause so AV/Defender releases any file handles
-Start-Sleep -Seconds 3
+# Short pause so AV/Defender releases any file handles
+Start-Sleep -Seconds 1
+# Kill any re-launched instances (user may have clicked the exe while waiting)
+Get-Process -Name $AppName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 500
 # Try to overwrite (up to 20 retries, 1 s apart)
 $ok = $false
 for ($i = 0; $i -lt 20; $i++) {{
@@ -132,6 +136,7 @@ for ($i = 0; $i -lt 20; $i++) {{
 $launch = if ($ok) {{ $CurExe }} else {{ $NewExe }}
 Start-Process -FilePath $launch
 Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+if ($ok) {{ Remove-Item -Path $NewExe -Force -ErrorAction SilentlyContinue }}
 """
     with open(ps_file, "w", encoding="utf-8") as f:
         f.write(script)
