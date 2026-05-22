@@ -309,7 +309,7 @@ class HotkeyManager:
         while _user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
             if msg.message == _WM_HOTKEY and msg.wParam == HOTKEY_ID:
                 self._on_key_down()
-                if self.mode == "hold":
+                if self.mode == "hold" and not self._polling:
                     threading.Thread(
                         target=self._poll_release, args=(vk,), daemon=True
                     ).start()
@@ -321,7 +321,14 @@ class HotkeyManager:
     def _poll_release(self, vk: int) -> None:
         self._polling = True
         time.sleep(0.05)
-        while self._polling and (_user32.GetAsyncKeyState(vk) & 0x8000):
+        _up_count = 0
+        while self._polling:
+            if _user32.GetAsyncKeyState(vk) & 0x8000:
+                _up_count = 0
+            else:
+                _up_count += 1
+                if _up_count >= 3:  # 60 ms of consistent key-up = real release
+                    break
             time.sleep(0.02)
         if self._polling:
             self._on_key_up()

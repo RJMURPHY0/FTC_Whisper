@@ -392,17 +392,22 @@ class WhisperFlowApp:
             "MozillaDialogClass",
             "Chrome_RenderWidgetHostHWND",
         }
-        try:
-            cls = self._get_window_class(hwnd)
-            if cls and (
-                cls in _BROWSER_EXACT
-                or any(cls.startswith(p) for p in _BROWSER_PREFIXES)
-            ):
-                self._click_to_restore_focus(
-                    self._rec_cursor_x, self._rec_cursor_y, hwnd
-                )
-        except Exception as e:
-            print(f"[App] Browser focus click error: {e}")
+        # Only click to restore DOM focus when streaming hasn't already injected text.
+        # If streaming injected words the cursor is already positioned correctly —
+        # clicking at the recording-start position would move it backward and cause
+        # the final delta to land mid-sentence.
+        if _stream_count == 0:
+            try:
+                cls = self._get_window_class(hwnd)
+                if cls and (
+                    cls in _BROWSER_EXACT
+                    or any(cls.startswith(p) for p in _BROWSER_PREFIXES)
+                ):
+                    self._click_to_restore_focus(
+                        self._rec_cursor_x, self._rec_cursor_y, hwnd
+                    )
+            except Exception as e:
+                print(f"[App] Browser focus click error: {e}")
 
         result = False
         try:
