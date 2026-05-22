@@ -65,7 +65,6 @@ class AppWindow:
         on_refine_hotkey_change: Callable = None,
         on_settings_change: Callable = None,
         on_sign_in: Callable = None,
-        on_popup_ready: Callable = None,
         db=None,
         hotkey: str = "alt+v",
         refine_hotkey: str = "alt+r",
@@ -85,7 +84,6 @@ class AppWindow:
         self._on_refine_hotkey_change = on_refine_hotkey_change
         self._on_settings_change      = on_settings_change
         self._on_sign_in              = on_sign_in
-        self._on_popup_ready          = on_popup_ready
         self._db                      = db
         self._config                  = config
         self._get_input_devices       = get_input_devices
@@ -148,20 +146,12 @@ class AppWindow:
             ).pack(fill="both", expand=True)
 
         # Force all pending geometry/paint before entering the event loop.
+        # Prevents the blank-white-window issue on some Windows configurations
+        # where the window appears before tkinter has drawn its first frame.
         try:
             self._root.update()
         except Exception:
             pass
-
-        # Initialise the floating popup as a Toplevel of this root.
-        # Must happen after tk.Tk() exists and before mainloop so the popup
-        # shares the single Tcl interpreter instead of creating a second one.
-        if self._on_popup_ready:
-            try:
-                self._on_popup_ready(self._root)
-            except Exception:
-                import traceback
-                print(f"[AppWindow] Popup setup error:\n{traceback.format_exc()}")
 
         self._root.mainloop()
         # Destroy after mainloop exits (quit() was called on sign-out)
@@ -1012,15 +1002,14 @@ class AppWindow:
                 mic_var.set("Default")
             _refresh_mic_label()
 
-        def _load_devices_bg():
-            try:
-                devs = self._get_input_devices() if self._get_input_devices else []
-            except Exception:
-                devs = []
-            if self._root:
-                self._root.after(0, lambda: _populate_mic_menu(devs))
-
-        threading.Thread(target=_load_devices_bg, daemon=True, name="mic-device-scan").start()
+        # Load devices synchronously — sd.query_devices() is fast (<50 ms)
+        # and doing it on the main thread guarantees the menu is fully populated
+        # before the user can click it, eliminating the "Default only" race condition.
+        try:
+            _devs = self._get_input_devices() if self._get_input_devices else []
+        except Exception:
+            _devs = []
+        _populate_mic_menu(_devs)
 
         # ── Mic test button + level meter ─────────────────────────────────────
         btn_row = tk.Frame(mic_card, bg=C["surface"])
