@@ -1620,7 +1620,8 @@ class AppWindow:
                 try:
                     download_update(download_url, dest, _progress)
                     if exe:
-                        self._root.after(0, lambda: apply_update(dest, exe))
+                        # 600 ms delay lets the progress bar reach 100% before the window closes
+                        self._root.after(600, lambda: apply_update(dest, exe))
                     else:
                         self._root.after(
                             0,

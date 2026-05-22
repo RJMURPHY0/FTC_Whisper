@@ -103,28 +103,37 @@ def apply_update(new_exe: str, current_exe: str) -> None:
     import os as _os
     pid = _os.getpid()
     bat = os.path.join(tempfile.gettempdir(), "ftc_whisper_update.bat")
-    # Wait for PID to disappear (process fully exited), retry copy in case
-    # the file handle is briefly still held, then relaunch.
+    # Wait for PID to disappear, then wait 3 s for AV to release the file,
+    # retry copy up to 20 times. If copy keeps failing, launch the downloaded
+    # exe directly from temp as a fallback so the user still gets the update.
     script = (
         "@echo off\n"
         f"set TARGET_PID={pid}\n"
+        f'set "NEWEXE={new_exe}"\n'
+        f'set "CUREXE={current_exe}"\n'
+        "set RETRY=0\n"
         ":waitloop\n"
         'tasklist /FI "PID eq %TARGET_PID%" 2>nul | find "%TARGET_PID%" >nul\n'
         "if not errorlevel 1 (\n"
         "    timeout /t 1 /nobreak >nul\n"
         "    goto waitloop\n"
         ")\n"
-        "timeout /t 1 /nobreak >nul\n"
-        f'set "NEWEXE={new_exe}"\n'
-        f'set "CUREXE={current_exe}"\n'
+        "timeout /t 3 /nobreak >nul\n"
         ":copyloop\n"
+        "set /a RETRY+=1\n"
         'copy /y "%NEWEXE%" "%CUREXE%" >nul\n'
-        "if errorlevel 1 (\n"
-        "    timeout /t 1 /nobreak >nul\n"
-        "    goto copyloop\n"
-        ")\n"
+        "if not errorlevel 1 goto :launch\n"
+        "if %RETRY% geq 20 goto :launch_temp\n"
+        "timeout /t 1 /nobreak >nul\n"
+        "goto :copyloop\n"
+        ":launch\n"
         'start "" "%CUREXE%"\n'
         'del "%~f0"\n'
+        "exit /b 0\n"
+        ":launch_temp\n"
+        'start "" "%NEWEXE%"\n'
+        'del "%~f0"\n'
+        "exit /b 0\n"
     )
     with open(bat, "w") as f:
         f.write(script)
@@ -132,9 +141,10 @@ def apply_update(new_exe: str, current_exe: str) -> None:
     subprocess.Popen(
         ["cmd", "/c", bat],
         creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
-        close_fds=True,
     )
-    sys.exit(0)
+    # os._exit bypasses Python cleanup — guarantees the process actually dies
+    # so the batch script's PID-wait loop unblocks immediately.
+    _os._exit(0)
 
 
 def current_exe_path() -> Optional[str]:

@@ -33,7 +33,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 
 
 class WhisperFlowApp:
@@ -277,7 +277,7 @@ class WhisperFlowApp:
             self._stream_inject_count = 0
             self._stream_thread = threading.Thread(
                 target=self._streaming_loop,
-                args=(self._recording_hwnd, self._stream_stop_event),
+                args=(self._stream_stop_event,),
                 daemon=True,
                 name="streaming-loop",
             )
@@ -494,7 +494,7 @@ class WhisperFlowApp:
     def _get_hotwords(self) -> str:
         return (getattr(self.config, "custom_vocabulary", "") or "").strip()
 
-    def _streaming_loop(self, hwnd: int, stop_event: threading.Event) -> None:
+    def _streaming_loop(self, stop_event: threading.Event) -> None:
         """Append-only live transcription: inject new words every ~900 ms while recording."""
         TICK_INTERVAL = 0.9
         MIN_AUDIO_SECS = 0.6
