@@ -117,9 +117,12 @@ while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{
     Start-Sleep -Milliseconds 500
 }}
 # Short pause so AV/Defender releases any file handles
-Start-Sleep -Seconds 1
+Start-Sleep -Seconds 2
 # Kill any re-launched instances (user may have clicked the exe while waiting)
 Get-Process -Name $AppName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 500
+# Remove "downloaded from internet" mark BEFORE copying so Defender releases its lock
+Unblock-File -Path $NewExe -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 500
 # Try to overwrite (up to 20 retries, 1 s apart)
 $ok = $false
@@ -134,7 +137,7 @@ for ($i = 0; $i -lt 20; $i++) {{
 }}
 # Launch from the installed location if copy succeeded, else from temp
 $launch = if ($ok) {{ $CurExe }} else {{ $NewExe }}
-# Strip the "downloaded from internet" mark so SmartScreen doesn't block the relaunch
+# Strip SmartScreen mark on the launch target too
 Unblock-File -Path $launch -ErrorAction SilentlyContinue
 Start-Process -FilePath $launch
 Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue

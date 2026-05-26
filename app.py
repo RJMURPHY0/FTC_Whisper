@@ -33,7 +33,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.2.5"
+APP_VERSION = "1.2.6"
 
 
 class WhisperFlowApp:
@@ -317,8 +317,8 @@ class WhisperFlowApp:
                 return
 
             # When streaming was active, match its 30 s window so _stream_extension
-            # can find the extension point; otherwise cap at 60 s.
-            _window_secs = 30.0 if _stream_count > 0 else 60.0
+            # can find the extension point; otherwise allow up to 5 min.
+            _window_secs = 30.0 if _stream_count > 0 else 300.0
             max_samples = int(capture_rate * _window_secs)
             final_audio = audio[-max_samples:] if len(audio) > max_samples else audio
             print(

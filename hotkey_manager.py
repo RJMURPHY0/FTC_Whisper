@@ -202,6 +202,10 @@ class HotkeyManager:
             self._base_key_suppress_hook = None
 
     def _on_key_down(self, _event=None) -> None:
+        # Skip synthetic key events (e.g. VK_V from our own Ctrl+V clipboard paste).
+        # LLKHF_INJECTED = 0x10 in KBDLLHOOKSTRUCT.flags.
+        if _event is not None and (getattr(_event, 'flags', 0) & 0x10):
+            return
         with self._lock:
             if self.mode == "hold":
                 if self._state == AppState.IDLE:
