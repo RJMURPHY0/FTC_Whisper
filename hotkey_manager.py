@@ -176,19 +176,29 @@ class HotkeyManager:
     # ------------------------------------------------------------------
 
     def _install_base_key_suppressor(self) -> None:
-        """Install a low-level hook that suppresses the bare base key during recording.
+        """Install a conditional hook that suppresses the base key ONLY during recording.
 
-        When using a combo like Alt+V in hold mode, releasing Alt before V causes the
-        OS to deliver bare V keydown events to the foreground window, typing 'v' before
-        the transcription.  Suppressing V at the hook level prevents this entirely.
+        Installed eagerly at register() time so there is zero timing gap between
+        WM_HOTKEY firing and the suppressor being active. Chrome (and other apps
+        using raw-input or WH_KEYBOARD_LL) see key events before the Win32 message
+        queue, so RegisterHotKey alone doesn't stop V-repeats from leaking into the
+        foreground window during hold mode.
+
+        The keyboard library suppresses a key when the blocking_key hook returns
+        falsy. We return None (falsy) while recording and True (truthy) otherwise,
+        giving us conditional suppression with no timing gap.
         """
         if not self._is_combo or not self._win32_ok:
             return
         if self._base_key_suppress_hook is not None:
             return
+
+        def _should_suppress(_event):
+            return None if self._state == AppState.RECORDING else True
+
         try:
             self._base_key_suppress_hook = kb.on_press_key(
-                self._base_key, lambda _e: None, suppress=True
+                self._base_key, _should_suppress, suppress=True
             )
         except Exception as e:
             print(f"[HotkeyManager] Could not install base key suppressor: {e}")
@@ -202,16 +212,11 @@ class HotkeyManager:
             self._base_key_suppress_hook = None
 
     def _on_key_down(self, _event=None) -> None:
-        # Skip synthetic key events (e.g. VK_V from our own Ctrl+V clipboard paste).
-        # LLKHF_INJECTED = 0x10 in KBDLLHOOKSTRUCT.flags.
-        if _event is not None and (getattr(_event, 'flags', 0) & 0x10):
-            return
         with self._lock:
             if self.mode == "hold":
                 if self._state == AppState.IDLE:
                     self._press_time = time.time()
                     self._set_state(AppState.RECORDING)
-                    self._install_base_key_suppressor()
                     if self.on_start_recording:
                         threading.Thread(
                             target=self.on_start_recording, daemon=True
@@ -233,7 +238,6 @@ class HotkeyManager:
     def _on_key_up(self, _event=None) -> None:
         with self._lock:
             if self.mode == "hold" and self._state == AppState.RECORDING:
-                self._remove_base_key_suppressor()
                 self._release_combo_modifiers_if_needed()
                 duration = time.time() - getattr(self, "_press_time", 0.0)
                 if duration < 0.3:
@@ -377,7 +381,9 @@ class HotkeyManager:
                 registered = True
             else:
                 registered = self._win32_register(mods, vk)
-                if not registered:
+                if registered:
+                    self._install_base_key_suppressor()
+                else:
                     print(
                         "[HotkeyManager] Hotkey not active — combo was not registered."
                     )
