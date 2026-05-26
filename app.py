@@ -271,17 +271,11 @@ class WhisperFlowApp:
                 self._rec_cursor_x, self._rec_cursor_y = 0, 0
             self.recorder.start()
             self.feedback.recording_started()
-            # Start streaming transcription loop
+            # Streaming mid-recording injection is disabled — text is inserted only after release
             self._stream_stop_event.clear()
             self._stream_last_text = ""
             self._stream_inject_count = 0
-            self._stream_thread = threading.Thread(
-                target=self._streaming_loop,
-                args=(self._stream_stop_event,),
-                daemon=True,
-                name="streaming-loop",
-            )
-            self._stream_thread.start()
+            self._stream_thread = None
         except Exception as e:
             print(f"[App] Failed to start recording: {e}")
             self.feedback.error_occurred(str(e))
