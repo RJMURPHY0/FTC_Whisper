@@ -33,7 +33,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.2.7"
+APP_VERSION = "1.2.8"
 
 
 class WhisperFlowApp:
@@ -1061,19 +1061,22 @@ def _ensure_single_instance() -> None:
     MUTEX_NAME = "Global\\FTC_Whisper_SingleInstance"
 
     kernel32 = ctypes.windll.kernel32
-    user32 = ctypes.windll.user32
-
     mutex = kernel32.CreateMutexW(None, True, MUTEX_NAME)
     err = kernel32.GetLastError()
 
     if err == ERROR_ALREADY_EXISTS:
-        # Another instance is running — surface its window and exit.
-        hwnd = user32.FindWindowW(None, "FTC Whisper")
-        if hwnd:
-            user32.ShowWindow(hwnd, 9)   # SW_RESTORE (un-minimise if needed)
-            user32.ShowWindow(hwnd, 5)   # SW_SHOW    (un-hide if withdrawn to tray)
-            user32.BringWindowToTop(hwnd)
-            user32.SetForegroundWindow(hwnd)
+        # Another instance is running — ask it to show itself via the local HTTP
+        # server (/show calls app_window.show() → deiconify() + Win32 focus).
+        # Using the HTTP endpoint is essential: raw Win32 ShowWindow bypasses
+        # tkinter's state machine and produces a blank/tiny window when the
+        # existing instance hid itself via withdraw().
+        import urllib.request
+        try:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{_LOCAL_PORT}/show", timeout=2
+            )
+        except Exception:
+            pass
         sys.exit(0)
 
     # We are the first instance — hold the mutex for the process lifetime.
