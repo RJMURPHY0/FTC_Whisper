@@ -36,8 +36,11 @@ REFINE_PROMPTS = {
         "Return only the rewritten text, nothing else." + _NO_FORMAT
     ),
     "concise": (
-        "Rewrite this transcribed speech as concisely as possible while preserving the full meaning. "
-        "Fix punctuation. Return only the rewritten text, nothing else." + _NO_FORMAT
+        "Rewrite this transcribed speech using short, simple sentences. "
+        "Keep every point and every piece of information from the original. Do not remove anything useful. "
+        "Cut filler words and repetition only. Fix punctuation. "
+        "Make it easy to read and easy to understand at a glance. "
+        "Return only the rewritten text, nothing else." + _NO_FORMAT
     ),
     "prompt_optimiser": (
         "You are a prompt optimisation specialist. "
@@ -114,9 +117,11 @@ class AIRefiner:
                 max_tokens=1024,
                 system=(
                     "You are a text refinement assistant. "
-                    "Always respond with plain prose only — no bullet points, no numbered lists, "
-                    "no dashes, no hyphens at the start of lines, no asterisks, no markdown, "
-                    "no headers. Write in flowing sentences and paragraphs."
+                    "Write in plain prose only. No bullet points, numbered lists, dashes at line starts, asterisks, markdown, or headers. "
+                    "Use clear, simple language. Keep sentences short and direct. Use active voice. "
+                    "Avoid em dashes, semicolons, filler words, and cliches. "
+                    "Write as a human would: natural, direct, easy to read. "
+                    "Return only the refined text, nothing else."
                 ),
                 messages=[
                     {

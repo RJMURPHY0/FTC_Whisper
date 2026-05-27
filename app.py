@@ -33,7 +33,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.2.8"
+APP_VERSION = "1.2.9"
 
 
 class WhisperFlowApp:
