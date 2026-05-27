@@ -33,7 +33,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 
 
 class WhisperFlowApp:
@@ -269,8 +269,8 @@ class WhisperFlowApp:
                 self._rec_cursor_x, self._rec_cursor_y = pt.x, pt.y
             except Exception:
                 self._rec_cursor_x, self._rec_cursor_y = 0, 0
-            self.recorder.start()
             self.feedback.recording_started()
+            self.recorder.start()
             # Streaming mid-recording injection is disabled — text is inserted only after release
             self._stream_stop_event.clear()
             self._stream_last_text = ""
@@ -286,7 +286,7 @@ class WhisperFlowApp:
         self._stream_stop_event.set()
         _st = self._stream_thread
         if _st is not None and _st.is_alive():
-            _st.join(timeout=1.5)
+            _st.join(timeout=0.5)
         with self._stream_lock:
             _stream_last = self._stream_last_text
             _stream_count = self._stream_inject_count
@@ -726,7 +726,7 @@ class WhisperFlowApp:
                 if attached:
                     u32.AttachThreadInput(our_tid, fg_tid, False)
 
-                time.sleep(0.08 if short else 0.20)
+                time.sleep(0.05 if short else 0.12)
 
                 actual = u32.GetForegroundWindow()
                 if actual == hwnd:

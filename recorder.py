@@ -181,6 +181,17 @@ class Recorder:
             return self._last_rms, self._last_peak
 
     def _open_best_input_stream(self) -> sd.InputStream:
+        # Fast path: reuse the last known good device index — skips sd.query_devices()
+        # enumeration on every recording after the first (~20-100ms saved per press).
+        if self._active_device_index is not None:
+            try:
+                stream = self._open_stream_with_rates(self._active_device_index)
+                return stream
+            except Exception:
+                # Device disappeared or changed — fall through to full enumeration
+                self._active_device_index = None
+                self._active_device_name = ""
+
         candidates = self._candidate_device_indices()
         if not candidates:
             return self._open_stream_with_rates(None)

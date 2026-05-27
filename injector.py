@@ -246,7 +246,7 @@ def _release_modifiers() -> None:
     if events:
         arr = (_Input * len(events))(*events)
         u32.SendInput(len(events), arr, ctypes.sizeof(_Input))
-        time.sleep(0.10)  # settle before injecting
+        time.sleep(0.07)  # settle before injecting
 
 
 # ── Injector class ────────────────────────────────────────────────────────────
@@ -274,8 +274,8 @@ class Injector:
             if not result:
                 # First attempt failed — give Windows time to settle focus,
                 # then try once more. Modifiers are already released.
-                print("[Injector] First attempt failed — retrying in 350 ms…")
-                time.sleep(0.35)
+                print("[Injector] First attempt failed — retrying in 200 ms…")
+                time.sleep(0.20)
                 result = self._inject(text, release_mods=False)
                 if result:
                     print("[Injector] Retry succeeded.")
@@ -407,7 +407,7 @@ class Injector:
         """Restore the clipboard to *original* after a short delay."""
 
         def _do():
-            time.sleep(0.5)
+            time.sleep(0.25)
             try:
                 Injector._clipboard_set(original)
             except Exception:
@@ -428,7 +428,7 @@ class Injector:
             u32 = ctypes.windll.user32
 
             original = self._clipboard_set(text)
-            time.sleep(0.15)  # let clipboard settle (was 0.10 — extra margin)
+            time.sleep(0.08)  # let clipboard settle
 
             # Release Alt if still held — prevents Paste Special in Office
             if u32.GetAsyncKeyState(VK_MENU) & 0x8000:
@@ -436,7 +436,7 @@ class Injector:
                 inp.ki.wVk = VK_MENU
                 inp.ki.dwFlags = _KEYEVENTF_KEYUP
                 u32.SendInput(1, (_Input * 1)(inp), ctypes.sizeof(_Input))
-                time.sleep(0.05)
+                time.sleep(0.03)
 
             # Also release Ctrl if held (prevents Ctrl+V being treated as Ctrl+Ctrl+V)
             if u32.GetAsyncKeyState(VK_CTRL) & 0x8000:
@@ -444,7 +444,7 @@ class Injector:
                 inp.ki.wVk = VK_CTRL
                 inp.ki.dwFlags = _KEYEVENTF_KEYUP
                 u32.SendInput(1, (_Input * 1)(inp), ctypes.sizeof(_Input))
-                time.sleep(0.04)
+                time.sleep(0.02)
 
             # Atomic Ctrl+V via SendInput (no interleaving with hardware events)
             ctrl_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL))
@@ -458,7 +458,7 @@ class Injector:
             )
             arr = (_Input * 4)(ctrl_dn, v_dn, v_up, ctrl_up)
             u32.SendInput(4, arr, ctypes.sizeof(_Input))
-            time.sleep(0.22)  # let app process the paste before restoring clipboard
+            time.sleep(0.15)  # let app process the paste before restoring clipboard
 
             self._clipboard_restore(original)
 
