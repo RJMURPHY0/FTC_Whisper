@@ -134,7 +134,7 @@ class Transcriber:
                 threshold=0.45,               # was 0.50 — slightly more sensitive to speech
                 speech_pad_ms=60,             # was 100 — tighter padding
             ),
-            no_speech_threshold=0.6,
+            no_speech_threshold=0.7,
             condition_on_previous_text=False,
             temperature=[0.0],        # list disables temperature fallback retries entirely
             repetition_penalty=1.1,   # discourages looping/repeated phrases
@@ -179,12 +179,11 @@ class Transcriber:
         if text and text[0].islower():
             text = text[0].upper() + text[1:]
 
-        # Remove filler words (whole-word matches only, case-insensitive)
+        # Remove only pure non-word fillers (sounds with no semantic meaning).
+        # Do NOT strip words like "like", "so", "actually", "yeah" — the user
+        # may have said them intentionally and removing them corrupts the text.
         fillers = (
             r"\bum+\b", r"\buh+\b", r"\ber+\b", r"\bhmm+\b", r"\bmhm+\b",
-            r"\byou know\b", r"\bI mean\b", r"\blike,?\b", r"\bso,?\b",
-            r"\bbasically\b", r"\bliterally\b", r"\bactually\b", r"\bright\?\b",
-            r"\bokay so\b", r"\bso yeah\b", r"\byeah so\b", r"\byeah\b",
         )
         for filler in fillers:
             text = re.sub(filler, "", text, flags=re.IGNORECASE)
