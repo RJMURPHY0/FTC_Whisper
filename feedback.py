@@ -7,6 +7,8 @@ import sys
 import threading
 from typing import Callable, Optional
 
+from error_reporter import report_error
+
 
 def _play_beep(frequency: int = 800, duration_ms: int = 150) -> None:
     """Play a short beep sound (Windows only)."""
@@ -89,3 +91,4 @@ class Feedback:
             ).start()
 
         print(f"[Feedback] Error: {error}")
+        report_error(error)
