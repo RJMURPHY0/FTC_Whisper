@@ -1604,72 +1604,10 @@ class AppWindow:
         if not self._root:
             return
 
-        # Shared download state — prevents double-trigger
-        _downloading = [False]
 
-        # Collect all "Update Now" buttons so they can all be disabled at once
-        _update_btns = []
-
-        def _disable_all_btns():
-            for b in _update_btns:
-                try:
-                    b.configure(bg=C["accent_dim"], fg=C["subtext"], cursor="")
-                    b.unbind("<Button-1>")
-                    b.unbind("<Enter>")
-                    b.unbind("<Leave>")
-                except Exception:
-                    pass
-
-        def _start_download(_e=None):
-            import os
-            import tempfile
-            from updater import apply_update, current_exe_path, download_update
-
-            if _downloading[0]:
-                return
-            _downloading[0] = True
-            _disable_all_btns()
-            prog_frame.pack(fill="x", pady=(6, 0))
-            # Scroll settings to the top so the progress bar is immediately visible
-            if hasattr(self, "_settings_cv"):
-                self._root.after(0, lambda: self._settings_cv.yview_moveto(0))
-
-            exe = current_exe_path()
-
-            def _progress(done, total):
-                if total > 0:
-                    frac = min(done / total, 1.0)
-                    self._root.after(
-                        0,
-                        lambda f=frac: prog_cv.coords(prog_bar, 0, 0, int(160 * f), 6),
-                    )
-
-            def _worker():
-                dest = os.path.join(tempfile.gettempdir(), "FTC-Whisper-update.exe")
-                try:
-                    download_update(download_url, dest, _progress)
-                    if exe:
-                        self._root.after(0, lambda: prog_lbl.configure(
-                            text="Restarting…", fg=C["success"]))
-                        # 800 ms so the user sees "Restarting…" before the window closes
-                        self._root.after(800, lambda: apply_update(dest, exe))
-                    else:
-                        self._root.after(
-                            0,
-                            lambda: prog_lbl.configure(
-                                text="Downloaded — replace FTC Whisper.exe manually.",
-                                fg=C["success"],
-                            ),
-                        )
-                except Exception as err:
-                    self._root.after(
-                        0,
-                        lambda e=err: prog_lbl.configure(
-                            text=f"Download failed: {e}", fg=C["error"]
-                        ),
-                    )
-
-            threading.Thread(target=_worker, daemon=True, name="update-download").start()
+        def _open_download(_e=None):
+            import webbrowser
+            webbrowser.open(download_url)
 
         # ── Top banner ────────────────────────────────────────────────────────
         if hasattr(self, "_update_banner_frame"):
@@ -1696,21 +1634,7 @@ class AppWindow:
                 padx=10, pady=3,
             )
             banner_btn.pack(side="right")
-            _update_btns.append(banner_btn)
-
-            prog_frame = tk.Frame(card, bg=C["surface"])
-            prog_lbl = tk.Label(
-                prog_frame, text="Downloading...",
-                fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 9),
-            )
-            prog_lbl.pack(side="left")
-
-            prog_cv = tk.Canvas(prog_frame, bg="#2d2d2d", highlightthickness=0,
-                                height=6, width=160)
-            prog_cv.pack(side="right", padx=(8, 0))
-            prog_bar = prog_cv.create_rectangle(0, 0, 0, 6, fill=C["accent"], width=0)
-
-            banner_btn.bind("<Button-1>", _start_download)
+            banner_btn.bind("<Button-1>", _open_download)
             banner_btn.bind("<Enter>", lambda _e: banner_btn.configure(bg=C["accent_hover"]))
             banner_btn.bind("<Leave>", lambda _e: banner_btn.configure(bg=C["accent"]))
 
@@ -1727,9 +1651,7 @@ class AppWindow:
                 padx=10, pady=4,
             )
             ver_btn.pack(side="right")
-            _update_btns.append(ver_btn)
-
-            ver_btn.bind("<Button-1>", _start_download)
+            ver_btn.bind("<Button-1>", _open_download)
             ver_btn.bind("<Enter>", lambda _e: ver_btn.configure(bg=C["accent_hover"]))
             ver_btn.bind("<Leave>", lambda _e: ver_btn.configure(bg=C["accent"]))
 
