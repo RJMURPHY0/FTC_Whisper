@@ -108,40 +108,45 @@ def apply_update(new_exe: str, current_exe: str) -> None:
     new_ps  = new_exe.replace("'", "''")
     cur_ps  = current_exe.replace("'", "''")
     ps_file = os.path.join(tempfile.gettempdir(), "ftc_whisper_update.ps1")
+    log_file = os.path.join(tempfile.gettempdir(), "ftc_whisper_update.log").replace("'", "''")
     script = f"""
 $NewExe = '{new_ps}'
 $CurExe = '{cur_ps}'
-$AppName = [System.IO.Path]::GetFileNameWithoutExtension($CurExe)
+$Log    = '{log_file}'
+function Log($msg) {{ "[$(Get-Date -Format 'HH:mm:ss')] $msg" | Add-Content -Path $Log -Encoding UTF8 }}
+Log "Update started. PID={pid}"
+Log "New: $NewExe"
+Log "Cur: $CurExe"
 # Wait for the old process to fully exit
 while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{
     Start-Sleep -Milliseconds 500
 }}
-# Short pause so AV/Defender releases any file handles
-Start-Sleep -Seconds 2
-# Kill any re-launched instances (user may have clicked the exe while waiting)
-Get-Process -Name $AppName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-Start-Sleep -Milliseconds 500
-# Remove "downloaded from internet" mark BEFORE copying so Defender releases its lock
+Log "Old process exited."
+# Remove Mark-of-the-Web so Defender releases its scan lock on the download
 Unblock-File -Path $NewExe -ErrorAction SilentlyContinue
-Start-Sleep -Milliseconds 500
-# Try to overwrite (up to 20 retries, 1 s apart)
+Log "Unblocked download. Waiting 8 s for Defender to finish scanning..."
+Start-Sleep -Seconds 8
+# Try to overwrite (up to 30 retries, 2 s apart = 60 s total)
 $ok = $false
-for ($i = 0; $i -lt 20; $i++) {{
+for ($i = 0; $i -lt 30; $i++) {{
     try {{
         Copy-Item -Path $NewExe -Destination $CurExe -Force -ErrorAction Stop
         $ok = $true
+        Log "Copy succeeded on attempt $($i + 1)."
         break
     }} catch {{
-        Start-Sleep -Seconds 1
+        Log "Copy attempt $($i + 1) failed: $_"
+        Start-Sleep -Seconds 2
     }}
 }}
-# Launch from the installed location if copy succeeded, else from temp
+# Launch from installed location if copy succeeded, else run from temp as fallback
 $launch = if ($ok) {{ $CurExe }} else {{ $NewExe }}
-# Strip SmartScreen mark on the launch target too
 Unblock-File -Path $launch -ErrorAction SilentlyContinue
+Log "Launching: $launch (copy ok=$ok)"
 Start-Process -FilePath $launch
 Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
 if ($ok) {{ Remove-Item -Path $NewExe -Force -ErrorAction SilentlyContinue }}
+Log "Done."
 """
     with open(ps_file, "w", encoding="utf-8") as f:
         f.write(script)
