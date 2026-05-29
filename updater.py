@@ -133,8 +133,8 @@ while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{
 Log "Old process exited."
 # Remove Mark-of-the-Web so Defender releases its scan lock on the download
 Unblock-File -Path $NewExe -ErrorAction SilentlyContinue
-Log "Unblocked download. Waiting 8 s for Defender to finish scanning..."
-Start-Sleep -Seconds 8
+Log "Unblocked download. Waiting 25 s for Defender to finish scanning..."
+Start-Sleep -Seconds 25
 # Try to overwrite (up to 30 retries, 2 s apart = 60 s total)
 $ok = $false
 for ($i = 0; $i -lt 30; $i++) {{

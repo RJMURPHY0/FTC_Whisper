@@ -13,6 +13,7 @@ __pycache__/
 # SENSITIVE — never commit real credentials or session tokens
 config.json
 .session
+.env
 
 # Runtime / generated files
 .ftc_pid
