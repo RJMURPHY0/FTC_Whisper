@@ -1007,16 +1007,29 @@ def _start_local_server(app_window, version: str) -> None:
                     json.dumps({"ok": True, "version": version}).encode()
                 )
             elif self.path.startswith("/update"):
-                from updater import get_latest_release, is_newer
-                import webbrowser
-                info = get_latest_release()
+                from updater import cached_release, is_newer, download_update, apply_update, current_exe_path
+                import tempfile
+                info = cached_release()
                 if info and is_newer(info["version"], version):
-                    webbrowser.open(info["download_url"])
+                    # Respond immediately so FTC Contacts never times out
                     self.send_response(200)
                     self._cors()
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
                     self.wfile.write(b'{"ok":true,"action":"updating"}')
+                    exe_path = current_exe_path()
+                    if exe_path:
+                        def _download_and_apply(url=info["download_url"], dst=exe_path):
+                            tmp = os.path.join(tempfile.gettempdir(), "FTC-Whisper-update.exe")
+                            try:
+                                download_update(url, tmp, lambda *_: None)
+                                apply_update(tmp, dst)
+                            except Exception:
+                                pass
+                        threading.Thread(target=_download_and_apply, daemon=True, name="in-app-update").start()
+                    else:
+                        import webbrowser
+                        webbrowser.open(info["download_url"])
                 else:
                     self.send_response(200)
                     self._cors()

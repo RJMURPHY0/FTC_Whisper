@@ -16,6 +16,13 @@ from typing import Callable, Optional
 _GITHUB_API = "https://api.github.com/repos/RJMURPHY0/FTC_Whisper/releases/latest"
 _DOWNLOAD_FILENAME = "FTC-Whisper.exe"
 
+_cached_release: Optional[dict] = None
+
+
+def cached_release() -> Optional[dict]:
+    """Return the last successful result from get_latest_release(), or None."""
+    return _cached_release
+
 
 def _version_tuple(v: str):
     return tuple(int(x) for x in v.lstrip("v").split("."))
@@ -32,8 +39,9 @@ def is_newer(latest: str, current: str) -> bool:
 def get_latest_release() -> Optional[dict]:
     """
     Query GitHub Releases API and return {"version": str, "download_url": str},
-    or None on any error.
+    or None on any error. Result is cached in _cached_release.
     """
+    global _cached_release
     try:
         req = urllib.request.Request(
             _GITHUB_API,
@@ -50,7 +58,8 @@ def get_latest_release() -> Optional[dict]:
             None,
         )
         if tag and url:
-            return {"version": tag, "download_url": url}
+            _cached_release = {"version": tag, "download_url": url}
+            return _cached_release
     except Exception:
         pass
     return None
