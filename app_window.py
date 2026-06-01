@@ -1605,9 +1605,23 @@ class AppWindow:
             return
 
 
-        def _open_download(_e=None):
-            import webbrowser
-            webbrowser.open(download_url)
+        def _do_update(_e=None):
+            from updater import download_update, apply_update, current_exe_path
+            import tempfile, os, threading
+            exe_path = current_exe_path()
+            if exe_path:
+                def _worker():
+                    tmp = os.path.join(tempfile.gettempdir(), "FTC-Whisper-update.exe")
+                    try:
+                        download_update(download_url, tmp, lambda *_: None)
+                        apply_update(tmp, exe_path)
+                    except Exception:
+                        import webbrowser
+                        webbrowser.open(download_url)
+                threading.Thread(target=_worker, daemon=True, name="in-app-update").start()
+            else:
+                import webbrowser
+                webbrowser.open(download_url)
 
         # ── Top banner ────────────────────────────────────────────────────────
         if hasattr(self, "_update_banner_frame"):
@@ -1634,7 +1648,7 @@ class AppWindow:
                 padx=10, pady=3,
             )
             banner_btn.pack(side="right")
-            banner_btn.bind("<Button-1>", _open_download)
+            banner_btn.bind("<Button-1>", _do_update)
             banner_btn.bind("<Enter>", lambda _e: banner_btn.configure(bg=C["accent_hover"]))
             banner_btn.bind("<Leave>", lambda _e: banner_btn.configure(bg=C["accent"]))
 
@@ -1651,7 +1665,7 @@ class AppWindow:
                 padx=10, pady=4,
             )
             ver_btn.pack(side="right")
-            ver_btn.bind("<Button-1>", _open_download)
+            ver_btn.bind("<Button-1>", _do_update)
             ver_btn.bind("<Enter>", lambda _e: ver_btn.configure(bg=C["accent_hover"]))
             ver_btn.bind("<Leave>", lambda _e: ver_btn.configure(bg=C["accent"]))
 
