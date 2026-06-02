@@ -33,7 +33,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.3.6"
+APP_VERSION = "1.3.7"
 
 
 class WhisperFlowApp:
@@ -1109,11 +1109,13 @@ def _ensure_startup_task() -> None:
         script  = os.path.abspath(__file__)
         exe_cmd = f'"{pythonw}" "{script}"'
 
+    _NO_WIN = subprocess.CREATE_NO_WINDOW
+
     # Check if the task already exists and points to the right exe
     try:
         result = subprocess.run(
             ["schtasks", "/query", "/tn", TASK_NAME, "/fo", "LIST"],
-            capture_output=True, text=True
+            capture_output=True, text=True, creationflags=_NO_WIN,
         )
         if result.returncode == 0 and sys.executable.lower() in result.stdout.lower():
             return  # already registered correctly
@@ -1160,7 +1162,7 @@ def _ensure_startup_task() -> None:
 
         result = subprocess.run(
             ["schtasks", "/create", "/tn", TASK_NAME, "/xml", xml_path, "/f"],
-            capture_output=True, text=True
+            capture_output=True, text=True, creationflags=_NO_WIN,
         )
         os.unlink(xml_path)
 

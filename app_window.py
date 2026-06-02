@@ -108,6 +108,9 @@ class AppWindow:
         self._root.resizable(False, False)
         self._root.protocol("WM_DELETE_WINDOW", self._hide)
 
+        # Hide until fully built — prevents the bare-logo flash on startup
+        self._root.withdraw()
+
         self._apply_dark_titlebar()
 
         try:
@@ -145,13 +148,12 @@ class AppWindow:
                 justify="left", wraplength=388,
             ).pack(fill="both", expand=True)
 
-        # Force all pending geometry/paint before entering the event loop.
-        # Prevents the blank-white-window issue on some Windows configurations
-        # where the window appears before tkinter has drawn its first frame.
+        # Force all pending geometry/paint then show the fully-built window.
         try:
             self._root.update()
         except Exception:
             pass
+        self._root.deiconify()
 
         self._root.mainloop()
         # Destroy after mainloop exits (quit() was called on sign-out)
@@ -1605,23 +1607,47 @@ class AppWindow:
             return
 
 
+        _updating = [False]
+
+        def _set_downloading():
+            _updating[0] = True
+            for btn in _btns:
+                try:
+                    btn.configure(text="Downloading…", bg=C["subtext"], cursor="")
+                    btn.unbind("<Button-1>")
+                    btn.unbind("<Enter>")
+                    btn.unbind("<Leave>")
+                except Exception:
+                    pass
+
         def _do_update(_e=None):
+            if _updating[0]:
+                return
             from updater import download_update, apply_update, current_exe_path
             import tempfile, os, threading
             exe_path = current_exe_path()
             if exe_path:
+                self._root.after(0, _set_downloading)
                 def _worker():
                     tmp = os.path.join(tempfile.gettempdir(), "FTC-Whisper-update.exe")
                     try:
                         download_update(download_url, tmp, lambda *_: None)
                         apply_update(tmp, exe_path)
-                    except Exception:
+                    except Exception as exc:
+                        from error_reporter import report_error
+                        report_error(
+                            f"Update download/apply failed: {exc}",
+                            context={"version": version, "url": download_url},
+                            user_email=getattr(self._auth, "user_email", None),
+                        )
                         import webbrowser
                         webbrowser.open(download_url)
                 threading.Thread(target=_worker, daemon=True, name="in-app-update").start()
             else:
                 import webbrowser
                 webbrowser.open(download_url)
+
+        _btns = []
 
         # ── Top banner ────────────────────────────────────────────────────────
         if hasattr(self, "_update_banner_frame"):
@@ -1651,6 +1677,7 @@ class AppWindow:
             banner_btn.bind("<Button-1>", _do_update)
             banner_btn.bind("<Enter>", lambda _e: banner_btn.configure(bg=C["accent_hover"]))
             banner_btn.bind("<Leave>", lambda _e: banner_btn.configure(bg=C["accent"]))
+            _btns.append(banner_btn)
 
         # ── Inline button in version card ─────────────────────────────────────
         if hasattr(self, "_ver_update_row"):
@@ -1668,6 +1695,7 @@ class AppWindow:
             ver_btn.bind("<Button-1>", _do_update)
             ver_btn.bind("<Enter>", lambda _e: ver_btn.configure(bg=C["accent_hover"]))
             ver_btn.bind("<Leave>", lambda _e: ver_btn.configure(bg=C["accent"]))
+            _btns.append(ver_btn)
 
             self._ver_update_row.pack(fill="x", pady=(8, 0))
 
