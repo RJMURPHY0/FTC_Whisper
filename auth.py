@@ -144,7 +144,8 @@ class AuthManager:
 
     def _load_saved_session(self) -> bool:
         """Try to restore a previous session from disk.
-        Times out after 8 s so a bad network never freezes startup."""
+        Times out after 15 s so a bad network never freezes startup.
+        On timeout the session file is kept so the next launch can retry."""
         path = _session_path()
         if not os.path.exists(path):
             return False
@@ -186,16 +187,28 @@ class AuthManager:
                     print(f"[Auth] Restored session for {self._user.email}")
                     result[0] = True
             except Exception as e:
-                print(f"[Auth] Session restore failed: {e}")
-                self._clear_session()
+                msg = str(e).lower()
+                # Only clear the session for definitive auth failures (invalid/expired
+                # tokens). Network errors and timeouts keep the file so the next launch
+                # can retry successfully once the network is available.
+                is_auth_error = any(k in msg for k in (
+                    "invalid", "expired", "not found", "unauthorized",
+                    "refresh_token_not_found", "invalid_grant", "invalid_refresh_token",
+                ))
+                if is_auth_error:
+                    print(f"[Auth] Session restore failed (auth error): {e}")
+                    self._clear_session()
+                else:
+                    print(f"[Auth] Session restore failed (network/other): {e}")
 
         t = threading.Thread(target=_restore, daemon=True)
         t.start()
-        t.join(timeout=8.0)
+        t.join(timeout=15.0)
 
         if t.is_alive():
-            print("[Auth] Session restore timed out (8 s) — proceeding offline")
-            self._clear_session()
+            # Network was too slow on startup (common right after a system boot).
+            # Keep the session file so the next launch can restore it successfully.
+            print("[Auth] Session restore timed out (15 s) — proceeding offline (session kept)")
             return False
 
         return result[0]

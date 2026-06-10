@@ -33,7 +33,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.3.7"
+APP_VERSION = "1.3.8"
 
 
 class WhisperFlowApp:
@@ -58,7 +58,9 @@ class WhisperFlowApp:
             language=config.language,
         )
         # Fast model: injects text immediately; accurate model refines in background
-        self.fast_transcriber = Transcriber(model_size="base.en")
+        # beam_size=1 = greedy decode (2-4x faster than beam search, negligible quality loss for preview)
+        # vad_speech_pad_ms=30 = tighter padding than the accurate pass for lower latency
+        self.fast_transcriber = Transcriber(model_size="base.en", beam_size=1, vad_speech_pad_ms=30)
         self.recorder = Recorder(
             sample_rate=config.sample_rate,
             input_device=getattr(config, "input_device", ""),
@@ -1080,6 +1082,12 @@ def _ensure_single_instance() -> None:
             )
         except Exception:
             pass
+        # Close the PyInstaller splash before exiting so it doesn't stay on screen
+        try:
+            import pyi_splash  # type: ignore
+            pyi_splash.close()
+        except ImportError:
+            pass
         sys.exit(0)
 
     # We are the first instance — hold the mutex for the process lifetime.
@@ -1235,6 +1243,14 @@ def _ensure_startup_registry_fallback() -> None:
 
 
 def main() -> None:
+    # Close the PyInstaller splash as early as possible — if anything below
+    # crashes or sys.exit() is called, the splash must not stay stuck on screen.
+    try:
+        import pyi_splash  # type: ignore
+        pyi_splash.close()
+    except ImportError:
+        pass
+
     if sys.platform == "win32":
         _ensure_single_instance()
         # Run in background — schtasks can be slow on first launch and there's
@@ -1261,12 +1277,6 @@ def main() -> None:
                 )
         except Exception:
             pass
-
-    try:
-        import pyi_splash  # type: ignore
-        pyi_splash.close()
-    except ImportError:
-        pass
 
     config = Config.load()
     auth = AuthManager(config.supabase_url, config.supabase_key)

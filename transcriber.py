@@ -34,6 +34,8 @@ class Transcriber:
         language: str = "en",
         device: str = "auto",
         compute_type: str = "auto",
+        beam_size: int = 5,
+        vad_speech_pad_ms: int = 60,
     ):
         if model_size not in self.VALID_MODELS:
             print(
@@ -61,6 +63,8 @@ class Transcriber:
 
         self._device = device
         self._compute_type = compute_type
+        self._beam_size = beam_size
+        self._vad_speech_pad_ms = vad_speech_pad_ms
         # Use all physical CPU cores for inference
         self._cpu_threads = max(1, multiprocessing.cpu_count())
 
@@ -127,12 +131,12 @@ class Transcriber:
         segments, _ = self._model.transcribe(
             audio,
             language=None if is_en_model else self.language,
-            beam_size=5,
+            beam_size=self._beam_size,
             vad_filter=True,
             vad_parameters=dict(
-                min_silence_duration_ms=200,  # was 300 — starts processing silence sooner
-                threshold=0.45,               # was 0.50 — slightly more sensitive to speech
-                speech_pad_ms=60,             # was 100 — tighter padding
+                min_silence_duration_ms=200,
+                threshold=0.45,
+                speech_pad_ms=self._vad_speech_pad_ms,
             ),
             no_speech_threshold=0.7,
             condition_on_previous_text=False,

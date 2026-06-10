@@ -328,14 +328,14 @@ class HotkeyManager:
 
     def _poll_release(self, vk: int) -> None:
         self._polling = True
-        time.sleep(0.05)
+        time.sleep(0.02)  # 20ms: enough to let hardware state settle after WM_HOTKEY
         _up_count = 0
         while self._polling:
             if _user32.GetAsyncKeyState(vk) & 0x8000:
                 _up_count = 0
             else:
                 _up_count += 1
-                if _up_count >= 3:  # 60 ms of consistent key-up = real release
+                if _up_count >= 2:  # 40ms of consistent key-up = real release
                     break
             time.sleep(0.02)
         if self._polling:

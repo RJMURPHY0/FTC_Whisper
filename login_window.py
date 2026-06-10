@@ -44,6 +44,7 @@ class LoginWindow:
         self._mode = "login"  # "login" | "signup"
         self._pending_confirm_email: Optional[str] = None
         self._embedded = False
+        self._submitting = False
 
     def embed(self, frame: tk.Frame) -> None:
         """Build login UI into an existing frame (in-window, no Toplevel)."""
@@ -53,6 +54,7 @@ class LoginWindow:
 
     def reset(self) -> None:
         """Clear form fields and reset to login mode — call before showing again."""
+        self._submitting = False
         if hasattr(self, "_email_var"):
             self._email_var.set("")
             self._password_var.set("")
@@ -343,6 +345,8 @@ class LoginWindow:
     # ------------------------------------------------------------------
 
     def _submit(self) -> None:
+        if self._submitting:
+            return
         email = self._email_entry.get().strip()
         password = self._pass_entry.get()
 
@@ -358,6 +362,7 @@ class LoginWindow:
                 self._set_status("Password must be at least 6 characters.", error=True)
                 return
 
+        self._submitting = True
         self._set_status("Please wait…", error=False)
         self._submit_btn.configure(bg=C["divider"], cursor="")
 
@@ -372,6 +377,7 @@ class LoginWindow:
         threading.Thread(target=_run, daemon=True).start()
 
     def _handle_result(self, ok: bool, msg: str) -> None:
+        self._submitting = False
         print(f"[Login] ok={ok} msg={msg!r}")
 
         if ok and self._auth.is_authenticated:
