@@ -36,6 +36,7 @@ class Transcriber:
         compute_type: str = "auto",
         beam_size: int = 5,
         vad_speech_pad_ms: int = 60,
+        auto_punctuate: bool = True,
     ):
         if model_size not in self.VALID_MODELS:
             print(
@@ -67,6 +68,7 @@ class Transcriber:
         self._vad_speech_pad_ms = vad_speech_pad_ms
         # Use all physical CPU cores for inference
         self._cpu_threads = max(1, multiprocessing.cpu_count())
+        self.auto_punctuate = auto_punctuate
 
         print(
             f"[Transcriber] model={model_size!r}  device={device}  "
@@ -197,9 +199,9 @@ class Transcriber:
         text = re.sub(r",\s*,", ",", text)
         text = re.sub(r"\s+([.,!?])", r"\1", text)
 
-        # Ensure ends with punctuation
+        # Ensure ends with punctuation (only when auto_punctuate is enabled)
         text = text.strip()
-        if text and text[-1] not in ".!?":
+        if self.auto_punctuate and text and text[-1] not in ".!?":
             text += "."
 
         # Re-capitalise first letter after cleanup

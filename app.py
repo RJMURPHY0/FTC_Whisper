@@ -53,14 +53,17 @@ class WhisperFlowApp:
         self._restart_for_reauth = False
 
         # ── Core pipeline ──────────────────────────────────────────────
+        _ap = getattr(config, "auto_punctuate", True)
         self.transcriber = Transcriber(
             model_size=config.whisper_model,
             language=config.language,
+            auto_punctuate=_ap,
         )
         # Fast model: injects text immediately; accurate model refines in background
         # beam_size=1 = greedy decode (2-4x faster than beam search, negligible quality loss for preview)
         # vad_speech_pad_ms=30 = tighter padding than the accurate pass for lower latency
-        self.fast_transcriber = Transcriber(model_size="base.en", beam_size=1, vad_speech_pad_ms=30)
+        self.fast_transcriber = Transcriber(model_size="base.en", beam_size=1, vad_speech_pad_ms=30, auto_punctuate=_ap)
+        self._recording_timer: threading.Timer | None = None
         self.recorder = Recorder(
             sample_rate=config.sample_rate,
             input_device=getattr(config, "input_device", ""),
@@ -252,6 +255,9 @@ class WhisperFlowApp:
             self.recorder.input_device = value.strip() if value else ""
         elif key == "sound_feedback":
             self.feedback.sound_enabled = bool(value)
+        elif key == "auto_punctuate":
+            self.transcriber.auto_punctuate = bool(value)
+            self.fast_transcriber.auto_punctuate = bool(value)
 
     # ------------------------------------------------------------------
     # Recording pipeline
@@ -273,6 +279,18 @@ class WhisperFlowApp:
                 self._rec_cursor_x, self._rec_cursor_y = 0, 0
             self.feedback.recording_started()
             self.recorder.start()
+
+            # Auto-stop timer: toggle_timeout (toggle mode only) and max_recording_duration (all modes)
+            _timeouts = []
+            if self.config.mode == "toggle" and getattr(self.config, "toggle_timeout", 0) > 0:
+                _timeouts.append(self.config.toggle_timeout)
+            if getattr(self.config, "max_recording_duration", 0) > 0:
+                _timeouts.append(self.config.max_recording_duration)
+            if _timeouts:
+                self._recording_timer = threading.Timer(min(_timeouts), self._auto_stop_recording)
+                self._recording_timer.daemon = True
+                self._recording_timer.start()
+
             # Streaming mid-recording injection is disabled — text is inserted only after release
             self._stream_stop_event.clear()
             self._stream_last_text = ""
@@ -284,6 +302,7 @@ class WhisperFlowApp:
             self.hotkey_manager.set_idle()
 
     def _on_stop_recording(self) -> None:
+        self._cancel_recording_timer()
         # Stop streaming loop and capture its final state before anything else
         self._stream_stop_event.set()
         _st = self._stream_thread
@@ -409,13 +428,21 @@ class WhisperFlowApp:
         result = False
         try:
             if _inject_text:
-                print(f"[App] Injecting delta: {len(_inject_text)} chars")
-                result = self.injector.inject(_inject_text)
+                _text_to_inject = _inject_text
+                if getattr(self.config, "trailing_space", False):
+                    _text_to_inject += " "
+                print(f"[App] Injecting delta: {len(_text_to_inject)} chars")
+                result = self.injector.inject(_text_to_inject)
                 print(f"[App] Inject result: {result}")
             elif _stream_count > 0:
                 result = True  # streaming already injected successfully
         except Exception as e:
             print(f"[App] Injection error (popup will still appear): {e}")
+
+        if result and getattr(self.config, "auto_enter", False):
+            import keyboard as kb
+            time.sleep(0.05)
+            kb.send("enter")
 
         self.feedback.transcription_complete(transcribed_text)
         self.hotkey_manager.set_idle()
@@ -483,7 +510,20 @@ class WhisperFlowApp:
         except Exception as e:
             print(f"[App] Error cancelling recording: {e}")
         finally:
+            self._cancel_recording_timer()
             self.hotkey_manager.set_idle()
+
+    def _cancel_recording_timer(self) -> None:
+        t = self._recording_timer
+        if t is not None:
+            t.cancel()
+            self._recording_timer = None
+
+    def _auto_stop_recording(self) -> None:
+        """Fired by the auto-stop timer — behaves like the user releasing the hotkey."""
+        if self.hotkey_manager.state == AppState.RECORDING:
+            print("[App] Auto-stopping recording (timeout reached)")
+            self.hotkey_manager._on_key_up()
 
     def _get_context_words(self) -> str:
         with self._context_lock:

@@ -53,6 +53,11 @@ class Config:
     auto_start: bool = False
     anthropic_api_key: str = ""  # Optional — enables AI text refinement
     custom_vocabulary: str = ""  # Comma-separated terms to boost in Whisper (names, acronyms, domain words)
+    auto_punctuate: bool = True   # Add trailing period when Whisper output has no terminal punctuation
+    trailing_space: bool = False  # Append a space after each injection (useful when dictating mid-sentence)
+    auto_enter: bool = False      # Press Enter after injection (useful for chat/search boxes)
+    toggle_timeout: int = 120     # Seconds before auto-stopping in toggle mode (0 = disabled)
+    max_recording_duration: int = 0  # Hard cap on recording length in seconds (0 = unlimited)
     supabase_url: str = ""  # Optional — enables transcription logging
     supabase_key: str = ""  # Publishable (anon) key
     supabase_email: str = ""  # Account email for silent background auth
