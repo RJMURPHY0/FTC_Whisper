@@ -1585,16 +1585,20 @@ class AppWindow:
         self._settings_status.pack(side="left")
 
         def _save(_e=None):
+            new_model = model_var.get()
+            old_model = (self._config.whisper_model if self._config else "") or ""
             if self._on_settings_change:
                 mic_val = mic_var.get()
                 self._on_settings_change("input_device",
                                          "" if mic_val == "Default" else mic_val)
-                self._on_settings_change("whisper_model", model_var.get())
+                self._on_settings_change("whisper_model", new_model)
                 self._on_settings_change("custom_vocabulary", vocab_var.get().strip())
                 self._on_settings_change("sound_feedback", sound_var.get())
-            self._settings_status.configure(text="Saved ✓", fg=C["success"])
+            model_changed = new_model != old_model
+            msg = "Saved ✓ — model loading in background…" if model_changed else "Saved ✓"
+            self._settings_status.configure(text=msg, fg=C["success"])
             if self._root:
-                self._root.after(2500, lambda: self._settings_status.configure(text=""))
+                self._root.after(4000, lambda: self._settings_status.configure(text=""))
 
         save_btn = self._surface_btn(save_wrap, "Save Settings", _save)
         save_btn.pack(side="right")

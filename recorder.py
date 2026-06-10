@@ -138,15 +138,22 @@ class Recorder:
         """Open a non-recording stream just to read live levels (mic test)."""
         self.stop_monitor()
         old_device = self.input_device
+        old_index = self._active_device_index
+        old_name = self._active_device_name
         self.input_device = device_name.strip()
         try:
             self._monitor_stream = self._open_best_input_stream()
             self._monitor_stream.start()
         except Exception:
             self.input_device = old_device
+            self._active_device_index = old_index
+            self._active_device_name = old_name
             self._monitor_stream = None
             raise
+        # Restore recording-device state — monitor must not pollute the cache
         self.input_device = old_device
+        self._active_device_index = old_index
+        self._active_device_name = old_name
 
     def stop_monitor(self) -> None:
         """Close the mic-test monitor stream if open."""

@@ -33,7 +33,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.3.8"
+APP_VERSION = "1.3.9"
 
 
 class WhisperFlowApp:
@@ -253,6 +253,22 @@ class WhisperFlowApp:
             self.popup.set_ai_refiner(self.ai_refiner)
         elif key == "input_device":
             self.recorder.input_device = value.strip() if value else ""
+            # Clear cached device index so next recording re-enumerates with the new choice
+            self.recorder._active_device_index = None
+            self.recorder._active_device_name = ""
+        elif key == "whisper_model":
+            if not self.hotkey_manager.state == AppState.RECORDING:
+                _ap = getattr(self.config, "auto_punctuate", True)
+                new_t = Transcriber(
+                    model_size=value,
+                    language=self.config.language,
+                    auto_punctuate=_ap,
+                )
+                self.transcriber = new_t
+                threading.Thread(
+                    target=new_t.load_model, daemon=True, name="model-reload"
+                ).start()
+                print(f"[App] Transcriber reloading model '{value}' in background…")
         elif key == "sound_feedback":
             self.feedback.sound_enabled = bool(value)
         elif key == "auto_punctuate":
