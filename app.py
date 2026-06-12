@@ -33,7 +33,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.3.9"
+APP_VERSION = "1.4.0"
 
 
 class WhisperFlowApp:
@@ -274,6 +274,10 @@ class WhisperFlowApp:
         elif key == "auto_punctuate":
             self.transcriber.auto_punctuate = bool(value)
             self.fast_transcriber.auto_punctuate = bool(value)
+        elif key == "mode":
+            if self.hotkey_manager.state == AppState.RECORDING:
+                self._on_cancel_recording()
+            self.hotkey_manager.mode = value
 
     # ------------------------------------------------------------------
     # Recording pipeline
@@ -1299,11 +1303,20 @@ def _ensure_startup_registry_fallback() -> None:
 
 
 def main() -> None:
-    # Close the PyInstaller splash as early as possible — if anything below
-    # crashes or sys.exit() is called, the splash must not stay stuck on screen.
+    # Import splash module once so we can close it just before the window appears.
+    # Safety timer: if initialization hangs for 30s, force-close so it doesn't
+    # stay on screen forever.
+    _splash_mod = None
     try:
-        import pyi_splash  # type: ignore
-        pyi_splash.close()
+        import pyi_splash as _splash_mod  # type: ignore
+
+        def _force_close_splash():
+            try:
+                _splash_mod.close()
+            except Exception:
+                pass
+
+        threading.Timer(30.0, _force_close_splash).start()
     except ImportError:
         pass
 
@@ -1345,6 +1358,14 @@ def main() -> None:
         auth.try_restore_session()  # Restore saved session so user stays logged in
 
     app = WhisperFlowApp(auth, config)
+
+    # Close splash now — window is about to appear
+    if _splash_mod is not None:
+        try:
+            _splash_mod.close()
+        except Exception:
+            pass
+
     app.run()
 
 
