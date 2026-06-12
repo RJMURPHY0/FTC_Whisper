@@ -33,7 +33,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 
 
 class WhisperFlowApp:
@@ -1347,6 +1347,14 @@ def main() -> None:
         except Exception:
             pass
 
+    # Close splash immediately — startup checks done, window will appear shortly.
+    # Model loading happens in background threads so no need to hold the splash.
+    if _splash_mod is not None:
+        try:
+            _splash_mod.close()
+        except Exception:
+            pass
+
     config = Config.load()
     auth = AuthManager(config.supabase_url, config.supabase_key)
 
@@ -1358,14 +1366,6 @@ def main() -> None:
         auth.try_restore_session()  # Restore saved session so user stays logged in
 
     app = WhisperFlowApp(auth, config)
-
-    # Close splash now — window is about to appear
-    if _splash_mod is not None:
-        try:
-            _splash_mod.close()
-        except Exception:
-            pass
-
     app.run()
 
 

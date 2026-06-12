@@ -470,6 +470,27 @@ class AppWindow:
     # ── Hotkey tab ────────────────────────────────────────────────────────────
 
     def _build_hotkey_tab(self, parent: tk.Frame) -> None:
+        # Scrollable container
+        _hk_sb = tk.Scrollbar(parent, orient="vertical",
+                               troughcolor=C["bg"], bg="#3a3a3a",
+                               activebackground="#505050",
+                               relief="flat", borderwidth=0,
+                               elementborderwidth=0, width=10)
+        _hk_cv = tk.Canvas(parent, bg=C["bg"], highlightthickness=0,
+                            bd=0, yscrollcommand=_hk_sb.set)
+        _hk_sb.config(command=_hk_cv.yview)
+        _hk_sb.pack(side="right", fill="y")
+        _hk_cv.pack(side="left", fill="both", expand=True)
+        _hk_inner = tk.Frame(_hk_cv, bg=C["bg"])
+        _hk_win = _hk_cv.create_window(0, 0, window=_hk_inner, anchor="nw")
+        _hk_inner.bind("<Configure>", lambda _e: _hk_cv.configure(
+            scrollregion=_hk_cv.bbox("all")))
+        _hk_cv.bind("<Configure>", lambda e: _hk_cv.itemconfigure(
+            _hk_win, width=e.width))
+        _hk_cv.bind("<MouseWheel>", lambda e: _hk_cv.yview_scroll(
+            int(-1 * (e.delta / 120)), "units"))
+        parent = _hk_inner
+
         # ── Dictation hotkey ─────────────────────────────────────────────────────
         card1 = self._card(parent, margin=(0, 8))
 
@@ -508,97 +529,68 @@ class AppWindow:
         )
         self._save_btn.pack(side="left")
 
-        # ── Recording mode selector ───────────────────────────────────────────────
-        tk.Frame(card1, bg=C["border"], height=1).pack(fill="x", pady=(12, 0))
+        # Compact toggle switch — inline with the buttons
+        _mode_right = tk.Frame(btn_row, bg=C["surface"])
+        _mode_right.pack(side="right")
 
-        mode_label_row = tk.Frame(card1, bg=C["surface"])
-        mode_label_row.pack(fill="x", pady=(10, 4))
-        tk.Label(mode_label_row, text="Recording mode",
-                 fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 9), anchor="w").pack(side="left")
-
+        _TW, _TH = 40, 24
         _init_mode = getattr(self._config, "mode", "hold") if self._config else "hold"
-        self._mode_var = tk.StringVar(value=_init_mode)
+        self._mode_toggle_on = (_init_mode == "toggle")
 
-        seg_row = tk.Frame(card1, bg=C["surface"])
-        seg_row.pack(fill="x", pady=(0, 4))
+        self._mode_lbl = tk.Label(
+            _mode_right, text="Toggle",
+            fg=C["subtext"] if not self._mode_toggle_on else C["text"],
+            bg=C["surface"],
+            font=("Segoe UI", 9), cursor="hand2",
+        )
+        self._mode_lbl.pack(side="right", padx=(6, 0))
 
-        def _make_seg_btn(parent, label, mode_val):
-            active = self._mode_var.get() == mode_val
-            btn = tk.Label(
-                parent, text=label,
-                fg=C["bg"] if active else C["text"],
-                bg=C["accent"] if active else C["surface_hover"],
-                font=("Segoe UI", 9, "bold" if active else "normal"),
-                padx=14, pady=7, cursor="hand2",
-            )
-            return btn
+        self._mode_cv = tk.Canvas(
+            _mode_right, width=_TW, height=_TH,
+            bg=C["surface"], highlightthickness=0, bd=0, cursor="hand2",
+        )
+        self._mode_cv.pack(side="right")
 
-        self._hold_mode_btn   = _make_seg_btn(seg_row, "Hold to Talk", "hold")
-        self._toggle_mode_btn = _make_seg_btn(seg_row, "Toggle",        "toggle")
-        self._hold_mode_btn.pack(side="left", padx=(0, 3))
-        self._toggle_mode_btn.pack(side="left")
+        def _draw_mode_toggle():
+            self._mode_cv.delete("all")
+            track = C["accent"] if self._mode_toggle_on else C["border"]
+            r = _TH // 2
+            self._mode_cv.create_arc(0, 0, r * 2, _TH, start=90, extent=180,
+                                     fill=track, outline="")
+            self._mode_cv.create_arc(_TW - r * 2, 0, _TW, _TH, start=270, extent=180,
+                                     fill=track, outline="")
+            self._mode_cv.create_rectangle(r, 0, _TW - r, _TH, fill=track, outline="")
+            m = 3
+            d = _TH - m * 2
+            tx = _TW - m - d if self._mode_toggle_on else m
+            self._mode_cv.create_oval(tx, m, tx + d, _TH - m, fill=C["text"], outline="")
 
-        tk.Label(
-            card1,
-            text="Hold to Talk: hold key → release to transcribe.  "
-                 "Toggle: press once to start, press again to stop.",
-            fg=C["subtext"], bg=C["surface"],
-            font=("Segoe UI", 8), justify="left", anchor="w", wraplength=340,
-        ).pack(fill="x", pady=(0, 4))
+        _draw_mode_toggle()
 
-        def _apply_mode(m):
-            self._mode_var.set(m)
-            is_hold = m == "hold"
-            self._hold_mode_btn.configure(
-                fg=C["bg"] if is_hold else C["text"],
-                bg=C["accent"] if is_hold else C["surface_hover"],
-            )
-            self._toggle_mode_btn.configure(
-                fg=C["bg"] if not is_hold else C["text"],
-                bg=C["accent"] if not is_hold else C["surface_hover"],
+        def _click_mode_toggle(_e=None):
+            self._mode_toggle_on = not self._mode_toggle_on
+            _draw_mode_toggle()
+            mode = "toggle" if self._mode_toggle_on else "hold"
+            self._mode_lbl.configure(
+                fg=C["text"] if self._mode_toggle_on else C["subtext"]
             )
             if hasattr(self, "_home_mode_hint_lbl"):
                 self._home_mode_hint_lbl.configure(
-                    text=" hold to dictate" if is_hold else " press to start/stop"
+                    text=" press to start/stop" if self._mode_toggle_on else " hold to dictate"
                 )
             if hasattr(self, "_home_instructions_lbl"):
                 self._home_instructions_lbl.configure(
                     text=(
-                        "Hold the hotkey and speak.\nRelease to transcribe into your cursor."
-                        if is_hold else
                         "Press the hotkey to start recording.\nPress again to stop and transcribe."
+                        if self._mode_toggle_on else
+                        "Hold the hotkey and speak.\nRelease to transcribe into your cursor."
                     )
                 )
             if self._on_settings_change:
-                self._on_settings_change("mode", m)
+                self._on_settings_change("mode", mode)
 
-        self._hold_mode_btn.bind("<Button-1>",   lambda _e: _apply_mode("hold"))
-        self._toggle_mode_btn.bind("<Button-1>", lambda _e: _apply_mode("toggle"))
-        self._hold_mode_btn.bind(
-            "<Enter>",
-            lambda _e: self._hold_mode_btn.configure(
-                bg=C["accent_hover"] if self._mode_var.get() == "hold" else C["surface"]
-            ),
-        )
-        self._hold_mode_btn.bind(
-            "<Leave>",
-            lambda _e: self._hold_mode_btn.configure(
-                bg=C["accent"] if self._mode_var.get() == "hold" else C["surface_hover"]
-            ),
-        )
-        self._toggle_mode_btn.bind(
-            "<Enter>",
-            lambda _e: self._toggle_mode_btn.configure(
-                bg=C["accent_hover"] if self._mode_var.get() == "toggle" else C["surface"]
-            ),
-        )
-        self._toggle_mode_btn.bind(
-            "<Leave>",
-            lambda _e: self._toggle_mode_btn.configure(
-                bg=C["accent"] if self._mode_var.get() == "toggle" else C["surface_hover"]
-            ),
-        )
+        self._mode_cv.bind("<Button-1>", _click_mode_toggle)
+        self._mode_lbl.bind("<Button-1>", _click_mode_toggle)
 
         # ── Refine selection hotkey ───────────────────────────────────────────────
         card2 = self._card(parent, margin=(0, 8))
