@@ -12,6 +12,8 @@ import os
 import threading
 from typing import Optional
 
+from supabase import create_client
+
 
 # ---------------------------------------------------------------------------
 # Windows DPAPI helpers — encrypt/decrypt bytes using the current user's key
@@ -103,7 +105,6 @@ class AuthManager:
     def _get_client(self):
         if not self._client:
             try:
-                from supabase import create_client
                 self._client = create_client(self._url, self._key)
                 self._attach_auth_listener(self._client)
             except Exception as e:
@@ -272,11 +273,7 @@ class AuthManager:
 
     def sign_in(self, email: str, password: str) -> tuple[bool, str]:
         try:
-            # Always use a fresh client for sign-in to avoid stale connection state
-            from supabase import create_client
-            self._client = create_client(self._url, self._key)
-            self._attach_auth_listener(self._client)
-            client = self._client
+            client = self._get_client()
             print(f"[Auth] Signing in as {email}...")
             result = client.auth.sign_in_with_password(
                 {"email": email, "password": password}
