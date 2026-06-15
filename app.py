@@ -33,7 +33,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 
 
 class WhisperFlowApp:
@@ -1306,17 +1306,12 @@ def main() -> None:
     # Import splash module once so we can close it just before the window appears.
     # Safety timer: if initialization hangs for 30s, force-close so it doesn't
     # stay on screen forever.
-    _splash_mod = None
     try:
-        import pyi_splash as _splash_mod  # type: ignore
-
-        def _force_close_splash():
-            try:
-                _splash_mod.close()
-            except Exception:
-                pass
-
-        threading.Timer(30.0, _force_close_splash).start()
+        import pyi_splash as _pyi  # type: ignore
+        def _close_splash():
+            try: _pyi.close()
+            except Exception: pass
+        threading.Timer(0.2, _close_splash).start()
     except ImportError:
         pass
 
@@ -1344,14 +1339,6 @@ def main() -> None:
                     "[App] Note: running without admin — some hotkeys may not work "
                     "in elevated windows."
                 )
-        except Exception:
-            pass
-
-    # Close splash immediately — startup checks done, window will appear shortly.
-    # Model loading happens in background threads so no need to hold the splash.
-    if _splash_mod is not None:
-        try:
-            _splash_mod.close()
         except Exception:
             pass
 
