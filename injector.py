@@ -458,7 +458,7 @@ class Injector:
             )
             arr = (_Input * 4)(ctrl_dn, v_dn, v_up, ctrl_up)
             u32.SendInput(4, arr, ctypes.sizeof(_Input))
-            time.sleep(0.15)  # let app process the paste before restoring clipboard
+            time.sleep(0.08)  # let app process the paste before restoring clipboard
 
             self._clipboard_restore(original)
 

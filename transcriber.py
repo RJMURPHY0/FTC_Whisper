@@ -7,11 +7,27 @@ import multiprocessing
 import re
 import threading
 import numpy as np
-from faster_whisper import WhisperModel
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
+if TYPE_CHECKING:
+    from faster_whisper import WhisperModel
 
 _MODEL_SAMPLE_RATE = 16000
+
+# Cached once — avoids repeated failed `import torch` on CPU-only machines
+_DEVICE_CACHE: str = ""
+
+
+def _detect_device() -> str:
+    global _DEVICE_CACHE
+    if _DEVICE_CACHE:
+        return _DEVICE_CACHE
+    try:
+        import torch
+        _DEVICE_CACHE = "cuda" if torch.cuda.is_available() else "cpu"
+    except ImportError:
+        _DEVICE_CACHE = "cpu"
+    return _DEVICE_CACHE
 
 
 class Transcriber:
@@ -36,6 +52,9 @@ class Transcriber:
         compute_type: str = "auto",
         beam_size: int = 5,
         vad_speech_pad_ms: int = 60,
+        min_silence_duration_ms: int = 200,
+        cpu_threads: int = 0,
+        num_workers: int = 1,
         auto_punctuate: bool = True,
     ):
         if model_size not in self.VALID_MODELS:
@@ -46,18 +65,13 @@ class Transcriber:
 
         self.model_size = model_size
         self.language = language
-        self._model: Optional[WhisperModel] = None
+        self._model: Optional["WhisperModel"] = None
         self._load_lock = threading.Lock()
         # Prevents streaming preview and final transcription running at the same time
         self._transcribe_lock = threading.Lock()
 
         if device == "auto":
-            try:
-                import torch
-
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-            except ImportError:
-                device = "cpu"
+            device = _detect_device()
 
         if compute_type == "auto":
             compute_type = "float16" if device == "cuda" else "int8"
@@ -66,8 +80,9 @@ class Transcriber:
         self._compute_type = compute_type
         self._beam_size = beam_size
         self._vad_speech_pad_ms = vad_speech_pad_ms
-        # Use all physical CPU cores for inference
-        self._cpu_threads = max(1, multiprocessing.cpu_count())
+        self._min_silence_duration_ms = min_silence_duration_ms
+        self._num_workers = num_workers
+        self._cpu_threads = cpu_threads or max(1, multiprocessing.cpu_count())
         self.auto_punctuate = auto_punctuate
 
         print(
@@ -79,13 +94,14 @@ class Transcriber:
         with self._load_lock:
             if self._model is not None:
                 return
+            from faster_whisper import WhisperModel  # lazy — called from daemon thread
             print(f"[Transcriber] Loading '{self.model_size}'…")
             self._model = WhisperModel(
                 self.model_size,
                 device=self._device,
                 compute_type=self._compute_type,
                 cpu_threads=self._cpu_threads,
-                num_workers=1,
+                num_workers=self._num_workers,
             )
             print("[Transcriber] Model ready.")
 
@@ -110,7 +126,7 @@ class Transcriber:
 
         if audio.ndim > 1:
             audio = audio.flatten()
-        audio = audio.astype(np.float32)
+        audio = audio.astype(np.float32, copy=False)
         if sample_rate and sample_rate != _MODEL_SAMPLE_RATE:
             audio = self._resample_audio(audio, sample_rate, _MODEL_SAMPLE_RATE)
             sample_rate = _MODEL_SAMPLE_RATE
@@ -136,7 +152,7 @@ class Transcriber:
             beam_size=self._beam_size,
             vad_filter=True,
             vad_parameters=dict(
-                min_silence_duration_ms=200,
+                min_silence_duration_ms=self._min_silence_duration_ms,
                 threshold=0.45,
                 speech_pad_ms=self._vad_speech_pad_ms,
             ),

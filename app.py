@@ -33,7 +33,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.4.3"
 
 
 class WhisperFlowApp:
@@ -57,12 +57,18 @@ class WhisperFlowApp:
         self.transcriber = Transcriber(
             model_size=config.whisper_model,
             language=config.language,
+            num_workers=2,
             auto_punctuate=_ap,
         )
         # Fast model: injects text immediately; accurate model refines in background
         # beam_size=1 = greedy decode (2-4x faster than beam search, negligible quality loss for preview)
-        # vad_speech_pad_ms=30 = tighter padding than the accurate pass for lower latency
-        self.fast_transcriber = Transcriber(model_size="base.en", beam_size=1, vad_speech_pad_ms=30, auto_punctuate=_ap)
+        # vad_speech_pad_ms=30 + min_silence_duration_ms=100 = tighter VAD for lower latency
+        # cpu_threads=4 = avoids thread-spawn overhead on short clips vs. using all cores
+        self.fast_transcriber = Transcriber(
+            model_size="base.en", beam_size=1,
+            vad_speech_pad_ms=30, min_silence_duration_ms=100,
+            cpu_threads=4, auto_punctuate=_ap,
+        )
         self._recording_timer: threading.Timer | None = None
         self.recorder = Recorder(
             sample_rate=config.sample_rate,
@@ -202,8 +208,6 @@ class WhisperFlowApp:
         else:
             print("[App] Supabase logging disabled — set supabase_url/key in config.")
 
-        # Pre-load model
-        self.transcriber.load_model()
         print("[App] Ready! Hold the hotkey and start speaking.")
 
         # Register global hotkeys
@@ -262,6 +266,7 @@ class WhisperFlowApp:
                 new_t = Transcriber(
                     model_size=value,
                     language=self.config.language,
+                    num_workers=2,
                     auto_punctuate=_ap,
                 )
                 self.transcriber = new_t
@@ -492,6 +497,10 @@ class WhisperFlowApp:
                     _audio, _rate, context_words=_ctx, hotwords_str=_hw).strip()
                 if not accurate:
                     return
+                # Show Whisper result immediately so the upgrade button appears fast
+                if accurate != _ft:
+                    print(f"[App] Accurate transcription: '{accurate}'")
+                    self.popup.set_upgrade_result(accurate)
                 final = accurate
                 if self.ai_refiner.is_available:
                     try:
@@ -499,12 +508,10 @@ class WhisperFlowApp:
                         if fixed and fixed != accurate:
                             print(f"[App] LLM context-fix: '{accurate}' -> '{fixed}'")
                             final = fixed
+                            self.popup.set_upgrade_result(final)
                     except Exception as e:
                         print(f"[App] LLM context-fix error, using Whisper result: {e}")
                 self._update_context(final)
-                if final != _ft:
-                    print(f"[App] Accurate transcription: '{final}'")
-                    self.popup.set_upgrade_result(final)
             threading.Thread(target=_upgrade, daemon=True, name="accurate-transcription").start()
 
     def _on_cancel_recording(self) -> None:
@@ -1142,12 +1149,6 @@ def _ensure_single_instance() -> None:
             )
         except Exception:
             pass
-        # Close the PyInstaller splash before exiting so it doesn't stay on screen
-        try:
-            import pyi_splash  # type: ignore
-            pyi_splash.close()
-        except ImportError:
-            pass
         sys.exit(0)
 
     # We are the first instance — hold the mutex for the process lifetime.
@@ -1303,18 +1304,6 @@ def _ensure_startup_registry_fallback() -> None:
 
 
 def main() -> None:
-    # Import splash module once so we can close it just before the window appears.
-    # Safety timer: if initialization hangs for 30s, force-close so it doesn't
-    # stay on screen forever.
-    try:
-        import pyi_splash as _pyi  # type: ignore
-        def _close_splash():
-            try: _pyi.close()
-            except Exception: pass
-        threading.Timer(0.2, _close_splash).start()
-    except ImportError:
-        pass
-
     if sys.platform == "win32":
         _ensure_single_instance()
         # Run in background — schtasks can be slow on first launch and there's
@@ -1322,7 +1311,7 @@ def main() -> None:
         threading.Thread(
             target=_ensure_startup_task, daemon=True, name="startup-task"
         ).start()
-        _register_url_protocol()
+        threading.Thread(target=_register_url_protocol, daemon=True, name="url-protocol").start()
         # Boost process to above-normal priority so Whisper model loads
         # faster and hotkey response isn't delayed by competing startup apps.
         try:

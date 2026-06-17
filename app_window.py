@@ -1098,14 +1098,17 @@ class AppWindow:
                 mic_var.set("Default")
             _refresh_mic_label()
 
-        # Load devices synchronously — sd.query_devices() is fast (<50 ms)
-        # and doing it on the main thread guarantees the menu is fully populated
-        # before the user can click it, eliminating the "Default only" race condition.
-        try:
-            _devs = self._get_input_devices() if self._get_input_devices else []
-        except Exception:
-            _devs = []
-        _populate_mic_menu(_devs)
+        # Enumerate devices on a daemon thread — avoids 200-500ms block on
+        # machines with many audio/Bluetooth devices. Menu shows "Scanning…"
+        # until the list arrives via after().
+        def _async_populate():
+            try:
+                devs = self._get_input_devices() if self._get_input_devices else []
+            except Exception:
+                devs = []
+            if self._root:
+                self._root.after(0, lambda: _populate_mic_menu(devs))
+        threading.Thread(target=_async_populate, daemon=True, name="mic-enum").start()
 
         # ── Mic test button + level meter ─────────────────────────────────────
         btn_row = tk.Frame(mic_card, bg=C["surface"])
@@ -1619,12 +1622,12 @@ class AppWindow:
 
             def _no_update_fallback():
                 import time; time.sleep(6)
-                if self._update_check_btn.cget("text") == "Checking...":
-                    def _apply():
+                def _apply():
+                    if self._update_check_btn.cget("text") == "Checking...":
                         self._update_status_lbl.configure(
                             text="Up to date ✓", fg=C["success"])
                         _restore_check_btn()
-                    self._root.after(0, _apply)
+                self._root.after(0, _apply)
 
             check_for_update(self._version, _done)
             threading.Thread(target=_no_update_fallback, daemon=True).start()

@@ -12,6 +12,7 @@ from pystray import MenuItem as item
 from PIL import Image, ImageDraw
 
 
+
 def _resource_path(relative_path: str) -> str:
     """Get absolute path to a resource, works for dev and PyInstaller."""
     try:

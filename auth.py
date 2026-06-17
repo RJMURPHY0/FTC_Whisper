@@ -12,7 +12,6 @@ import os
 import threading
 from typing import Optional
 
-from supabase import create_client
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +104,7 @@ class AuthManager:
     def _get_client(self):
         if not self._client:
             try:
+                from supabase import create_client  # lazy — only loaded when auth is used
                 self._client = create_client(self._url, self._key)
                 self._attach_auth_listener(self._client)
             except Exception as e:
