@@ -194,7 +194,9 @@ class HotkeyManager:
             return
 
         def _should_suppress(_event):
-            return None if self._state == AppState.RECORDING else True
+            # Only suppress in hold mode — toggle mode needs the key through so the
+            # second Alt+V press can fire WM_HOTKEY and stop recording.
+            return None if (self._state == AppState.RECORDING and self.mode == "hold") else True
 
         try:
             self._base_key_suppress_hook = kb.on_press_key(

@@ -357,6 +357,10 @@ class AppWindow:
                 self._update_check_btn.configure(
                     text="Check for Updates", fg=C["accent"], cursor="hand2")
                 self._update_check_btn.bind("<Button-1>", self._do_update_check)
+        elif name == "hotkey":
+            if self._root and hasattr(self, "_hk_cv"):
+                self._root.bind_all("<MouseWheel>", lambda e: self._hk_cv.yview_scroll(
+                    int(-1 * (e.delta / 120)), "units"))
         else:
             if self._root:
                 try:
@@ -476,8 +480,9 @@ class AppWindow:
                                activebackground="#505050",
                                relief="flat", borderwidth=0,
                                elementborderwidth=0, width=10)
-        _hk_cv = tk.Canvas(parent, bg=C["bg"], highlightthickness=0,
-                            bd=0, yscrollcommand=_hk_sb.set)
+        self._hk_cv = tk.Canvas(parent, bg=C["bg"], highlightthickness=0,
+                                bd=0, yscrollcommand=_hk_sb.set)
+        _hk_cv = self._hk_cv
         _hk_sb.config(command=_hk_cv.yview)
         _hk_sb.pack(side="right", fill="y")
         _hk_cv.pack(side="left", fill="both", expand=True)
@@ -533,7 +538,7 @@ class AppWindow:
         _mode_right = tk.Frame(btn_row, bg=C["surface"])
         _mode_right.pack(side="right")
 
-        _TW, _TH = 40, 24
+        _TW, _TH = 48, 28
         _init_mode = getattr(self._config, "mode", "hold") if self._config else "hold"
         self._mode_toggle_on = (_init_mode == "toggle")
 
@@ -555,11 +560,14 @@ class AppWindow:
             self._mode_cv.delete("all")
             track = C["accent"] if self._mode_toggle_on else C["border"]
             r = _TH // 2
-            self._mode_cv.create_arc(0, 0, r * 2, _TH, start=90, extent=180,
-                                     fill=track, outline="")
-            self._mode_cv.create_arc(_TW - r * 2, 0, _TW, _TH, start=270, extent=180,
-                                     fill=track, outline="")
-            self._mode_cv.create_rectangle(r, 0, _TW - r, _TH, fill=track, outline="")
+            # Smooth capsule using spline polygon — avoids jagged create_arc
+            pts = (
+                r, 0,      _TW-r, 0,
+                _TW, r,    _TW, _TH-r,
+                _TW-r, _TH, r, _TH,
+                0, _TH-r,  0, r,
+            )
+            self._mode_cv.create_polygon(pts, smooth=True, fill=track, outline="")
             m = 3
             d = _TH - m * 2
             tx = _TW - m - d if self._mode_toggle_on else m

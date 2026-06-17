@@ -33,7 +33,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.4.3"
+APP_VERSION = "1.4.4"
 
 
 class WhisperFlowApp:
@@ -550,7 +550,10 @@ class WhisperFlowApp:
         """Fired by the auto-stop timer — behaves like the user releasing the hotkey."""
         if self.hotkey_manager.state == AppState.RECORDING:
             print("[App] Auto-stopping recording (timeout reached)")
-            self.hotkey_manager._on_key_up()
+            if self.hotkey_manager.mode == "toggle":
+                self.hotkey_manager._on_key_down()
+            else:
+                self.hotkey_manager._on_key_up()
 
     def _get_context_words(self) -> str:
         with self._context_lock:
