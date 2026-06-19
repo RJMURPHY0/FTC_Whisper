@@ -33,7 +33,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.4.5"
+APP_VERSION = "1.4.6"
 
 
 class WhisperFlowApp:
@@ -209,6 +209,11 @@ class WhisperFlowApp:
             print("[App] Supabase logging disabled — set supabase_url/key in config.")
 
         print("[App] Ready! Hold the hotkey and start speaking.")
+
+        # Initialize popup Toplevel on the main thread (avoids dual-Tk deadlock)
+        root = self.app_window._root
+        if root:
+            root.after(0, lambda: self.popup.initialize(root))
 
         # Register global hotkeys
         self.hotkey_manager.register()

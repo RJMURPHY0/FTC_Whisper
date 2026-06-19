@@ -83,12 +83,7 @@ def _apply_popup_corners(hwnd: int, w: int, h: int, r: int = POPUP_RADIUS) -> No
 
 class FloatingPopup:
     def __init__(self):
-        self._ready = threading.Event()
-        self._thread = threading.Thread(target=self._run_tk, daemon=True)
-        self._thread.start()
-        self._ready.wait(timeout=15.0)
-
-        self.root: Optional[tk.Tk]  # set by _run_tk
+        self.root: Optional[tk.Toplevel] = None
 
         self._mode: Optional[str] = None
         self._on_insert: Optional[Callable] = None
@@ -181,8 +176,11 @@ class FloatingPopup:
 
     # ── Tkinter setup ──────────────────────────────────────────────────────────
 
-    def _run_tk(self) -> None:
-        self.root = tk.Tk()
+    def initialize(self, main_root: tk.Tk) -> None:
+        """Create the popup Toplevel on the main thread. Call once after main Tk is running."""
+        if self.root is not None:
+            return
+        self.root = tk.Toplevel(main_root)
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", 0.97)
@@ -212,9 +210,6 @@ class FloatingPopup:
         self._build_refinement_frame()
 
         self.root.bind("<Configure>", self._on_popup_configure)
-
-        self._ready.set()
-        self.root.mainloop()
 
     def _set_no_activate(self, enabled: bool) -> None:
         """Enable or disable WS_EX_NOACTIVATE on the popup window."""
