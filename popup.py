@@ -60,8 +60,6 @@ CP = {
 # Keep the dark-theme names aliased so refinement frame code is consistent
 C = CP
 
-POPUP_RADIUS = 16  # window-level corner radius
-
 # Waveform config
 NUM_BARS = 16
 BAR_W    = 4
@@ -72,11 +70,16 @@ CANVAS_W = NUM_BARS * (BAR_W + BAR_GAP) - BAR_GAP
 CANVAS_H = BAR_MAX_H + 6
 
 
-def _apply_popup_corners(hwnd: int, w: int, h: int, r: int = POPUP_RADIUS) -> None:
-    """Clip the popup window to a rounded rectangle using GDI SetWindowRgn."""
+def _apply_popup_corners(hwnd: int) -> None:
+    """Apply Win11 DWM rounded corners — no GDI clipping, no black artifacts."""
     try:
-        hRgn = ctypes.windll.gdi32.CreateRoundRectRgn(0, 0, w + 1, h + 1, r * 2, r * 2)
-        ctypes.windll.user32.SetWindowRgn(hwnd, hRgn, True)
+        DWMWA_WINDOW_CORNER_PREFERENCE = 33
+        DWMWCP_ROUND = 2
+        pref = ctypes.c_int(DWMWCP_ROUND)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
+            ctypes.byref(pref), ctypes.sizeof(pref),
+        )
     except Exception:
         pass
 
@@ -211,6 +214,9 @@ class FloatingPopup:
         except Exception:
             pass
 
+        # Apply Win11 DWM rounded corners once — no GDI region, no black artifacts.
+        _apply_popup_corners(self._popup_hwnd)
+
         self._build_status_frame()
         self._build_icon_frame()
         self._build_refinement_frame()
@@ -265,12 +271,7 @@ class FloatingPopup:
                 pass
 
     def _on_popup_configure(self, event) -> None:
-        if event.widget is self.root:
-            self.root.update_idletasks()
-            w = self.root.winfo_width()
-            h = self.root.winfo_height()
-            if w > 4 and h > 4 and self._popup_hwnd:
-                _apply_popup_corners(self._popup_hwnd, w, h)
+        pass  # corners handled once at initialize via DWM
 
     # ── Status frame (recording / transcribing pill) ───────────────────────────
 
