@@ -64,26 +64,71 @@ REFINE_PROMPTS = {
 
 class AIRefiner:
     """
-    Refines transcribed text using the Claude API.
+    Refines transcribed text using the Claude API or OpenRouter.
+
+    Priority: OpenRouter (if key set) > Anthropic direct (if key set) > unavailable.
 
     Usage:
-        refiner = AIRefiner(api_key="sk-ant-...")
+        refiner = AIRefiner(api_key="sk-ant-...", openrouter_api_key="sk-or-...")
         polished = refiner.refine("hello how are you doing today", mode="email")
     """
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        openrouter_api_key: Optional[str] = None,
+        openrouter_model: str = "google/gemini-2.0-flash-001",
+    ):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        self.openrouter_api_key = openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", "")
+        self.openrouter_model = openrouter_model
         self._client = None
 
     def update_api_key(self, api_key: str) -> None:
         self.api_key = api_key.strip()
         self._client = None  # force re-init with new key
 
+    def update_openrouter_key(self, key: str) -> None:
+        self.openrouter_api_key = key.strip()
+        self._client = None  # force re-init with new key
+
     @property
     def is_available(self) -> bool:
-        return bool(self.api_key)
+        return bool(self.openrouter_api_key or self.api_key)
 
-    def _get_client(self):
+    def _refine_via_openrouter(self, text: str, prompt: str) -> str:
+        """Call OpenRouter using the openai-compatible SDK. Lazy import so missing package doesn't crash."""
+        try:
+            import openai  # type: ignore
+        except ImportError:
+            print("[AIRefiner] openai package not installed — falling back to Anthropic")
+            return ""
+
+        client = openai.OpenAI(
+            api_key=self.openrouter_api_key,
+            base_url="https://openrouter.ai/api/v1",
+        )
+        response = client.chat.completions.create(
+            model=self.openrouter_model,
+            max_tokens=1024,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a text refinement assistant. Write in plain prose only. "
+                        "No bullet points, numbered lists, dashes at line starts, asterisks, markdown, or headers. "
+                        "Use clear, simple language. Keep sentences short and direct. Use active voice. "
+                        "Avoid em dashes, semicolons, filler words, and cliches. "
+                        "Write as a human would: natural, direct, easy to read. "
+                        "Return only the refined text, nothing else."
+                    ),
+                },
+                {"role": "user", "content": f"{prompt}\n\n{text}"},
+            ],
+        )
+        return response.choices[0].message.content.strip()
+
+    def _get_anthropic_client(self):
         if self._client is None:
             import anthropic
             self._client = anthropic.Anthropic(api_key=self.api_key)
@@ -91,7 +136,7 @@ class AIRefiner:
 
     def refine(self, text: str, mode: str = "punctuation", custom_prompt: Optional[str] = None) -> str:
         """
-        Refine text using Claude.
+        Refine text using Claude or OpenRouter.
 
         Args:
             text: The raw transcribed text to refine
@@ -110,8 +155,26 @@ class AIRefiner:
 
         prompt = custom_prompt or REFINE_PROMPTS.get(mode, REFINE_PROMPTS["punctuation"])
 
+        # OpenRouter takes priority over Anthropic direct
+        if self.openrouter_api_key:
+            try:
+                result = self._refine_via_openrouter(text, prompt)
+                if result:
+                    print(f"[AIRefiner] Refined via OpenRouter ({mode}): '{result}'")
+                    return result
+                # Empty result (e.g. openai not installed) — fall through to Anthropic
+            except Exception as e:
+                print(f"[AIRefiner] OpenRouter error during refinement: {e}")
+                # Fall through to Anthropic if key is also set
+                if not self.api_key:
+                    return text
+
+        # Anthropic direct path
+        if not self.api_key:
+            return text
+
         try:
-            client = self._get_client()
+            client = self._get_anthropic_client()
             message = client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=1024,
@@ -131,7 +194,7 @@ class AIRefiner:
                 ],
             )
             result = message.content[0].text.strip()
-            print(f"[AIRefiner] Refined ({mode}): '{result}'")
+            print(f"[AIRefiner] Refined via Anthropic ({mode}): '{result}'")
             return result
 
         except Exception as e:

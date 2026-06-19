@@ -52,6 +52,7 @@ class Config:
     sound_feedback: bool = True
     auto_start: bool = False
     anthropic_api_key: str = ""  # Optional — enables AI text refinement
+    openrouter_api_key: str = ""  # Optional — enables AI via OpenRouter (alternative to Anthropic direct)
     custom_vocabulary: str = ""  # Comma-separated terms to boost in Whisper (names, acronyms, domain words)
     auto_punctuate: bool = True   # Add trailing period when Whisper output has no terminal punctuation
     trailing_space: bool = False  # Append a space after each injection (useful when dictating mid-sentence)

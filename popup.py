@@ -92,6 +92,9 @@ class FloatingPopup:
         self._cursor_x: int = 0
         self._cursor_y: int = 0
         self._ai_refiner = None
+        self._voice_prompt_fn = None
+        self._mic_recording: bool = False
+        self._mic_pulse_on: bool = True
         self._original_text: str = ""
         self._current_result: Optional[str] = None
         self._inserted_ok: bool = True
@@ -113,6 +116,9 @@ class FloatingPopup:
 
     def set_ai_refiner(self, refiner) -> None:
         self._ai_refiner = refiner
+
+    def set_voice_prompt_callback(self, fn) -> None:
+        self._voice_prompt_fn = fn
 
     def show_status(
         self,
@@ -502,7 +508,7 @@ class FloatingPopup:
             font=("Segoe UI", 10),
             bd=0,
         )
-        self._ask_entry.pack(side="left", fill="x", expand=True, ipady=5, padx=(0, 6))
+        self._ask_entry.pack(side="left", fill="x", expand=True, ipady=5, padx=(0, 4))
         self._ask_entry.insert(0, "Ask AI — e.g. 'change language to French' or 'make this shorter'")
         self._ask_entry.configure(fg=CP["subtext"])
 
@@ -520,6 +526,21 @@ class FloatingPopup:
         self._ask_entry.bind("<FocusIn>", _clear_placeholder)
         self._ask_entry.bind("<FocusOut>", _restore_placeholder)
         self._ask_entry.bind("<Return>", lambda _e: self._run_ai_custom())
+
+        self._mic_btn = tk.Label(
+            ask_row,
+            text="🎙",
+            fg=CP["subtext"],
+            bg=CP["btn_bg"],
+            font=("Segoe UI", 11),
+            padx=6,
+            pady=4,
+            cursor="hand2",
+        )
+        self._mic_btn.pack(side="left", padx=(0, 6))
+        self._mic_btn.bind("<Button-1>", lambda _e: self._on_mic_click())
+        self._mic_btn.bind("<Enter>", lambda _e: self._mic_btn.configure(fg=CP["text"]) if not self._mic_recording else None)
+        self._mic_btn.bind("<Leave>", lambda _e: self._mic_btn.configure(fg=CP["subtext"]) if not self._mic_recording else None)
 
         ask_btn = tk.Label(
             ask_row,
@@ -818,6 +839,100 @@ class FloatingPopup:
             threading.Thread(
                 target=self._on_replace, args=(result,), daemon=True
             ).start()
+
+    # ── Voice prompt ────────────────────────────────────────────────────────────
+
+    def _on_mic_click(self) -> None:
+        if self._mic_recording:
+            # User clicked stop — recording loop will exit on next iteration
+            self._mic_recording = False
+            return
+
+        if not self._voice_prompt_fn:
+            self._ai_status.configure(text="⚠  Voice prompt not configured")
+            self._ai_status.pack(anchor="w")
+            return
+
+        self._mic_recording = True
+        self._mic_btn.configure(text="⏹", fg=CP["bg"], bg=CP["accent"])
+        self._ai_status.configure(text="🔴  Recording…  click ⏹ to stop")
+        self._ai_status.pack(anchor="w")
+        self._start_mic_pulse()
+
+        def _run():
+            import sounddevice as _sd
+            import numpy as _np
+
+            chunks = []
+            CHUNK = 3200  # 0.2 s at 16 kHz
+            try:
+                with _sd.InputStream(samplerate=16000, channels=1, dtype="float32",
+                                     blocksize=CHUNK) as stream:
+                    start = time.time()
+                    while self._mic_recording and (time.time() - start) < 30.0:
+                        data, _ = stream.read(CHUNK)
+                        chunks.append(data.copy())
+            except Exception as exc:
+                err = str(exc)
+                self.root.after(0, lambda: self._ai_status.configure(text=f"⚠  Mic error: {err}"))
+                self.root.after(2000, self._finish_mic)
+                return
+
+            if not chunks:
+                self.root.after(0, self._finish_mic)
+                return
+
+            self.root.after(0, lambda: self._ai_status.configure(text="✦  Transcribing…"))
+
+            try:
+                audio = _np.concatenate(chunks, axis=0).flatten()
+                text = self._voice_prompt_fn(audio, 16000)
+            except Exception as exc:
+                err = str(exc)
+                self.root.after(0, lambda: self._ai_status.configure(text=f"⚠  Transcription error: {err}"))
+                self.root.after(2000, self._finish_mic)
+                return
+
+            if text and text.strip():
+                t = text.strip()
+                self.root.after(0, lambda t=t: self._set_ask_entry(t))
+            else:
+                self.root.after(0, lambda: self._ai_status.configure(text="⚠  No speech detected"))
+                self.root.after(2000, self._finish_mic)
+                return
+
+            self.root.after(0, self._finish_mic)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _start_mic_pulse(self) -> None:
+        self._mic_pulse_on = True
+        self._mic_pulse_tick()
+
+    def _mic_pulse_tick(self) -> None:
+        if not self._mic_recording:
+            return
+        if self._mic_pulse_on:
+            self._mic_btn.configure(fg=CP["bg"], bg=CP["accent"])
+        else:
+            self._mic_btn.configure(fg=CP["accent"], bg=CP["btn_bg"])
+        self._mic_pulse_on = not self._mic_pulse_on
+        self.root.after(500, self._mic_pulse_tick)
+
+    def _set_ask_entry(self, text: str) -> None:
+        self._ask_entry.delete(0, "end")
+        self._ask_entry.insert(0, text)
+        self._ask_entry.configure(fg=CP["text"])
+
+    def _finish_mic(self) -> None:
+        self._mic_recording = False
+        self._mic_btn.configure(text="🎙", fg=CP["subtext"], bg=CP["btn_bg"])
+        self._ai_status.configure(text="")
+        self._ai_status.pack_forget()
+
+    def _reset_mic_btn(self) -> None:
+        self._mic_recording = False
+        self._mic_btn.configure(text="🎙", fg=CP["subtext"], bg=CP["btn_bg"])
 
     # ── AI refinement ──────────────────────────────────────────────────────────
 

@@ -34,6 +34,54 @@ WINDOW_W = 420
 DASH_H   = 560
 
 
+# ── Pill toggle widget ────────────────────────────────────────────────────────
+
+class TogglePill(tk.Frame):
+    """Capsule-shaped boolean toggle. FTC orange when ON, border-grey when OFF."""
+    W, H = 48, 28
+
+    def __init__(self, parent, value: bool = False, command=None, **kw):
+        bg = kw.pop("bg", C["surface"])
+        super().__init__(parent, bg=bg, width=self.W, height=self.H)
+        self._value = bool(value)
+        self._cmd   = command
+        self._cv    = tk.Canvas(
+            self, width=self.W, height=self.H,
+            bg=bg, highlightthickness=0, cursor="hand2",
+        )
+        self._cv.pack()
+        self._cv.bind("<Button-1>", lambda _e: self.toggle())
+        self.bind("<Button-1>",     lambda _e: self.toggle())
+        self._draw()
+
+    def _draw(self):
+        self._cv.delete("all")
+        track = C["accent"] if self._value else C["border"]
+        r = self.H // 2
+        # True pill: filled rect + two semicircle caps
+        self._cv.create_rectangle(r, 0, self.W - r, self.H, fill=track, outline="")
+        self._cv.create_oval(0, 0, self.H, self.H, fill=track, outline="")
+        self._cv.create_oval(self.W - self.H, 0, self.W, self.H, fill=track, outline="")
+        # Dot
+        m = 3
+        d = self.H - m * 2
+        tx = self.W - m - d if self._value else m
+        self._cv.create_oval(tx, m, tx + d, self.H - m, fill=C["text"], outline="")
+
+    def get(self) -> bool:
+        return self._value
+
+    def set(self, v: bool):
+        self._value = bool(v)
+        self._draw()
+
+    def toggle(self):
+        self._value = not self._value
+        self._draw()
+        if self._cmd:
+            self._cmd(self._value)
+
+
 # ── Rounded card helper ───────────────────────────────────────────────────────
 
 def _rr(canvas, x1, y1, x2, y2, r, **kw):
@@ -538,67 +586,44 @@ class AppWindow:
         _mode_right = tk.Frame(btn_row, bg=C["surface"])
         _mode_right.pack(side="right")
 
-        _TW, _TH = 48, 28
         _init_mode = getattr(self._config, "mode", "hold") if self._config else "hold"
         self._mode_toggle_on = (_init_mode == "toggle")
 
         self._mode_lbl = tk.Label(
             _mode_right, text="Toggle",
-            fg=C["subtext"] if not self._mode_toggle_on else C["text"],
+            fg=C["text"] if self._mode_toggle_on else C["subtext"],
             bg=C["surface"],
             font=("Segoe UI", 9), cursor="hand2",
         )
         self._mode_lbl.pack(side="right", padx=(6, 0))
 
-        self._mode_cv = tk.Canvas(
-            _mode_right, width=_TW, height=_TH,
-            bg=C["surface"], highlightthickness=0, bd=0, cursor="hand2",
-        )
-        self._mode_cv.pack(side="right")
-
-        def _draw_mode_toggle():
-            self._mode_cv.delete("all")
-            track = C["accent"] if self._mode_toggle_on else C["border"]
-            r = _TH // 2
-            # Smooth capsule using spline polygon — avoids jagged create_arc
-            pts = (
-                r, 0,      _TW-r, 0,
-                _TW, r,    _TW, _TH-r,
-                _TW-r, _TH, r, _TH,
-                0, _TH-r,  0, r,
-            )
-            self._mode_cv.create_polygon(pts, smooth=True, fill=track, outline="")
-            m = 3
-            d = _TH - m * 2
-            tx = _TW - m - d if self._mode_toggle_on else m
-            self._mode_cv.create_oval(tx, m, tx + d, _TH - m, fill=C["text"], outline="")
-
-        _draw_mode_toggle()
-
-        def _click_mode_toggle(_e=None):
-            self._mode_toggle_on = not self._mode_toggle_on
-            _draw_mode_toggle()
-            mode = "toggle" if self._mode_toggle_on else "hold"
+        def _click_mode_toggle_logic(new_val: bool):
+            self._mode_toggle_on = new_val
+            mode = "toggle" if new_val else "hold"
             self._mode_lbl.configure(
-                fg=C["text"] if self._mode_toggle_on else C["subtext"]
+                fg=C["text"] if new_val else C["subtext"]
             )
             if hasattr(self, "_home_mode_hint_lbl"):
                 self._home_mode_hint_lbl.configure(
-                    text=" press to start/stop" if self._mode_toggle_on else " hold to dictate"
+                    text=" press to start/stop" if new_val else " hold to dictate"
                 )
             if hasattr(self, "_home_instructions_lbl"):
                 self._home_instructions_lbl.configure(
                     text=(
                         "Press the hotkey to start recording.\nPress again to stop and transcribe."
-                        if self._mode_toggle_on else
+                        if new_val else
                         "Hold the hotkey and speak.\nRelease to transcribe into your cursor."
                     )
                 )
             if self._on_settings_change:
                 self._on_settings_change("mode", mode)
 
-        self._mode_cv.bind("<Button-1>", _click_mode_toggle)
-        self._mode_lbl.bind("<Button-1>", _click_mode_toggle)
+        self._mode_pill = TogglePill(
+            _mode_right, value=self._mode_toggle_on, bg=C["surface"],
+            command=_click_mode_toggle_logic,
+        )
+        self._mode_pill.pack(side="right")
+        self._mode_lbl.bind("<Button-1>", lambda _e: self._mode_pill.toggle())
 
         # ── Refine selection hotkey ───────────────────────────────────────────────
         card2 = self._card(parent, margin=(0, 8))
@@ -1549,6 +1574,51 @@ class AppWindow:
                                relief="flat", font=("Segoe UI", 9), bd=6)
         vocab_entry.pack(fill="x", pady=(4, 0))
 
+        # ── AI / API Keys ─────────────────────────────────────────────────────
+        ai_card = self._card(parent, margin=(0, 8))
+
+        # Anthropic API Key
+        tk.Label(ai_card, text="Anthropic API Key",
+                 fg=C["subtext"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
+        tk.Label(ai_card,
+                 text="Optional — enables AI text refinement via Claude (claude.ai)",
+                 fg=C["subtext"], bg=C["surface"],
+                 font=("Segoe UI", 8), anchor="w", wraplength=360).pack(fill="x")
+        ant_key_var = tk.StringVar(value=(cfg.anthropic_api_key or "") if cfg else "")
+        ant_entry = tk.Entry(ai_card, textvariable=ant_key_var, show="*",
+                             bg=C["input_bg"], fg=C["text"], insertbackground=C["text"],
+                             relief="flat", font=("Segoe UI", 9), bd=6)
+        ant_entry.pack(fill="x", pady=(4, 12))
+
+        def _save_ant_key(_e=None):
+            if self._on_settings_change:
+                self._on_settings_change("anthropic_api_key", ant_key_var.get().strip())
+        ant_entry.bind("<FocusOut>", _save_ant_key)
+        ant_entry.bind("<Return>", _save_ant_key)
+
+        tk.Frame(ai_card, bg=C["border"], height=1).pack(fill="x", pady=(0, 8))
+
+        # OpenRouter API Key
+        tk.Label(ai_card, text="OpenRouter API Key",
+                 fg=C["subtext"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
+        tk.Label(ai_card,
+                 text="Optional — use OpenRouter for smarter context correction (openrouter.ai)",
+                 fg=C["subtext"], bg=C["surface"],
+                 font=("Segoe UI", 8), anchor="w", wraplength=360).pack(fill="x")
+        or_key_var = tk.StringVar(value=(cfg.openrouter_api_key or "") if cfg else "")
+        or_entry = tk.Entry(ai_card, textvariable=or_key_var, show="*",
+                            bg=C["input_bg"], fg=C["text"], insertbackground=C["text"],
+                            relief="flat", font=("Segoe UI", 9), bd=6)
+        or_entry.pack(fill="x", pady=(4, 8))
+
+        def _save_or_key(_e=None):
+            if self._on_settings_change:
+                self._on_settings_change("openrouter_api_key", or_key_var.get().strip())
+        or_entry.bind("<FocusOut>", _save_or_key)
+        or_entry.bind("<Return>", _save_or_key)
+
         # ── Sound feedback ────────────────────────────────────────────────────
         sound_card = self._card(parent, margin=(0, 4))
         sound_row = tk.Frame(sound_card, bg=C["surface"])
@@ -1557,15 +1627,17 @@ class AppWindow:
         current_sound = bool(cfg.sound_feedback if cfg else True)
         sound_var = tk.BooleanVar(value=current_sound)
 
-        # Pack toggle first so expand=True on label_col doesn't consume all space
-        sound_toggle = tk.Label(sound_row, text="", fg=C["subtext"], bg=C["surface"],
-                                font=("Segoe UI", 9, "bold"), cursor="hand2")
-        sound_toggle.pack(side="right")
+        # Pack pill first so expand=True on label_col doesn't consume all space
+        def _on_sound_toggle(v: bool):
+            sound_var.set(v)
+            if self._on_settings_change:
+                self._on_settings_change("sound_feedback", v)
 
-        def _make_toggle_btn():
-            txt = "On" if sound_var.get() else "Off"
-            col = C["success"] if sound_var.get() else C["subtext"]
-            sound_toggle.configure(text=txt, fg=col)
+        sound_pill = TogglePill(
+            sound_row, value=current_sound, bg=C["surface"],
+            command=_on_sound_toggle,
+        )
+        sound_pill.pack(side="right")
 
         label_col = tk.Frame(sound_row, bg=C["surface"])
         label_col.pack(side="left", fill="x", expand=True)
@@ -1575,12 +1647,6 @@ class AppWindow:
         tk.Label(label_col, text="Beeps when recording starts, stops, and transcription finishes",
                  fg=C["subtext"], bg=C["surface"],
                  font=("Segoe UI", 8), anchor="w").pack(anchor="w")
-
-        def _toggle_sound(_e=None):
-            sound_var.set(not sound_var.get())
-            _make_toggle_btn()
-        sound_toggle.bind("<Button-1>", _toggle_sound)
-        _make_toggle_btn()
 
         # ── Version / update card ─────────────────────────────────────────────
         ver_card = self._card(parent, margin=(0, 4))

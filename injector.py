@@ -74,6 +74,33 @@ BROWSER_CLASS_PREFIXES = (
     "CEF-",
 )
 
+# Window classes for game engines / fullscreen overlays — skip direct injection,
+# go straight to clipboard paste (they don't process WM_CHAR / VK_PACKET reliably)
+GAME_CLASSES = frozenset(
+    {
+        "DXGI",
+        "UnrealWindow",
+        "SDL_app",
+        "GLFW30",
+        "D3DWindow",
+    }
+)
+GAME_CLASS_PREFIXES = (
+    "DXGI",
+    "UnrealWindow",
+    "SDL_",
+    "GLFW",
+    "D3DWindow",
+)
+
+# Terminal emulator windows — use Ctrl+Shift+V instead of Ctrl+V.
+# Ctrl+V in a terminal session sends a raw ^V control sequence to the shell,
+# not a paste event. The terminal app itself intercepts Ctrl+Shift+V as paste.
+TERMINAL_CLASSES = frozenset({
+    "CASCADIA_HOSTING_WINDOW_CLASS",  # Windows Terminal (wt.exe)
+})
+TERMINAL_CLASS_PREFIXES = ("CASCADIA_",)
+
 # Modifier VK codes — released before final injection only
 _MODIFIERS = (
     0x10,
@@ -130,6 +157,22 @@ def _is_browser_class(class_name: str) -> bool:
     if class_name in BROWSER_CLASSES:
         return True
     return class_name.startswith(BROWSER_CLASS_PREFIXES)
+
+
+def _is_game_class(class_name: str) -> bool:
+    if not class_name:
+        return False
+    if class_name in GAME_CLASSES:
+        return True
+    return class_name.startswith(GAME_CLASS_PREFIXES)
+
+
+def _is_terminal_class(class_name: str) -> bool:
+    if not class_name:
+        return False
+    if class_name in TERMINAL_CLASSES:
+        return True
+    return class_name.startswith(TERMINAL_CLASS_PREFIXES)
 
 
 def _get_focused_child(fg_hwnd: int) -> int:
@@ -298,7 +341,31 @@ class Injector:
         if release_mods:
             _release_modifiers()
 
-        # Respect config-driven injection mode:
+        cls = _get_fg_class()
+
+        # Windows Terminal: Ctrl+Shift+V is the paste shortcut. Ctrl+V passes
+        # a raw ^V control-sequence to the running shell process instead.
+        if _is_terminal_class(cls):
+            return self._terminal_paste(text)
+
+        if _is_browser_class(cls) and not _is_game_class(cls):
+            # Short text (≤80 chars): VK_PACKET first — fires keyboard events that
+            # search bars, React inputs, and Electron inputs handle without DOM focus.
+            # Long text (>80 chars): clipboard first — more reliable for Google Docs,
+            # Gmail compose, and rich editors where 500+ SendInput events can be
+            # dropped or reordered by the browser's event queue.
+            if len(text) <= 80:
+                if self._direct_inject(text):
+                    return True
+                print("[Injector] Browser VK_PACKET failed -> clipboard fallback")
+                return self._clipboard_paste(text)
+            else:
+                if self._clipboard_paste(text):
+                    return True
+                print("[Injector] Browser clipboard failed -> VK_PACKET fallback")
+                return self._direct_inject(text)
+
+        # Non-browser: respect config-driven injection mode.
         # - clipboard  : most universal for office/web/chat apps
         # - keystrokes : direct Win32/SendInput path first
         # - auto       : clipboard first, then direct fallback
@@ -321,6 +388,12 @@ class Injector:
 
     def _direct_inject(self, text: str) -> bool:
         cls = _get_fg_class()
+
+        if _is_game_class(cls):
+            # Game/overlay windows don't process WM_CHAR or VK_PACKET reliably —
+            # fall through immediately so the caller can use clipboard paste.
+            print(f"[Injector] Game/overlay window class={cls!r} — skipping direct inject")
+            return False
 
         if _is_browser_class(cls):
             # Browsers: VK_PACKET via SendInput
@@ -372,9 +445,10 @@ class Injector:
             finally:
                 _u32.CloseClipboard()
 
-        # ── Write new content ──
+        # ── Write new content (with readback verification) ──
         encoded = (text + "\x00").encode("utf-16-le")
-        for _attempt in range(5):
+        expected_prefix = text[:50]
+        for _attempt in range(3):
             if _u32.OpenClipboard(None):
                 try:
                     _u32.EmptyClipboard()
@@ -390,16 +464,41 @@ class Injector:
                     ctypes.memmove(ptr, encoded, len(encoded))
                     _k32.GlobalUnlock(h)
 
-                    if _u32.SetClipboardData(CF_UNICODETEXT, h):
-                        return previous
-
-                    _k32.GlobalFree(h)
+                    if not _u32.SetClipboardData(CF_UNICODETEXT, h):
+                        _k32.GlobalFree(h)
+                        continue
                 except Exception:
-                    pass
+                    continue
                 finally:
                     _u32.CloseClipboard()
+
+                # Readback: verify the clipboard now contains what we wrote.
+                time.sleep(0.01)
+                verified = False
+                if _u32.OpenClipboard(None):
+                    try:
+                        rh = _u32.GetClipboardData(CF_UNICODETEXT)
+                        if rh:
+                            rptr = _k32.GlobalLock(rh)
+                            if rptr:
+                                readback = ctypes.wstring_at(rptr)
+                                _k32.GlobalUnlock(rh)
+                                if readback[:50] == expected_prefix:
+                                    verified = True
+                    except Exception:
+                        pass
+                    finally:
+                        _u32.CloseClipboard()
+
+                if verified:
+                    print(f"[Injector] Clipboard verified on attempt {_attempt + 1}")
+                    return previous
+
+                print(f"[Injector] Clipboard readback mismatch on attempt {_attempt + 1} — retrying")
+
             time.sleep(0.02)
 
+        print("[Injector] Clipboard set failed after 3 attempts")
         return previous
 
     @staticmethod
@@ -407,7 +506,7 @@ class Injector:
         """Restore the clipboard to *original* after a short delay."""
 
         def _do():
-            time.sleep(0.25)
+            time.sleep(0.45)  # 0.45s: enough for slow Chrome tabs to process the paste
             try:
                 Injector._clipboard_set(original)
             except Exception:
@@ -447,6 +546,8 @@ class Injector:
                 time.sleep(0.02)
 
             # Atomic Ctrl+V via SendInput (no interleaving with hardware events)
+            fg_now = u32.GetForegroundWindow()
+            print(f"[Injector] Sending Ctrl+V, fg_hwnd={fg_now:#x}")
             ctrl_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL))
             v_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_V))
             v_up = _Input(
@@ -467,4 +568,37 @@ class Injector:
 
         except Exception as e:
             print(f"[Injector] Clipboard paste failed: {e}")
+            return False
+
+    def _terminal_paste(self, text: str) -> bool:
+        """
+        Paste into Windows Terminal via Ctrl+Shift+V.
+        Ctrl+V in a terminal emulator sends a raw ^V byte to the shell process
+        instead of triggering a paste — only the terminal app's own paste shortcut works.
+        """
+        try:
+            VK_CTRL = 0x11
+            VK_SHIFT = 0x10
+            VK_V = 0x56
+            u32 = ctypes.windll.user32
+
+            original = self._clipboard_set(text)
+            time.sleep(0.08)
+
+            ctrl_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL))
+            shift_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_SHIFT))
+            v_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_V))
+            v_up = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_V, dwFlags=_KEYEVENTF_KEYUP))
+            shift_up = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_SHIFT, dwFlags=_KEYEVENTF_KEYUP))
+            ctrl_up = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL, dwFlags=_KEYEVENTF_KEYUP))
+            arr = (_Input * 6)(ctrl_dn, shift_dn, v_dn, v_up, shift_up, ctrl_up)
+            u32.SendInput(6, arr, ctypes.sizeof(_Input))
+            time.sleep(0.08)
+
+            self._clipboard_restore(original)
+            print(f"[Injector] Terminal Ctrl+Shift+V paste {len(text)} chars.")
+            return True
+
+        except Exception as e:
+            print(f"[Injector] Terminal paste failed: {e}")
             return False

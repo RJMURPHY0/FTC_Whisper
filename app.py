@@ -23,7 +23,7 @@ import ctypes
 from config import Config
 from recorder import Recorder
 from transcriber import Transcriber
-from injector import Injector
+from injector import Injector, _release_modifiers
 from hotkey_manager import HotkeyManager, TriggerHotkeyManager, AppState
 from feedback import Feedback
 from tray import TrayApp
@@ -33,7 +33,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.4.6"
+APP_VERSION = "1.4.7"
 
 
 class WhisperFlowApp:
@@ -77,7 +77,10 @@ class WhisperFlowApp:
         self.injector = Injector(method=config.inject_method)
 
         # ── AI + logging ───────────────────────────────────────────────
-        self.ai_refiner = AIRefiner(api_key=config.anthropic_api_key)
+        self.ai_refiner = AIRefiner(
+            api_key=config.anthropic_api_key,
+            openrouter_api_key=config.openrouter_api_key,
+        )
         self.db = SupabaseLogger(url=config.supabase_url, key=config.supabase_key)
 
         # ── UI components ──────────────────────────────────────────────
@@ -115,6 +118,9 @@ class WhisperFlowApp:
 
         self.popup = FloatingPopup()
         self.popup.set_ai_refiner(self.ai_refiner)
+        self.popup.set_voice_prompt_callback(
+            lambda audio, rate: self.fast_transcriber.transcribe(audio, rate, blocking=True)
+        )
 
         self._recording_hwnd: int = 0
         self._mic_loop_running = threading.Event()
@@ -191,17 +197,24 @@ class WhisperFlowApp:
         print(f"[App] Authenticated as {auth.user_email}")
 
         # If no local API key, try to fetch from Supabase app_settings
-        if not self.ai_refiner.is_available and self.db.is_enabled:
-            key = self.db.fetch_app_setting("anthropic_api_key")
-            if key:
-                self.ai_refiner.update_api_key(key)
-                self.popup.set_ai_refiner(self.ai_refiner)
-                print("[App] Loaded Anthropic API key from Supabase.")
+        if self.db.is_enabled:
+            if not self.ai_refiner.openrouter_api_key:
+                or_key = self.db.fetch_app_setting("openrouter_api_key")
+                if or_key:
+                    self.ai_refiner.update_openrouter_key(or_key)
+                    self.popup.set_ai_refiner(self.ai_refiner)
+                    print("[App] Loaded OpenRouter API key from Supabase.")
+            if not self.ai_refiner.api_key:
+                key = self.db.fetch_app_setting("anthropic_api_key")
+                if key:
+                    self.ai_refiner.update_api_key(key)
+                    self.popup.set_ai_refiner(self.ai_refiner)
+                    print("[App] Loaded Anthropic API key from Supabase.")
 
         if self.ai_refiner.is_available:
             print("[App] AI refinement enabled.")
         else:
-            print("[App] AI refinement disabled — set anthropic_api_key in config or add to Supabase app_settings.")
+            print("[App] AI refinement disabled — set anthropic_api_key or openrouter_api_key in config or Supabase app_settings.")
 
         if self.db.is_enabled:
             print(f"[App] Supabase logging enabled.")
@@ -259,6 +272,9 @@ class WhisperFlowApp:
         self.config.save()
         if key == "anthropic_api_key":
             self.ai_refiner.update_api_key(value)
+            self.popup.set_ai_refiner(self.ai_refiner)
+        elif key == "openrouter_api_key":
+            self.ai_refiner.update_openrouter_key(value)
             self.popup.set_ai_refiner(self.ai_refiner)
         elif key == "input_device":
             self.recorder.input_device = value.strip() if value else ""
@@ -426,6 +442,11 @@ class WhisperFlowApp:
         # ── Injection — isolated so a failure never prevents the popup ──────────
         self._focus_window(hwnd)
 
+        # Release modifier keys BEFORE the browser focus click so Chrome never
+        # receives a spurious Alt key-up that would activate its menu bar and
+        # steal focus away from the search/input element we're about to click.
+        _release_modifiers()
+
         # Browser windows (ChatGPT, Gmail, Outlook web, etc.) — Win32
         # SetForegroundWindow restores the Chrome/Firefox Win32 focus but does
         # NOT restore the JS/DOM focus of the contenteditable or ProseMirror
@@ -462,7 +483,8 @@ class WhisperFlowApp:
                 if getattr(self.config, "trailing_space", False):
                     _text_to_inject += " "
                 print(f"[App] Injecting delta: {len(_text_to_inject)} chars")
-                result = self.injector.inject(_text_to_inject)
+                # Modifiers already released above — skip the second release
+                result = self.injector.inject(_text_to_inject, release_mods=False)
                 print(f"[App] Inject result: {result}")
             elif _stream_count > 0:
                 result = True  # streaming already injected successfully
@@ -762,7 +784,7 @@ class WhisperFlowApp:
             u32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
             time.sleep(0.03)
             u32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-            time.sleep(0.12)  # let Chrome process click and re-focus the element
+            time.sleep(0.25)  # let Chrome process click, fire JS focus events, and re-render
             print(f"[App] Browser DOM focus click at ({x}, {y})")
         except Exception as e:
             print(f"[App] Click to restore focus failed: {e}")
@@ -773,9 +795,27 @@ class WhisperFlowApp:
         Returns True if the window is confirmed foreground after the call."""
         if not hwnd:
             return False
+
+        u32 = ctypes.windll.user32
+
+        # Detect fullscreen-exclusive windows (games, presentations) —
+        # they already own the display; attempting SetForegroundWindow can
+        # cause a jarring mode-switch. If the window is TOPMOST and has no
+        # title bar (WS_CAPTION absent), treat it as fullscreen-exclusive and
+        # skip the focus dance entirely.
+        try:
+            WS_CAPTION = 0x00C00000
+            WS_EX_TOPMOST = 0x00000008
+            style = u32.GetWindowLongW(hwnd, -16)    # GWL_STYLE
+            ex_style = u32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
+            if (ex_style & WS_EX_TOPMOST) and not (style & WS_CAPTION):
+                print(f"[App] Window {hwnd:#x} appears fullscreen-exclusive — skipping SetForegroundWindow")
+                return True
+        except Exception:
+            pass
+
         for attempt in range(2):
             try:
-                u32 = ctypes.windll.user32
                 kernel32 = ctypes.windll.kernel32
 
                 # Only restore if minimised — avoids un-maximise flicker.
@@ -813,6 +853,16 @@ class WhisperFlowApp:
                 )
             except Exception as e:
                 print(f"[App] Focus error (attempt {attempt + 1}): {e}")
+
+        # Retries exhausted. If the target hwnd is still a valid window, the
+        # foreground app may be a fullscreen/exclusive window that owns the
+        # display (and already has focus). Proceed so injection still fires.
+        actual = u32.GetForegroundWindow()
+        if actual and u32.IsWindow(hwnd):
+            print(
+                f"[App] Using current foreground {actual:#x} — target {hwnd:#x} may be fullscreen/exclusive"
+            )
+            return True
 
         print(f"[App] Focus failed after retries — injecting anyway")
         return False
@@ -997,12 +1047,19 @@ class WhisperFlowApp:
         self.db.set_user(auth.user_id)
         self.tray.set_user_email(auth.user_email or "")
         print(f"[App] Signed in as {auth.user_email}")
-        if not self.ai_refiner.is_available and self.db.is_enabled:
-            key = self.db.fetch_app_setting("anthropic_api_key")
-            if key:
-                self.ai_refiner.update_api_key(key)
-                self.popup.set_ai_refiner(self.ai_refiner)
-                print("[App] Loaded Anthropic API key from Supabase.")
+        if self.db.is_enabled:
+            if not self.ai_refiner.openrouter_api_key:
+                or_key = self.db.fetch_app_setting("openrouter_api_key")
+                if or_key:
+                    self.ai_refiner.update_openrouter_key(or_key)
+                    self.popup.set_ai_refiner(self.ai_refiner)
+                    print("[App] Loaded OpenRouter API key from Supabase.")
+            if not self.ai_refiner.api_key:
+                key = self.db.fetch_app_setting("anthropic_api_key")
+                if key:
+                    self.ai_refiner.update_api_key(key)
+                    self.popup.set_ai_refiner(self.ai_refiner)
+                    print("[App] Loaded Anthropic API key from Supabase.")
 
     def _sign_out(self) -> None:
         print("[App] Signing out...")
