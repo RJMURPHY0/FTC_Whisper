@@ -119,7 +119,7 @@ class WhisperFlowApp:
         self.popup = FloatingPopup()
         self.popup.set_ai_refiner(self.ai_refiner)
         self.popup.set_voice_prompt_callback(
-            lambda audio, rate: self.fast_transcriber.transcribe(audio, rate, blocking=True)
+            lambda audio, rate, blocking=True: self.fast_transcriber.transcribe(audio, rate, blocking=blocking)
         )
 
         self._recording_hwnd: int = 0
@@ -777,14 +777,17 @@ class WhisperFlowApp:
 
             MOUSEEVENTF_LEFTDOWN = 0x0002
             MOUSEEVENTF_LEFTUP = 0x0004
-            # Move cursor to target, then click at current position (dx/dy = 0
-            # in non-absolute mode means "at wherever the cursor now is").
+            # Save current cursor so we can restore it — prevents visible cursor
+            # jump from wherever the user moved their mouse during transcription.
+            saved_pt = ctypes.wintypes.POINT()
+            u32.GetCursorPos(ctypes.byref(saved_pt))
             u32.SetCursorPos(x, y)
             time.sleep(0.05)
             u32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
             time.sleep(0.03)
             u32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-            time.sleep(0.25)  # let Chrome process click, fire JS focus events, and re-render
+            time.sleep(0.35)  # let Chrome process click and fire JS focus events
+            u32.SetCursorPos(saved_pt.x, saved_pt.y)
             print(f"[App] Browser DOM focus click at ({x}, {y})")
         except Exception as e:
             print(f"[App] Click to restore focus failed: {e}")

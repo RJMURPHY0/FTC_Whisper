@@ -251,9 +251,15 @@ class FloatingPopup:
         prev_fg = u32.GetForegroundWindow()
         self.root.deiconify()
         self.root.lift()
-        # Restore focus to the previous foreground window if it wasn't ours
+        # update_idletasks() ensures tkinter finishes the ShowWindow call so our
+        # process is registered as foreground before we hand focus back.
+        self.root.update_idletasks()
         if prev_fg and prev_fg != self._popup_hwnd:
             try:
+                # AllowSetForegroundWindow(-1) clears the foreground lock —
+                # without it SetForegroundWindow can silently fail even when
+                # we are the current foreground process.
+                u32.AllowSetForegroundWindow(-1)
                 u32.SetForegroundWindow(prev_fg)
             except Exception:
                 pass
@@ -810,6 +816,11 @@ class FloatingPopup:
         self._upgrading = False
         self._upgrade_result = accurate_text
         if self._mode == "refinement":
+            if self._ai_busy:
+                # A user-triggered refine is in flight — don't overwrite it.
+                # The result is stored in _upgrade_result and shown when the
+                # panel is next opened.
+                return
             self._ai_status.configure(text="")
             self._ai_status.pack_forget()
             self._show_ai_result(accurate_text)
@@ -863,30 +874,42 @@ class FloatingPopup:
             import sounddevice as _sd
             import numpy as _np
 
-            chunks = []
-            CHUNK = 3200  # 0.2 s at 16 kHz
+            all_chunks = []
+            CHUNK = 3200        # 0.2 s at 16 kHz
+            PREVIEW_EVERY = 8   # re-transcribe every ~1.6 s
+            chunk_count = 0
+
             try:
                 with _sd.InputStream(samplerate=16000, channels=1, dtype="float32",
                                      blocksize=CHUNK) as stream:
                     start = time.time()
                     while self._mic_recording and (time.time() - start) < 30.0:
                         data, _ = stream.read(CHUNK)
-                        chunks.append(data.copy())
+                        all_chunks.append(data.copy())
+                        chunk_count += 1
+
+                        if chunk_count % PREVIEW_EVERY == 0:
+                            snap = _np.concatenate(all_chunks, axis=0).flatten()
+                            # non-blocking: skip if the model is still busy from last preview
+                            preview = self._voice_prompt_fn(snap, 16000, blocking=False)
+                            if preview and preview.strip():
+                                p = preview.strip()
+                                self.root.after(0, lambda p=p: self._set_ask_entry(p))
             except Exception as exc:
                 err = str(exc)
                 self.root.after(0, lambda: self._ai_status.configure(text=f"⚠  Mic error: {err}"))
                 self.root.after(2000, self._finish_mic)
                 return
 
-            if not chunks:
+            if not all_chunks:
                 self.root.after(0, self._finish_mic)
                 return
 
-            self.root.after(0, lambda: self._ai_status.configure(text="✦  Transcribing…"))
-
+            # Final blocking pass on the full buffer — gives the cleanest result
+            self.root.after(0, lambda: self._ai_status.configure(text="✦  Finalising…"))
             try:
-                audio = _np.concatenate(chunks, axis=0).flatten()
-                text = self._voice_prompt_fn(audio, 16000)
+                audio = _np.concatenate(all_chunks, axis=0).flatten()
+                text = self._voice_prompt_fn(audio, 16000, blocking=True)
             except Exception as exc:
                 err = str(exc)
                 self.root.after(0, lambda: self._ai_status.configure(text=f"⚠  Transcription error: {err}"))
@@ -939,6 +962,7 @@ class FloatingPopup:
     def _run_ai(self, mode: str) -> None:
         if not self._ai_refiner or not self._ai_refiner.is_available:
             self._ai_status.configure(text="⚠  Set anthropic_api_key in config to enable AI")
+            self._ai_status.pack(anchor="w")
             return
         if self._ai_busy:
             return
@@ -960,9 +984,11 @@ class FloatingPopup:
         placeholder = "Ask AI — e.g. 'change language to French' or 'make this shorter'"
         if not instruction or instruction == placeholder:
             self._ai_status.configure(text="⚠  Type an instruction first")
+            self._ai_status.pack(anchor="w")
             return
         if not self._ai_refiner or not self._ai_refiner.is_available:
             self._ai_status.configure(text="⚠  Set anthropic_api_key in config to enable AI")
+            self._ai_status.pack(anchor="w")
             return
         if self._ai_busy:
             return
@@ -984,6 +1010,9 @@ class FloatingPopup:
 
     def _show_ai_result(self, text: str) -> None:
         self._ai_busy = False
+        if self._mode is None:
+            # Popup was closed while the worker was running; discard silently.
+            return
         self._current_result = text
         self._ai_status.configure(text="")
         self._ai_status.pack_forget()  # hide spinner row — no blank gap
