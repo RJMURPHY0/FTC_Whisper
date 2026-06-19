@@ -360,7 +360,7 @@ class AppWindow:
         elif name == "hotkey":
             if self._root and hasattr(self, "_hk_cv"):
                 self._root.bind_all("<MouseWheel>", lambda e: self._hk_cv.yview_scroll(
-                    int(-1 * (e.delta / 120)), "units"))
+                    int(-1 * (e.delta / 40)), "units"))
         else:
             if self._root:
                 try:
@@ -493,7 +493,7 @@ class AppWindow:
         _hk_cv.bind("<Configure>", lambda e: _hk_cv.itemconfigure(
             _hk_win, width=e.width))
         _hk_cv.bind("<MouseWheel>", lambda e: _hk_cv.yview_scroll(
-            int(-1 * (e.delta / 120)), "units"))
+            int(-1 * (e.delta / 40)), "units"))
         parent = _hk_inner
 
         # ── Dictation hotkey ─────────────────────────────────────────────────────
