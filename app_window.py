@@ -151,13 +151,11 @@ class AppWindow:
 
     def run(self) -> None:
         self._root = tk.Tk()
+        self._root.withdraw()  # hide before Windows has a chance to render the default blank window
         self._root.title("FTC Whisper")
         self._root.configure(bg=C["bg"])
         self._root.resizable(False, False)
         self._root.protocol("WM_DELETE_WINDOW", self._hide)
-
-        # Hide until fully built — prevents the bare-logo flash on startup
-        self._root.withdraw()
 
         self._apply_dark_titlebar()
 
