@@ -20,6 +20,16 @@ from collections import deque
 
 import ctypes
 
+# Boost to above-normal immediately — before heavy project imports (tkinter, PIL, faster-whisper)
+# so the entire loading phase runs at elevated priority, not just post-import code.
+if sys.platform == "win32":
+    try:
+        ctypes.windll.kernel32.SetPriorityClass(
+            ctypes.windll.kernel32.GetCurrentProcess(), 0x00008000  # ABOVE_NORMAL_PRIORITY_CLASS
+        )
+    except Exception:
+        pass
+
 from config import Config
 from recorder import Recorder
 from transcriber import Transcriber
@@ -33,7 +43,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.4.8"
+APP_VERSION = "1.5.0"
 
 
 class WhisperFlowApp:
@@ -125,6 +135,20 @@ class WhisperFlowApp:
         self._recording_hwnd: int = 0
         self._mic_loop_running = threading.Event()
         self._mic_level_smooth = 0.0
+
+        # ── Live captions ──────────────────────────────────────────────
+        # A SEPARATE tiny.en model with its own lock, used purely to show what
+        # the user is saying as they speak. It is never on the injection path,
+        # never shares fast_transcriber's lock, and never writes _context_deque —
+        # so the final injected transcription is byte-for-byte unchanged whether
+        # captions are on or off (accuracy > speed, preserved structurally).
+        # Lazy: not built or loaded until the user first enables the setting, so
+        # users who never use it pay zero startup/memory cost.
+        self.caption_transcriber: Transcriber | None = None
+        self._caption_loop_running = threading.Event()
+        self._caption_model_lock = threading.Lock()
+        if getattr(config, "live_captions", False):
+            self._ensure_caption_model()
 
         # Rolling context: last ~30 words from recent transcriptions fed into Whisper initial_prompt
         self._context_deque: deque = deque(maxlen=150)
@@ -300,6 +324,12 @@ class WhisperFlowApp:
         elif key == "auto_punctuate":
             self.transcriber.auto_punctuate = bool(value)
             self.fast_transcriber.auto_punctuate = bool(value)
+        elif key == "live_captions":
+            # Live update, no restart. On first enable, lazily build + preload the
+            # tiny.en caption model so the very next recording can show captions.
+            self.config.live_captions = bool(value)
+            if value:
+                self._ensure_caption_model()
         elif key == "mode":
             if self.hotkey_manager.state == AppState.RECORDING:
                 self._on_cancel_recording()
@@ -377,11 +407,16 @@ class WhisperFlowApp:
                 self.feedback.error_occurred("Recording too short")
                 return
 
-            # When streaming was active, match its 30 s window so _stream_extension
-            # can find the extension point; otherwise allow up to 5 min.
-            _window_secs = 30.0 if _stream_count > 0 else 300.0
-            max_samples = int(capture_rate * _window_secs)
-            final_audio = audio[-max_samples:] if len(audio) > max_samples else audio
+            # Never truncate the final clip — long recordings must transcribe in
+            # full. faster-whisper internally chunks long audio at 30 s and
+            # concatenates every segment, so there is no length cap.
+            # Exception: when streaming was active, keep matching its 30 s window
+            # so _stream_extension can still find the extension point.
+            if _stream_count > 0:
+                max_samples = int(capture_rate * 30.0)
+                final_audio = audio[-max_samples:] if len(audio) > max_samples else audio
+            else:
+                final_audio = audio
             print(
                 f"[App] Transcribing {len(final_audio) / capture_rate:.1f}s of audio at {capture_rate} Hz..."
             )
@@ -677,6 +712,9 @@ class WhisperFlowApp:
             except Exception:
                 cx = getattr(self, "_rec_cursor_x", 0)
                 cy = getattr(self, "_rec_cursor_y", 0)
+            _captions_on = bool(getattr(self.config, "live_captions", False)) \
+                and self.caption_transcriber is not None
+            self.popup.set_captions_enabled(_captions_on)
             self.popup.show_status(
                 "Recording",
                 hwnd=hwnd,
@@ -684,10 +722,17 @@ class WhisperFlowApp:
                 cursor_x=cx,
                 cursor_y=cy,
             )
-            # Feed mic levels to the popup waveform while recording
-            if not self._mic_loop_running.is_set():
-                self._mic_loop_running.set()
-                threading.Thread(target=self._mic_level_loop, daemon=True).start()
+            if _captions_on:
+                # Live-caption mode REPLACES the waveform bar. Run only the
+                # caption loop (the mic-level loop would fight it for the same pill).
+                if not self._caption_loop_running.is_set():
+                    self._caption_loop_running.set()
+                    threading.Thread(target=self._caption_loop, daemon=True, name="caption-loop").start()
+            else:
+                # Feed mic levels to the popup waveform while recording
+                if not self._mic_loop_running.is_set():
+                    self._mic_loop_running.set()
+                    threading.Thread(target=self._mic_level_loop, daemon=True).start()
         elif state == AppState.PROCESSING:
             self.popup.show_status(
                 "Transcribing…",
@@ -698,6 +743,7 @@ class WhisperFlowApp:
             )
         elif state == AppState.IDLE:
             self._mic_loop_running.clear()
+            self._caption_loop_running.clear()
             if not self.popup.is_user_facing:
                 self.popup.hide()
 
@@ -730,6 +776,70 @@ class WhisperFlowApp:
         self._mic_loop_running.clear()
         self._mic_level_smooth = 0.0
         self.popup.update_mic_level(0.0)
+
+    def _ensure_caption_model(self) -> None:
+        """Lazily build + preload the dedicated tiny.en caption model (once)."""
+        with self._caption_model_lock:
+            if self.caption_transcriber is not None:
+                return
+            # tiny.en (not base.en) so the extra concurrent decode is ~1/4 the
+            # cost and cannot starve CPU during recording. beam_size=1 = greedy.
+            self.caption_transcriber = Transcriber(
+                model_size="tiny.en", beam_size=1,
+                vad_speech_pad_ms=30, min_silence_duration_ms=100,
+                cpu_threads=2, auto_punctuate=False,
+            )
+        threading.Thread(
+            target=self.caption_transcriber.load_model,
+            daemon=True, name="caption-model-preload",
+        ).start()
+
+    def _caption_loop(self) -> None:
+        """Show live captions of what the user is saying while recording.
+
+        Mirrors _mic_level_loop: a daemon gated by _caption_loop_running. Each
+        tick re-transcribes the recent tail of the audio buffer with the
+        dedicated tiny.en model and pushes the text to the popup. It NEVER
+        injects, NEVER calls _update_context, and NEVER touches stream state —
+        the post-stop injection pipeline is completely unaffected.
+        """
+        TICK_INTERVAL = 0.8
+        TAIL_SECONDS = 8.0
+        MIN_AUDIO_SECS = 0.4
+
+        transcriber = self.caption_transcriber
+        if transcriber is None:
+            return
+
+        # Wait for recording to actually begin (recorder.start runs in its own thread)
+        for _ in range(25):
+            if self.recorder.is_recording:
+                break
+            time.sleep(0.04)
+
+        while self.recorder.is_recording and self._caption_loop_running.is_set():
+            tick_start = time.time()
+            try:
+                audio = self.recorder.get_current_audio(max_seconds=TAIL_SECONDS)
+                rate = self.recorder.active_sample_rate
+                if audio is not None and len(audio) >= rate * MIN_AUDIO_SECS:
+                    text = transcriber.transcribe(
+                        audio, rate,
+                        context_words=self._get_context_words(),
+                        hotwords_str=self._get_hotwords(),
+                        blocking=False,  # never queue — skip the tick if busy
+                    ).strip()
+                    if text:
+                        self.popup.update_caption(text)
+            except Exception as e:
+                print(f"[Caption] Tick error: {e}")
+
+            elapsed = time.time() - tick_start
+            remaining = TICK_INTERVAL - elapsed
+            if remaining > 0:
+                self._caption_loop_running.wait(remaining)
+
+        self._caption_loop_running.clear()
 
     # ------------------------------------------------------------------
     # Helpers
@@ -1223,49 +1333,117 @@ def _ensure_single_instance() -> None:
     _SINGLETON_MUTEX = mutex
 
 
+TASK_NAME = "FTC Whisper"
+
+
+def _app_data_dir() -> str:
+    """Stable per-user data dir (logs + the canonical installed exe copy)."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(
+        os.path.expanduser("~"), "AppData", "Local"
+    )
+    d = os.path.join(base, "FTC Whisper")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    return d
+
+
+def _startup_log_path() -> str:
+    return os.path.join(_app_data_dir(), "startup-error.log")
+
+
+def _stable_exe_path() -> str:
+    return os.path.join(_app_data_dir(), "FTC Whisper.exe")
+
+
+def _ensure_installed_copy() -> str:
+    """
+    Frozen builds only: keep a canonical copy of the exe at a STABLE path
+    (%LOCALAPPDATA%\\FTC Whisper) and return that path.
+
+    Auto-launch must never point at the volatile location the user happened to
+    double-click from (Downloads, a temp dir, a USB stick). If the running exe
+    lives elsewhere, copy it to the stable location (refreshing it when the
+    running exe is newer, e.g. right after an update). Returns the current exe
+    path if anything goes wrong, so registration still works.
+    """
+    if not getattr(sys, "frozen", False):
+        return sys.executable
+
+    import shutil
+
+    current = sys.executable
+    target = _stable_exe_path()
+    try:
+        if os.path.normcase(os.path.abspath(current)) == os.path.normcase(target):
+            return target  # already running from the stable copy
+        needs_copy = (not os.path.exists(target)) or (
+            os.path.getmtime(current) > os.path.getmtime(target)
+        )
+        if needs_copy:
+            shutil.copy2(current, target)
+            print(f"[App] Installed canonical copy at {target}")
+        return target
+    except Exception as e:
+        print(f"[App] Could not stage stable exe copy ({e}); using current path.")
+        return current
+
+
+def _startup_target() -> str:
+    """The path (frozen) used by every auto-launch mechanism — always stable."""
+    if getattr(sys, "frozen", False):
+        return _ensure_installed_copy()
+    return os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+
+
 def _ensure_startup_task() -> None:
     """
-    Register FTC Whisper as a Task Scheduler logon task.
+    Register FTC Whisper as a Task Scheduler logon task pointing at the STABLE
+    exe path, then reconcile away every legacy/duplicate launcher so exactly one
+    auto-start mechanism exists (no boot-time double-launch race).
 
-    Task Scheduler is preferred over the HKCU Run registry key because:
-      - Tasks run earlier in the login sequence (before most tray apps)
-      - Not blocked by Windows Installer Detection (no UAC elevation prompt)
-      - We can set above-normal priority so Whisper loads before other startup apps
-      - More reliable — the scheduler retries on failure
-
-    Falls back to the registry key if schtasks is unavailable.
+    Falls back to the registry Run key only if schtasks is unavailable.
     """
     import subprocess
 
-    TASK_NAME = "FTC Whisper"
-
-    if getattr(sys, "frozen", False):
-        exe_cmd = f'"{sys.executable}"'
-    else:
-        pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-        script  = os.path.abspath(__file__)
-        exe_cmd = f'"{pythonw}" "{script}"'
+    target = _startup_target()
+    script = "" if getattr(sys, "frozen", False) else os.path.abspath(__file__)
+    exe_cmd = f'"{target}"' + (f' "{script}"' if script else "")
 
     _NO_WIN = subprocess.CREATE_NO_WINDOW
 
-    # Check if the task already exists and points to the right exe
+    # Re-register if the task is missing OR no longer points at the stable path.
+    # (The old check accepted any task that merely mentioned the exe substring,
+    # so it never repaired a task pointing at a stale/Downloads path.)
     try:
         result = subprocess.run(
-            ["schtasks", "/query", "/tn", TASK_NAME, "/fo", "LIST"],
+            ["schtasks", "/query", "/tn", TASK_NAME, "/fo", "LIST", "/v"],
             capture_output=True, text=True, creationflags=_NO_WIN,
         )
-        if result.returncode == 0 and sys.executable.lower() in result.stdout.lower():
-            return  # already registered correctly
+        if result.returncode == 0 and os.path.normcase(target) in os.path.normcase(result.stdout):
+            # Re-register if the task was created with the old below-normal priority (6).
+            # Priority 4 = above-normal in the Task Scheduler scale (0=highest, 10=lowest).
+            if "<Priority>4</Priority>" in result.stdout or "Priority: 4" in result.stdout:
+                _reconcile_legacy_launchers(task_ok=True)
+                return  # already correct
+            # Fall through to re-register with the correct priority.
     except Exception:
         pass
 
-    # Create / overwrite the task — ONLOGON, current user only, no elevation needed
+    user = os.environ.get("USERNAME", "")
+    domain = os.environ.get("USERDOMAIN", "")
+    user_id = f"{domain}\\{user}" if domain and user else user
+
+    arguments = "" if getattr(sys, "frozen", False) else f"<Arguments>{script}</Arguments>"
+
+    # Create / overwrite the task — ONLOGON, current user, no elevation needed
     xml = f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers>
     <LogonTrigger>
       <Enabled>true</Enabled>
-      <UserId>{os.environ.get("USERNAME", "")}</UserId>
+      <UserId>{user_id}</UserId>
     </LogonTrigger>
   </Triggers>
   <Principals>
@@ -1279,12 +1457,16 @@ def _ensure_startup_task() -> None:
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <Priority>6</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+    <Priority>4</Priority>
   </Settings>
   <Actions>
     <Exec>
-      <Command>{sys.executable if getattr(sys, "frozen", False) else os.path.join(os.path.dirname(sys.executable), "pythonw.exe")}</Command>
-      {"" if getattr(sys, "frozen", False) else f"<Arguments>{os.path.abspath(__file__)}</Arguments>"}
+      <Command>{target}</Command>
+      {arguments}
     </Exec>
   </Actions>
 </Task>"""
@@ -1305,12 +1487,55 @@ def _ensure_startup_task() -> None:
 
         if result.returncode == 0:
             print(f"[App] Startup task registered (Task Scheduler): {exe_cmd}")
+            _reconcile_legacy_launchers(task_ok=True)
         else:
             raise RuntimeError(result.stderr.strip())
 
     except Exception as e:
         print(f"[App] Task Scheduler registration failed ({e}), falling back to registry")
         _ensure_startup_registry_fallback()
+
+
+def _reconcile_legacy_launchers(task_ok: bool) -> None:
+    """
+    Remove every competing/legacy auto-start entry so there is ONE source of
+    truth. When the Task Scheduler task is healthy this deletes the HKCU\\Run
+    fallback value and any stale Startup-folder shortcuts (current + historical
+    names) that older versions created — these were racing the task at boot and
+    one pointed at a path that no longer exists.
+    """
+    if not task_ok:
+        return
+
+    # 1. HKCU Run fallback value
+    try:
+        import winreg
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            0, winreg.KEY_SET_VALUE,
+        ) as k:
+            try:
+                winreg.DeleteValue(k, "FTC Whisper")
+                print("[App] Removed duplicate HKCU\\Run launcher.")
+            except FileNotFoundError:
+                pass
+    except Exception as e:
+        print(f"[App] Could not clean Run key: {e}")
+
+    # 2. Stale Startup-folder shortcuts (current + historical names)
+    try:
+        startup_dir = os.path.join(
+            os.environ.get("APPDATA", ""),
+            r"Microsoft\Windows\Start Menu\Programs\Startup",
+        )
+        for name in ("FTC Whisper.lnk", "FTC Transcribe.lnk"):
+            lnk = os.path.join(startup_dir, name)
+            if os.path.exists(lnk):
+                os.remove(lnk)
+                print(f"[App] Removed stale Startup shortcut: {name}")
+    except Exception as e:
+        print(f"[App] Could not clean Startup folder: {e}")
 
 
 def _register_url_protocol() -> None:
@@ -1320,12 +1545,12 @@ def _register_url_protocol() -> None:
     """
     import winreg
 
+    target = _startup_target()
     if getattr(sys, "frozen", False):
-        cmd = f'"{sys.executable}" "%1"'
+        cmd = f'"{target}" "%1"'
     else:
-        pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-        script  = os.path.abspath(__file__)
-        cmd     = f'"{pythonw}" "{script}" "%1"'
+        script = os.path.abspath(__file__)
+        cmd    = f'"{target}" "{script}" "%1"'
 
     try:
         base = r"Software\Classes\ftcwhisper"
@@ -1346,14 +1571,12 @@ def _ensure_startup_registry_fallback() -> None:
     RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
     VALUE   = "FTC Whisper"
 
+    target = _startup_target()
     if getattr(sys, "frozen", False):
-        exe = sys.executable
+        cmd = f'"{target}"'
     else:
-        pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-        script  = os.path.abspath(__file__)
-        exe = f'"{pythonw}" "{script}"'
-
-    cmd = f'"{exe}"' if not exe.startswith('"') else exe
+        script = os.path.abspath(__file__)
+        cmd = f'"{target}" "{script}"'
 
     try:
         with winreg.OpenKey(
@@ -1371,7 +1594,66 @@ def _ensure_startup_registry_fallback() -> None:
         print(f"[App] Could not set startup registry: {e}")
 
 
+def _log_startup_error(exc: BaseException) -> None:
+    """Append an uncaught startup exception to a log file next to the app data.
+
+    The frozen build is console=False, so a launch-then-crash (e.g. when the
+    Task Scheduler logon task fires at boot) is otherwise completely invisible
+    and reports only a non-zero task result. This makes 'launched but died'
+    diagnosable.
+    """
+    import traceback
+    try:
+        with open(_startup_log_path(), "a", encoding="utf-8") as f:
+            f.write("=" * 60 + "\n")
+            f.write(f"FTC Whisper {APP_VERSION} startup crash\n")
+            f.write(f"argv={sys.argv} exe={sys.executable}\n")
+            f.write(traceback.format_exc() if exc else "")
+            f.write("\n")
+    except Exception:
+        pass
+
+
+def _thread_excepthook(args) -> None:
+    """Log uncaught exceptions from ANY daemon thread.
+
+    Pipeline work (the _upgrade() upgrade pass, _mic_level_loop, caption loop,
+    Supabase logging) all run in daemon threads. In the frozen console=False
+    build an exception that escapes their inner try-blocks otherwise vanishes
+    with no trace, leaving the app silently degraded. Route them to the same
+    log file so failures are diagnosable.
+    """
+    import traceback
+    if args.exc_type is SystemExit:
+        return
+    try:
+        with open(_startup_log_path(), "a", encoding="utf-8") as f:
+            f.write("-" * 60 + "\n")
+            f.write(f"Uncaught exception in thread {args.thread.name if args.thread else '?'}\n")
+            f.write("".join(traceback.format_exception(
+                args.exc_type, args.exc_value, args.exc_traceback)))
+            f.write("\n")
+    except Exception:
+        pass
+    # Still print so it shows in a console/source run.
+    print(f"[App] Uncaught thread exception in {args.thread.name if args.thread else '?'}: {args.exc_value}")
+
+
 def main() -> None:
+    try:
+        threading.excepthook = _thread_excepthook
+    except Exception:
+        pass
+    try:
+        _main()
+    except SystemExit:
+        raise
+    except BaseException as e:
+        _log_startup_error(e)
+        raise
+
+
+def _main() -> None:
     if sys.platform == "win32":
         _ensure_single_instance()
         # Run in background — schtasks can be slow on first launch and there's
@@ -1380,16 +1662,7 @@ def main() -> None:
             target=_ensure_startup_task, daemon=True, name="startup-task"
         ).start()
         threading.Thread(target=_register_url_protocol, daemon=True, name="url-protocol").start()
-        # Boost process to above-normal priority so Whisper model loads
-        # faster and hotkey response isn't delayed by competing startup apps.
-        try:
-            ABOVE_NORMAL_PRIORITY_CLASS = 0x00008000
-            ctypes.windll.kernel32.SetPriorityClass(
-                ctypes.windll.kernel32.GetCurrentProcess(),
-                ABOVE_NORMAL_PRIORITY_CLASS,
-            )
-        except Exception:
-            pass
+        # Priority already boosted to ABOVE_NORMAL at module import time (top of file).
         try:
             if not ctypes.windll.shell32.IsUserAnAdmin():
                 print(

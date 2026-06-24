@@ -1646,6 +1646,34 @@ class AppWindow:
                  fg=C["subtext"], bg=C["surface"],
                  font=("Segoe UI", 8), anchor="w").pack(anchor="w")
 
+        # ── Live captions ─────────────────────────────────────────────────────
+        cap_card = self._card(parent, margin=(0, 4))
+        cap_row = tk.Frame(cap_card, bg=C["surface"])
+        cap_row.pack(fill="x")
+
+        current_caps = bool(getattr(cfg, "live_captions", False) if cfg else False)
+        caps_var = tk.BooleanVar(value=current_caps)
+
+        def _on_caps_toggle(v: bool):
+            caps_var.set(v)
+            if self._on_settings_change:
+                self._on_settings_change("live_captions", v)
+
+        caps_pill = TogglePill(
+            cap_row, value=current_caps, bg=C["surface"],
+            command=_on_caps_toggle,
+        )
+        caps_pill.pack(side="right")
+
+        caps_col = tk.Frame(cap_row, bg=C["surface"])
+        caps_col.pack(side="left", fill="x", expand=True)
+        tk.Label(caps_col, text="Live Captions",
+                 fg=C["text"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(anchor="w")
+        tk.Label(caps_col, text="Show the words you're saying in real time (replaces the waveform bar while recording)",
+                 fg=C["subtext"], bg=C["surface"],
+                 font=("Segoe UI", 8), anchor="w", justify="left").pack(anchor="w")
+
         # ── Version / update card ─────────────────────────────────────────────
         ver_card = self._card(parent, margin=(0, 4))
         ver_row = tk.Frame(ver_card, bg=C["surface"])
