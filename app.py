@@ -137,18 +137,14 @@ class WhisperFlowApp:
         self._mic_level_smooth = 0.0
 
         # ── Live captions ──────────────────────────────────────────────
-        # A SEPARATE tiny.en model with its own lock, used purely to show what
-        # the user is saying as they speak. It is never on the injection path,
-        # never shares fast_transcriber's lock, and never writes _context_deque —
-        # so the final injected transcription is byte-for-byte unchanged whether
+        # Captions reuse the already-loaded fast model (base.en) — no extra
+        # model download/load to fail on. Caption ticks always use blocking=False
+        # so they NEVER queue ahead of the final injection transcription, and the
+        # caption loop never injects, never calls _update_context, and never
+        # touches stream state — so the final injected text is unchanged whether
         # captions are on or off (accuracy > speed, preserved structurally).
-        # Lazy: not built or loaded until the user first enables the setting, so
-        # users who never use it pay zero startup/memory cost.
-        self.caption_transcriber: Transcriber | None = None
         self._caption_loop_running = threading.Event()
-        self._caption_model_lock = threading.Lock()
-        if getattr(config, "live_captions", False):
-            self._ensure_caption_model()
+        self._caption_thread: threading.Thread | None = None
 
         # Rolling context: last ~30 words from recent transcriptions fed into Whisper initial_prompt
         self._context_deque: deque = deque(maxlen=150)
@@ -325,11 +321,12 @@ class WhisperFlowApp:
             self.transcriber.auto_punctuate = bool(value)
             self.fast_transcriber.auto_punctuate = bool(value)
         elif key == "live_captions":
-            # Live update, no restart. On first enable, lazily build + preload the
-            # tiny.en caption model so the very next recording can show captions.
+            # Live update, no restart. Captions reuse the already-loaded fast
+            # model, so there's nothing to build — the next recording picks it up.
             self.config.live_captions = bool(value)
-            if value:
-                self._ensure_caption_model()
+        elif key == "inject_method":
+            # Injector is built once; update its strategy in place (whitelist-guarded).
+            self.injector.method = value if value in {"clipboard", "keystrokes", "auto"} else "clipboard"
         elif key == "mode":
             if self.hotkey_manager.state == AppState.RECORDING:
                 self._on_cancel_recording()
@@ -379,6 +376,13 @@ class WhisperFlowApp:
 
     def _on_stop_recording(self) -> None:
         self._cancel_recording_timer()
+        # Stop the live-caption loop and wait for any in-flight tick to finish, so
+        # no caption tick is still holding the fast model's lock when the final
+        # (blocking) injection pass needs it. Mirrors the streaming-thread join.
+        self._caption_loop_running.clear()
+        _ct = self._caption_thread
+        if _ct is not None and _ct.is_alive():
+            _ct.join(timeout=0.5)
         # Stop streaming loop and capture its final state before anything else
         self._stream_stop_event.set()
         _st = self._stream_thread
@@ -475,65 +479,72 @@ class WhisperFlowApp:
             return
 
         # ── Injection — isolated so a failure never prevents the popup ──────────
-        self._focus_window(hwnd)
-
-        # Release modifier keys BEFORE the browser focus click so Chrome never
-        # receives a spurious Alt key-up that would activate its menu bar and
-        # steal focus away from the search/input element we're about to click.
-        _release_modifiers()
-
-        # Browser windows (ChatGPT, Gmail, Outlook web, etc.) — Win32
-        # SetForegroundWindow restores the Chrome/Firefox Win32 focus but does
-        # NOT restore the JS/DOM focus of the contenteditable or ProseMirror
-        # input. Simulate a click at the recording-start cursor position to
-        # re-establish the browser's internal focus before Ctrl+V.
-        _BROWSER_PREFIXES = ("Chrome_WidgetWin_", "Mozilla", "CEF-")
-        _BROWSER_EXACT = {
-            "Chrome_WidgetWin_1",
-            "MozillaWindowClass",
-            "MozillaDialogClass",
-            "Chrome_RenderWidgetHostHWND",
-        }
-        # Only click to restore DOM focus when streaming hasn't already injected text.
-        # If streaming injected words the cursor is already positioned correctly —
-        # clicking at the recording-start position would move it backward and cause
-        # the final delta to land mid-sentence.
-        if _stream_count == 0:
-            try:
-                cls = self._get_window_class(hwnd)
-                if cls and (
-                    cls in _BROWSER_EXACT
-                    or any(cls.startswith(p) for p in _BROWSER_PREFIXES)
-                ):
-                    self._click_to_restore_focus(
-                        self._rec_cursor_x, self._rec_cursor_y, hwnd
-                    )
-            except Exception as e:
-                print(f"[App] Browser focus click error: {e}")
-
+        # Whole block in try/finally: even if focus/release/inject/feedback throw,
+        # set_idle() ALWAYS fires, so the "Transcribing…" pill is never orphaned
+        # on screen (it hides via the is_user_facing guard in _on_state_change).
         result = False
         try:
-            if _inject_text:
-                _text_to_inject = _inject_text
-                if getattr(self.config, "trailing_space", False):
-                    _text_to_inject += " "
-                print(f"[App] Injecting delta: {len(_text_to_inject)} chars")
-                # Modifiers already released above — skip the second release
-                result = self.injector.inject(_text_to_inject, release_mods=False)
-                print(f"[App] Inject result: {result}")
-            elif _stream_count > 0:
-                result = True  # streaming already injected successfully
+            self._focus_window(hwnd)
+
+            # Release modifier keys BEFORE the browser focus click so Chrome never
+            # receives a spurious Alt key-up that would activate its menu bar and
+            # steal focus away from the search/input element we're about to click.
+            _release_modifiers()
+
+            # Browser windows (ChatGPT, Gmail, Outlook web, etc.) — Win32
+            # SetForegroundWindow restores the Chrome/Firefox Win32 focus but does
+            # NOT restore the JS/DOM focus of the contenteditable or ProseMirror
+            # input. Simulate a click at the recording-start cursor position to
+            # re-establish the browser's internal focus before Ctrl+V.
+            _BROWSER_PREFIXES = ("Chrome_WidgetWin_", "Mozilla", "CEF-")
+            _BROWSER_EXACT = {
+                "Chrome_WidgetWin_1",
+                "MozillaWindowClass",
+                "MozillaDialogClass",
+                "Chrome_RenderWidgetHostHWND",
+            }
+            # Only click to restore DOM focus when streaming hasn't already injected text.
+            # If streaming injected words the cursor is already positioned correctly —
+            # clicking at the recording-start position would move it backward and cause
+            # the final delta to land mid-sentence.
+            if _stream_count == 0:
+                try:
+                    cls = self._get_window_class(hwnd)
+                    if cls and (
+                        cls in _BROWSER_EXACT
+                        or any(cls.startswith(p) for p in _BROWSER_PREFIXES)
+                    ):
+                        self._click_to_restore_focus(
+                            self._rec_cursor_x, self._rec_cursor_y, hwnd
+                        )
+                except Exception as e:
+                    print(f"[App] Browser focus click error: {e}")
+
+            try:
+                if _inject_text:
+                    _text_to_inject = _inject_text
+                    if getattr(self.config, "trailing_space", False):
+                        _text_to_inject += " "
+                    print(f"[App] Injecting delta: {len(_text_to_inject)} chars")
+                    # Modifiers already released above — skip the second release
+                    result = self.injector.inject(_text_to_inject, release_mods=False)
+                    print(f"[App] Inject result: {result}")
+                elif _stream_count > 0:
+                    result = True  # streaming already injected successfully
+            except Exception as e:
+                print(f"[App] Injection error (popup will still appear): {e}")
+
+            if result and getattr(self.config, "auto_enter", False):
+                import keyboard as kb
+                time.sleep(0.05)
+                kb.send("enter")
+
+            self.feedback.transcription_complete(transcribed_text)
+            threading.Thread(target=self.db.log_transcription, args=(transcribed_text,), daemon=True).start()
         except Exception as e:
-            print(f"[App] Injection error (popup will still appear): {e}")
-
-        if result and getattr(self.config, "auto_enter", False):
-            import keyboard as kb
-            time.sleep(0.05)
-            kb.send("enter")
-
-        self.feedback.transcription_complete(transcribed_text)
-        self.hotkey_manager.set_idle()
-        threading.Thread(target=self.db.log_transcription, args=(transcribed_text,), daemon=True).start()
+            print(f"[App] Finalize error (popup will still appear): {e}")
+        finally:
+            self.hotkey_manager.set_idle()
 
         # ── Popup always shown — works as manual-insert fallback if inject failed ─
         _undo_n = max(1, _total_inject_count)
@@ -712,8 +723,7 @@ class WhisperFlowApp:
             except Exception:
                 cx = getattr(self, "_rec_cursor_x", 0)
                 cy = getattr(self, "_rec_cursor_y", 0)
-            _captions_on = bool(getattr(self.config, "live_captions", False)) \
-                and self.caption_transcriber is not None
+            _captions_on = self._captions_active()
             self.popup.set_captions_enabled(_captions_on)
             self.popup.show_status(
                 "Recording",
@@ -727,13 +737,18 @@ class WhisperFlowApp:
                 # caption loop (the mic-level loop would fight it for the same pill).
                 if not self._caption_loop_running.is_set():
                     self._caption_loop_running.set()
-                    threading.Thread(target=self._caption_loop, daemon=True, name="caption-loop").start()
+                    self._caption_thread = threading.Thread(
+                        target=self._caption_loop, daemon=True, name="caption-loop")
+                    self._caption_thread.start()
             else:
                 # Feed mic levels to the popup waveform while recording
                 if not self._mic_loop_running.is_set():
                     self._mic_loop_running.set()
                     threading.Thread(target=self._mic_level_loop, daemon=True).start()
         elif state == AppState.PROCESSING:
+            # Stop captions immediately so no caption tick holds the fast model
+            # while the final injection pass needs it.
+            self._caption_loop_running.clear()
             self.popup.show_status(
                 "Transcribing…",
                 hwnd=self._recording_hwnd,
@@ -777,39 +792,26 @@ class WhisperFlowApp:
         self._mic_level_smooth = 0.0
         self.popup.update_mic_level(0.0)
 
-    def _ensure_caption_model(self) -> None:
-        """Lazily build + preload the dedicated tiny.en caption model (once)."""
-        with self._caption_model_lock:
-            if self.caption_transcriber is not None:
-                return
-            # tiny.en (not base.en) so the extra concurrent decode is ~1/4 the
-            # cost and cannot starve CPU during recording. beam_size=1 = greedy.
-            self.caption_transcriber = Transcriber(
-                model_size="tiny.en", beam_size=1,
-                vad_speech_pad_ms=30, min_silence_duration_ms=100,
-                cpu_threads=2, auto_punctuate=False,
-            )
-        threading.Thread(
-            target=self.caption_transcriber.load_model,
-            daemon=True, name="caption-model-preload",
-        ).start()
+    def _captions_active(self) -> bool:
+        """True only when live captions are enabled AND the fast model is loaded.
+        If the model isn't ready yet we fall back to the waveform for that
+        recording so the user always gets visual feedback (never a blank bar)."""
+        return bool(getattr(self.config, "live_captions", False)) \
+            and self.fast_transcriber.is_loaded
 
     def _caption_loop(self) -> None:
         """Show live captions of what the user is saying while recording.
 
         Mirrors _mic_level_loop: a daemon gated by _caption_loop_running. Each
-        tick re-transcribes the recent tail of the audio buffer with the
-        dedicated tiny.en model and pushes the text to the popup. It NEVER
-        injects, NEVER calls _update_context, and NEVER touches stream state —
-        the post-stop injection pipeline is completely unaffected.
+        tick re-transcribes the recent tail of the audio buffer with the already
+        -loaded fast model (blocking=False, so it never queues ahead of the final
+        injection pass) and pushes the text to the popup. It NEVER injects, NEVER
+        calls _update_context, and NEVER touches stream state — the post-stop
+        injection pipeline is completely unaffected.
         """
-        TICK_INTERVAL = 0.8
+        TICK_INTERVAL = 0.7
         TAIL_SECONDS = 8.0
         MIN_AUDIO_SECS = 0.4
-
-        transcriber = self.caption_transcriber
-        if transcriber is None:
-            return
 
         # Wait for recording to actually begin (recorder.start runs in its own thread)
         for _ in range(25):
@@ -817,19 +819,21 @@ class WhisperFlowApp:
                 break
             time.sleep(0.04)
 
+        produced_any = False
         while self.recorder.is_recording and self._caption_loop_running.is_set():
             tick_start = time.time()
             try:
                 audio = self.recorder.get_current_audio(max_seconds=TAIL_SECONDS)
                 rate = self.recorder.active_sample_rate
                 if audio is not None and len(audio) >= rate * MIN_AUDIO_SECS:
-                    text = transcriber.transcribe(
+                    text = self.fast_transcriber.transcribe(
                         audio, rate,
                         context_words=self._get_context_words(),
                         hotwords_str=self._get_hotwords(),
-                        blocking=False,  # never queue — skip the tick if busy
+                        blocking=False,  # never queue — skip the tick if model busy
                     ).strip()
                     if text:
+                        produced_any = True
                         self.popup.update_caption(text)
             except Exception as e:
                 print(f"[Caption] Tick error: {e}")
@@ -840,6 +844,8 @@ class WhisperFlowApp:
                 self._caption_loop_running.wait(remaining)
 
         self._caption_loop_running.clear()
+        if not produced_any:
+            print("[Caption] loop ended with no caption text produced")
 
     # ------------------------------------------------------------------
     # Helpers

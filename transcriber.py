@@ -143,8 +143,10 @@ class Transcriber:
              context_words: str = "", hotwords_str: str = "") -> str:
         is_en_model = self.model_size.endswith(".en")
         base_prompt = "Professional business conversation. Clear dictation."
-        vocab_hint = hotwords_str.replace(",", " ").strip() if hotwords_str else ""
-        parts = [p for p in [context_words, vocab_hint, base_prompt] if p]
+        # Custom vocabulary is passed via the dedicated `hotwords=` param below;
+        # do NOT also flatten it into initial_prompt — that polluted the prompt
+        # with comma-stripped term soup on every call and hurt accuracy.
+        parts = [p for p in [context_words, base_prompt] if p]
         prompt = " ".join(parts)
         segments, _ = self._model.transcribe(
             audio,

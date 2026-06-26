@@ -168,8 +168,12 @@ def main() -> None:
     _banner("Creating desktop shortcut...")
     create_shortcut(icon)
 
-    _banner("Adding to Windows startup...")
-    add_to_startup()
+    # Auto-launch is now owned entirely by the running app (app.py
+    # _ensure_startup_task → Task Scheduler, with stable %LOCALAPPDATA% exe
+    # path and legacy-launcher reconciliation). The old Startup-folder shortcut
+    # pointed at venv\Scripts\pythonw.exe + app.py, which never exists for a
+    # user running the built exe, and competed with the task at boot.
+    # add_to_startup() intentionally no longer called.
 
     _banner("Registering browser launch protocol...")
     register_url_protocol()

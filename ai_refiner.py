@@ -208,7 +208,14 @@ class AIRefiner:
         result = self.refine(text, mode="context_fix")
         if result == text:
             return text
-        if len(result.split()) != len(text.split()):
-            print(f"[AIRefiner] context_fix rejected: word count changed {len(text.split())} -> {len(result.split())}, using original")
+        # Guard against the LLM adding/removing content, but tolerate small
+        # count shifts from legitimate corrections (contractions like
+        # "do not"->"don't", hyphenation, split/merged compounds). A strict
+        # equality check silently rejected valid fixes.
+        orig_n = len(text.split())
+        new_n = len(result.split())
+        tolerance = max(1, round(orig_n * 0.1))
+        if abs(new_n - orig_n) > tolerance:
+            print(f"[AIRefiner] context_fix rejected: word count changed {orig_n} -> {new_n} (tolerance {tolerance}), using original")
             return text
         return result

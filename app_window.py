@@ -1572,6 +1572,15 @@ class AppWindow:
                                relief="flat", font=("Segoe UI", 9), bd=6)
         vocab_entry.pack(fill="x", pady=(4, 0))
 
+        # Auto-save on blur/Enter (parity with the API-key fields) so the value
+        # isn't silently lost if the user edits it then closes the panel without
+        # clicking Save.
+        def _save_vocab(_e=None):
+            if self._on_settings_change:
+                self._on_settings_change("custom_vocabulary", vocab_var.get().strip())
+        vocab_entry.bind("<FocusOut>", _save_vocab)
+        vocab_entry.bind("<Return>", _save_vocab)
+
         # ── AI / API Keys ─────────────────────────────────────────────────────
         ai_card = self._card(parent, margin=(0, 8))
 
@@ -1673,6 +1682,79 @@ class AppWindow:
         tk.Label(caps_col, text="Show the words you're saying in real time (replaces the waveform bar while recording)",
                  fg=C["subtext"], bg=C["surface"],
                  font=("Segoe UI", 8), anchor="w", justify="left").pack(anchor="w")
+
+        # ── Behaviour toggles (auto_punctuate, trailing_space, auto_enter) ─────
+        def _toggle_card(key: str, title: str, subtext: str, default: bool):
+            card = self._card(parent, margin=(0, 4))
+            row = tk.Frame(card, bg=C["surface"]); row.pack(fill="x")
+            cur = bool(getattr(cfg, key, default) if cfg else default)
+            var = tk.BooleanVar(value=cur)
+            def _toggle(v: bool, _k=key, _v=var):
+                _v.set(v)
+                if self._on_settings_change:
+                    self._on_settings_change(_k, v)
+            TogglePill(row, value=cur, bg=C["surface"], command=_toggle).pack(side="right")
+            col = tk.Frame(row, bg=C["surface"]); col.pack(side="left", fill="x", expand=True)
+            tk.Label(col, text=title, fg=C["text"], bg=C["surface"],
+                     font=("Segoe UI", 9), anchor="w").pack(anchor="w")
+            tk.Label(col, text=subtext, fg=C["subtext"], bg=C["surface"],
+                     font=("Segoe UI", 8), anchor="w", justify="left").pack(anchor="w")
+
+        _toggle_card("auto_punctuate", "Auto Punctuation",
+                     "Add a trailing period when speech ends without ending punctuation", True)
+        _toggle_card("trailing_space", "Add Trailing Space",
+                     "Append a space after each injection (useful for mid-sentence dictation)", False)
+        _toggle_card("auto_enter", "Press Enter After Insert",
+                     "Send Enter after injecting (useful for chat / search boxes)", False)
+
+        # ── Injection method ──────────────────────────────────────────────────
+        inj_card = self._card(parent, margin=(0, 4))
+        inj_row = tk.Frame(inj_card, bg=C["surface"]); inj_row.pack(fill="x")
+        cur_inj = (getattr(cfg, "inject_method", "clipboard") if cfg else "clipboard") or "clipboard"
+        _INJ_OPTS = {"Clipboard (Ctrl+V)": "clipboard", "Keystrokes": "keystrokes", "Auto": "auto"}
+        _INJ_REV = {v: k for k, v in _INJ_OPTS.items()}
+        inj_var = tk.StringVar(value=_INJ_REV.get(cur_inj, "Clipboard (Ctrl+V)"))
+        def _on_inj_change(*_a):
+            if self._on_settings_change:
+                self._on_settings_change("inject_method", _INJ_OPTS.get(inj_var.get(), "clipboard"))
+        inj_var.trace_add("write", _on_inj_change)
+        inj_col = tk.Frame(inj_row, bg=C["surface"]); inj_col.pack(side="left", fill="x", expand=True)
+        tk.Label(inj_col, text="Injection Method", fg=C["text"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(anchor="w")
+        tk.Label(inj_col, text="How text is placed into the focused app (falls back automatically if the first fails)",
+                 fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 8), anchor="w", justify="left").pack(anchor="w")
+        tk.OptionMenu(inj_row, inj_var, *_INJ_OPTS.keys()).pack(side="right")
+
+        # ── Numeric limits (toggle_timeout, max_recording_duration) ───────────
+        def _numeric_card(key: str, title: str, subtext: str, default: int):
+            card = self._card(parent, margin=(0, 4))
+            row = tk.Frame(card, bg=C["surface"]); row.pack(fill="x")
+            cur = int(getattr(cfg, key, default) if cfg else default)
+            var = tk.StringVar(value=str(cur))
+            def _commit(_e=None, _k=key, _v=var):
+                raw = (_v.get() or "").strip()
+                try:
+                    n = max(0, int(raw or 0))
+                except ValueError:
+                    n = 0
+                _v.set(str(n))
+                if self._on_settings_change:
+                    self._on_settings_change(_k, n)
+            col = tk.Frame(row, bg=C["surface"]); col.pack(side="left", fill="x", expand=True)
+            tk.Label(col, text=title, fg=C["text"], bg=C["surface"],
+                     font=("Segoe UI", 9), anchor="w").pack(anchor="w")
+            tk.Label(col, text=subtext, fg=C["subtext"], bg=C["surface"],
+                     font=("Segoe UI", 8), anchor="w", justify="left").pack(anchor="w")
+            e = tk.Entry(row, textvariable=var, width=6, justify="center",
+                         bg=C["input_bg"], fg=C["text"], insertbackground=C["text"],
+                         relief="flat", highlightthickness=1, highlightbackground=C["divider"])
+            e.pack(side="right")
+            e.bind("<FocusOut>", _commit); e.bind("<Return>", _commit)
+
+        _numeric_card("toggle_timeout", "Toggle Auto-Stop (seconds)",
+                      "Auto-stop a toggle-mode recording after this many seconds (0 = never)", 0)
+        _numeric_card("max_recording_duration", "Max Recording (seconds)",
+                      "Hard cap on any recording length in seconds (0 = unlimited)", 0)
 
         # ── Version / update card ─────────────────────────────────────────────
         ver_card = self._card(parent, margin=(0, 4))

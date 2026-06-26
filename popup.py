@@ -69,6 +69,10 @@ BAR_MIN_H = 5
 CANVAS_W = NUM_BARS * (BAR_W + BAR_GAP) - BAR_GAP
 CANVAS_H = BAR_MAX_H + 6
 
+# How long the post-transcription icon badge stays before auto-dismissing, so it
+# never lingers on screen indefinitely.
+ICON_AUTO_DISMISS_SECS = 30.0
+
 
 def _apply_popup_corners(hwnd: int) -> None:
     """Apply Win11 DWM rounded corners — no GDI clipping, no black artifacts."""
@@ -114,6 +118,15 @@ class FloatingPopup:
         # Cursor position at last show_status call — used for monitor selection
         self._status_cx: int = 0
         self._status_cy: int = 0
+
+        # Watchdog: guarantees the popup is never left visible-but-empty/stuck.
+        # _last_activity is refreshed by the recording animation / caption ticks;
+        # _status_entered marks when the current status pill appeared.
+        self._last_activity: float = 0.0
+        self._status_entered: float = 0.0
+        self._icon_entered: float = 0.0
+        self._last_shown: float = 0.0  # when any mode last became visible (grace window)
+        self._watchdog_started: bool = False
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -174,6 +187,23 @@ class FloatingPopup:
     def update_mic_level(self, level: float) -> None:
         """Called from the audio thread with RMS level (0.0–1.0)."""
         self._mic_level = max(0.0, min(1.0, level))
+        self._last_activity = time.time()
+
+    def set_captions_enabled(self, enabled: bool) -> None:
+        """Toggle live-caption display mode (replaces the waveform when on).
+        Call before show_status() so the next recording renders the right bar."""
+        self._captions_enabled = bool(enabled)
+
+    def update_caption(self, text: str) -> None:
+        """Called from the caption loop (background thread) with live partial text.
+        Shows only the trailing words so the pill stays a stable, readable size."""
+        if not text:
+            return
+        words = text.split()
+        tail = " ".join(words[-12:])
+        self._last_activity = time.time()
+        if self.root:
+            self.root.after(0, lambda: self._caption_var.set(tail))
 
     def hide(self) -> None:
         if self.root:
@@ -222,6 +252,81 @@ class FloatingPopup:
         self._build_refinement_frame()
 
         self.root.bind("<Configure>", self._on_popup_configure)
+
+        self._start_watchdog()
+
+    def _start_watchdog(self) -> None:
+        if self._watchdog_started or not self.root:
+            return
+        self._watchdog_started = True
+        self.root.after(2000, self._watchdog)
+
+    def _watchdog(self) -> None:
+        """Safety net: never leave an empty/stuck box on screen.
+
+        A real recording animates the waveform (or ticks the caption timer)
+        every <100 ms, so _last_activity stays fresh; this only fires when the
+        animation has stopped but the pill is still up (a stuck/blank box).
+        Never touches the user-facing icon/refinement badges.
+        """
+        try:
+            now = time.time()
+
+            # Content-truth check FIRST: if the window is on screen but NO frame
+            # is packed, it's a contentless box no matter what _mode claims → hide.
+            # winfo_ismapped reflects this Toplevel's own shown/withdrawn state.
+            try:
+                viewable = bool(self.root.winfo_ismapped())
+            except Exception:
+                viewable = False
+            # Grace period: never act on a pill that JUST appeared — its frame
+            # may be packed but not yet mapped for one event-loop cycle.
+            shown_recently = (now - self._last_shown) < 4.0
+            if viewable and not shown_recently:
+                try:
+                    any_frame = any(
+                        f.winfo_ismapped()
+                        for f in (self._status_frame, self._icon_frame, self._refine_frame)
+                    )
+                except Exception:
+                    any_frame = True  # fail-safe: never hide on inspection error
+                if not any_frame:
+                    print("[Popup] Watchdog: visible window with no packed frame -> hiding")
+                    self._do_hide()
+                    if self.root:
+                        self.root.after(2000, self._watchdog)
+                    return
+
+            if self._mode == "status":
+                stuck_recording = (
+                    self._rec_start is not None and (now - self._last_activity) > 12.0
+                )
+                hung_transcribing = (
+                    self._rec_start is None and (now - self._status_entered) > 60.0
+                )
+                if stuck_recording or hung_transcribing:
+                    print(
+                        f"[Popup] Watchdog hiding stuck status pill "
+                        f"(recording={stuck_recording}, transcribing={hung_transcribing})"
+                    )
+                    self._do_hide()
+            elif self._mode == "icon":
+                # The post-transcription badge is a brief affordance — auto-dismiss
+                # it so it never sits on screen indefinitely (the user's complaint).
+                if self._icon_entered and (now - self._icon_entered) > ICON_AUTO_DISMISS_SECS:
+                    print("[Popup] Watchdog auto-dismissing lingering icon badge")
+                    self._do_hide()
+            elif self._mode is None:
+                # Mode says hidden but the window is somehow still on screen → re-hide.
+                try:
+                    if self.root.winfo_viewable():
+                        self.root.withdraw()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        if self.root:
+            self.root.after(2000, self._watchdog)
 
     def _set_no_activate(self, enabled: bool) -> None:
         """Enable or disable WS_EX_NOACTIVATE on the popup window."""
@@ -313,6 +418,22 @@ class FloatingPopup:
         # Packed at build time — always visible in the status frame
         self._status_label.pack(side="left")
 
+        # Live-caption label — REPLACES the waveform when live captions are on.
+        # Shows the last ~12 words of what the user is saying. Not packed here;
+        # packed on demand in _enter_status_mode.
+        self._captions_enabled = False
+        self._caption_var = tk.StringVar(value="")
+        self._caption_lbl = tk.Label(
+            f,
+            textvariable=self._caption_var,
+            fg=CP["text"],
+            bg=CP["bg"],
+            font=("Segoe UI", 11),
+            wraplength=360,
+            justify="left",
+            anchor="w",
+        )
+
         # Recording start time (for timer)
         self._rec_start: Optional[float] = None
 
@@ -351,6 +472,7 @@ class FloatingPopup:
         try:
             level = self._mic_level
             t     = time.time()
+            self._last_activity = t
             mid   = CANVAS_H // 2
 
             # Idle ceiling: bars oscillate up to 30 % of full height even in silence.
@@ -668,14 +790,29 @@ class FloatingPopup:
 
     def _enter_status_mode(self, text: str, recording: bool = False) -> None:
         self._set_no_activate(True)
+        self._status_entered = time.time()
+        self._last_activity = time.time()
+        self._last_shown = time.time()
         self._stop_waveform()
         self._hide_all_frames()
 
-        # Always remove timer/canvas from pack order first so we control placement
+        # Always remove timer/canvas/caption from pack order first so we control placement
         self._timer_lbl.pack_forget()
         self._wave_canvas.pack_forget()
+        self._caption_lbl.pack_forget()
 
-        if recording:
+        if recording and self._captions_enabled:
+            # Live-caption mode: timer | caption text | label. No waveform.
+            self._timer_var.set("00:00.0")
+            self._rec_start = time.time()
+            self._caption_var.set("Listening…")
+            self._timer_lbl.pack(side="left", before=self._status_label, padx=(0, 12))
+            self._caption_lbl.pack(side="left", before=self._status_label, padx=(0, 12))
+            self._status_label.configure(text="")
+            # The waveform loop normally drives the timer; in caption mode it's
+            # off, so run a lightweight ticker instead.
+            self.root.after(100, self._tick_caption_timer)
+        elif recording:
             # Correct order: timer | waveform | label
             self._draw_bars_initial()  # fresh bars every session
             self._timer_var.set("00:00.0")
@@ -687,6 +824,7 @@ class FloatingPopup:
         else:
             # Transcribing — just the label, no timer or waveform
             self._rec_start = None
+            self._caption_var.set("")
             self._status_label.configure(text=text)
 
         self._status_frame.pack()
@@ -695,6 +833,20 @@ class FloatingPopup:
         # Always position on the monitor where the cursor is
         self._reposition(self._status_cx, self._status_cy)
         self._show_no_activate()
+
+    def _tick_caption_timer(self) -> None:
+        """Advance the recording timer in live-caption mode (no waveform loop)."""
+        if self._mode != "status" or not self._captions_enabled or self._rec_start is None:
+            return
+        try:
+            elapsed = time.time() - self._rec_start
+            mins = int(elapsed) // 60
+            secs = elapsed % 60
+            self._timer_var.set(f"{mins:02d}:{secs:04.1f}")
+            self._last_activity = time.time()
+        except Exception:
+            pass
+        self.root.after(100, self._tick_caption_timer)
 
     def _start_waveform(self) -> None:
         self._waveform_running = True
@@ -724,12 +876,24 @@ class FloatingPopup:
         self._ai_status.pack_forget()
         self._icon_frame.pack()
         self._mode = "icon"
+        self._icon_entered = time.time()
+        self._last_shown = time.time()
         self._reposition(self._status_cx, self._status_cy)
         self._show_no_activate()
         if self._inserted_ok:
             self._register_space_dismiss()
         else:
             self._unregister_space_dismiss()
+        # Auto-dismiss the badge after a while so it never lingers on screen.
+        # Stamp-guarded so a newer popup isn't killed by an old timer.
+        self.root.after(
+            int(ICON_AUTO_DISMISS_SECS * 1000),
+            lambda s=self._icon_entered: self._auto_dismiss_icon(s),
+        )
+
+    def _auto_dismiss_icon(self, stamp: float) -> None:
+        if self._mode == "icon" and self._icon_entered == stamp:
+            self._do_hide()
 
     def _expand_to_panel(self) -> None:
         # Space should dismiss the small badge, but NOT the full refinement panel
@@ -737,11 +901,17 @@ class FloatingPopup:
         self._unregister_space_dismiss()
         # Remove WS_EX_NOACTIVATE so the Entry widget can receive keyboard focus
         self._set_no_activate(False)
+        # Pack the panel FIRST (and refresh its status after), so a failure in
+        # _refresh_insert_status can never strand a hidden-frames empty window.
         self._hide_all_frames()
         self._result_frame.pack_forget()
-        self._refresh_insert_status()
         self._refine_frame.pack()
         self._mode = "refinement"
+        self._last_shown = time.time()
+        try:
+            self._refresh_insert_status()
+        except Exception as e:
+            print(f"[Popup] _refresh_insert_status failed: {e}")
 
         # Show upgrade state if accurate model is still running or already done
         if self._upgrade_result:

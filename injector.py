@@ -51,6 +51,21 @@ _k32.GlobalUnlock.restype = ctypes.wintypes.BOOL
 _k32.GlobalFree.argtypes = [_HGLOBAL]
 _k32.GlobalFree.restype = _HGLOBAL
 
+# Declare return/arg types so we can actually trust PostMessageW / SendInput
+# results — without these ctypes assumes int and silent failures look like wins.
+_u32.PostMessageW.argtypes = [
+    ctypes.wintypes.HWND, ctypes.c_uint, ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM
+]
+_u32.PostMessageW.restype = ctypes.wintypes.BOOL
+_u32.SendInput.restype = ctypes.c_uint
+
+# ── Clipboard-restore race guard ──────────────────────────────────────────────
+# Every clipboard write bumps a generation counter. A delayed restore only fires
+# if no newer write happened in the meantime, so a stale restore thread can never
+# clobber a newer paste's clipboard contents.
+_clip_lock = threading.Lock()
+_clip_gen = 0
+
 
 # ── Win32 constants ───────────────────────────────────────────────────────────
 
@@ -58,6 +73,7 @@ _INPUT_KEYBOARD = 1
 _KEYEVENTF_UNICODE = 0x0004
 _KEYEVENTF_KEYUP = 0x0002
 _WM_CHAR = 0x0102
+_VK_RETURN = 0x0D
 
 # Window classes that use Chromium / Gecko rendering — prefer VK_PACKET
 BROWSER_CLASSES = frozenset(
@@ -180,15 +196,81 @@ def _get_focused_child(fg_hwnd: int) -> int:
     Return the focused child HWND inside the foreground window.
     Uses AttachThreadInput so GetFocus() returns the correct control
     (e.g. the text editor inside an Outlook compose window).
+
+    AttachThreadInput can legitimately fail (different desktop, elevated target,
+    timing). If it does, fall back to the foreground HWND rather than posting
+    WM_CHAR to whatever GetFocus() returns for our own thread (which would type
+    into the wrong window or nowhere).
     """
     u32 = ctypes.windll.user32
     k32 = ctypes.windll.kernel32
     fg_tid = u32.GetWindowThreadProcessId(fg_hwnd, None)
     our_tid = k32.GetCurrentThreadId()
-    u32.AttachThreadInput(our_tid, fg_tid, True)
-    focused = u32.GetFocus()
-    u32.AttachThreadInput(our_tid, fg_tid, False)
+    if fg_tid == our_tid:
+        return u32.GetFocus() or fg_hwnd
+    attached = bool(u32.AttachThreadInput(our_tid, fg_tid, True))
+    if not attached:
+        return fg_hwnd  # couldn't attach — safest target is the fg window itself
+    try:
+        focused = u32.GetFocus()
+    finally:
+        u32.AttachThreadInput(our_tid, fg_tid, False)
     return focused or fg_hwnd
+
+
+def foreground_is_elevated_blocked() -> bool:
+    """
+    True if the foreground window belongs to an elevated (higher integrity)
+    process while we are NOT elevated. In that case Windows UIPI silently drops
+    all our injected input — clipboard paste, SendInput, and WM_CHAR all fail
+    with no error. The caller uses this to warn the user instead of failing
+    silently ('Run FTC Whisper as administrator to type into elevated apps').
+    """
+    try:
+        u32 = ctypes.windll.user32
+        k32 = ctypes.windll.kernel32
+        adv = ctypes.windll.advapi32
+
+        # Are we elevated? If so, nothing is blocked.
+        if ctypes.windll.shell32.IsUserAnAdmin():
+            return False
+
+        hwnd = u32.GetForegroundWindow()
+        if not hwnd:
+            return False
+        pid = ctypes.wintypes.DWORD(0)
+        u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return False
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+        if not h:
+            # Access denied opening the process handle is itself a strong signal
+            # the target is higher-integrity than us.
+            return True
+        try:
+            TOKEN_QUERY = 0x0008
+            token = ctypes.wintypes.HANDLE()
+            if not k32.OpenProcessToken(h, TOKEN_QUERY, ctypes.byref(token)):
+                return False
+            try:
+                TokenElevation = 20
+                elevation = ctypes.wintypes.DWORD(0)
+                ret_len = ctypes.wintypes.DWORD(0)
+                if adv.GetTokenInformation(
+                    token, TokenElevation,
+                    ctypes.byref(elevation), ctypes.sizeof(elevation),
+                    ctypes.byref(ret_len),
+                ):
+                    return bool(elevation.value)
+            finally:
+                k32.CloseHandle(token)
+        finally:
+            k32.CloseHandle(h)
+    except Exception:
+        pass
+    return False
 
 
 # ── Injection methods ─────────────────────────────────────────────────────────
@@ -204,20 +286,37 @@ def _post_wm_char(text: str) -> bool:
     - Works while the hotkey modifiers (Alt, Ctrl) are still physically held
     - Handles surrogate pairs for emoji / extended Unicode
     """
-    u32 = ctypes.windll.user32
+    u32 = _u32
     fg = u32.GetForegroundWindow()
     if not fg:
         return False
     target = _get_focused_child(fg)
+    posted = 0
+    failed = 0
     for ch in text:
+        # Edit controls expect a carriage return (\r) for a line break; a raw
+        # \n is a control char that most native controls ignore or render wrong.
+        if ch == "\n":
+            ch = "\r"
         code = ord(ch)
         if code > 0xFFFF:
             code -= 0x10000
-            u32.PostMessageW(target, _WM_CHAR, 0xD800 | (code >> 10), 1)
-            u32.PostMessageW(target, _WM_CHAR, 0xDC00 | (code & 0x3FF), 1)
+            ok1 = u32.PostMessageW(target, _WM_CHAR, 0xD800 | (code >> 10), 1)
+            ok2 = u32.PostMessageW(target, _WM_CHAR, 0xDC00 | (code & 0x3FF), 1)
+            ok = bool(ok1) and bool(ok2)
         else:
-            u32.PostMessageW(target, _WM_CHAR, code, 1)
-    return True
+            ok = bool(u32.PostMessageW(target, _WM_CHAR, code, 1))
+        if ok:
+            posted += 1
+        else:
+            failed += 1
+    # Treat it as success only if at least one char posted and none failed.
+    # A target HWND that rejects WM_CHAR (PostMessage returns 0) now correctly
+    # reports failure so the caller can fall back instead of silently dropping text.
+    if posted and not failed:
+        return True
+    print(f"[Injector] WM_CHAR posted={posted} failed={failed} -> reporting failure")
+    return False
 
 
 def _send_unicode(text: str) -> bool:
@@ -231,6 +330,15 @@ def _send_unicode(text: str) -> bool:
 
     events: list[_Input] = []
     for ch in text:
+        if ch == "\n":
+            # Inject a real Enter keypress rather than a literal LF — web inputs
+            # and editors treat VK_RETURN as a newline but ignore a unicode \n.
+            events.append(_Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=_VK_RETURN)))
+            events.append(_Input(
+                type=_INPUT_KEYBOARD,
+                ki=_KbdInput(wVk=_VK_RETURN, dwFlags=_KEYEVENTF_KEYUP),
+            ))
+            continue
         code = ord(ch)
         if code > 0xFFFF:
             code -= 0x10000
@@ -421,13 +529,21 @@ class Injector:
     # ── Clipboard helpers ──────────────────────────────────────────────────────
 
     @staticmethod
-    def _clipboard_set(text: str) -> str:
+    def _clipboard_set(text: str, bump: bool = True) -> str:
         """
         Write *text* to the Windows clipboard via ctypes (no pyperclip dependency).
         Returns the previous clipboard text so the caller can restore it later,
         or '' if the previous content could not be read.
         Works for any text length without subprocess overhead.
+
+        bump=True advances the global clipboard generation so a delayed restore
+        from an earlier paste knows it has been superseded. Restores pass
+        bump=False so restoring does not itself look like a new paste.
         """
+        global _clip_gen
+        if bump:
+            with _clip_lock:
+                _clip_gen += 1
         CF_UNICODETEXT = 13
         GMEM_MOVEABLE = 0x0002
         # ── Read previous content ──
@@ -502,13 +618,17 @@ class Injector:
         return previous
 
     @staticmethod
-    def _clipboard_restore(original: str) -> None:
-        """Restore the clipboard to *original* after a short delay."""
+    def _clipboard_restore(original: str, gen: int) -> None:
+        """Restore the clipboard to *original* after a short delay, but only if
+        no newer paste has happened in the meantime (otherwise we'd clobber it)."""
 
         def _do():
             time.sleep(0.45)  # 0.45s: enough for slow Chrome tabs to process the paste
+            with _clip_lock:
+                if _clip_gen != gen:
+                    return  # a newer paste superseded us — leave its content alone
             try:
-                Injector._clipboard_set(original)
+                Injector._clipboard_set(original, bump=False)
             except Exception:
                 pass
 
@@ -527,6 +647,8 @@ class Injector:
             u32 = ctypes.windll.user32
 
             original = self._clipboard_set(text)
+            with _clip_lock:
+                my_gen = _clip_gen
             time.sleep(0.08)  # let clipboard settle
 
             # Release Alt if still held — prevents Paste Special in Office
@@ -558,10 +680,18 @@ class Injector:
                 ki=_KbdInput(wVk=VK_CTRL, dwFlags=_KEYEVENTF_KEYUP),
             )
             arr = (_Input * 4)(ctrl_dn, v_dn, v_up, ctrl_up)
-            u32.SendInput(4, arr, ctypes.sizeof(_Input))
+            sent = u32.SendInput(4, arr, ctypes.sizeof(_Input))
             time.sleep(0.08)  # let app process the paste before restoring clipboard
 
-            self._clipboard_restore(original)
+            self._clipboard_restore(original, my_gen)
+
+            if sent != 4:
+                # SendInput was blocked (commonly UIPI: the foreground window is
+                # elevated and we are not). The keystrokes never reached the app.
+                print(f"[Injector] Ctrl+V SendInput blocked (sent={sent}/4)")
+                if foreground_is_elevated_blocked():
+                    print("[Injector] Foreground window is elevated — run FTC Whisper as admin to type into it.")
+                return False
 
             print(f"[Injector] Clipboard paste {len(text)} chars.")
             return True
@@ -583,6 +713,8 @@ class Injector:
             u32 = ctypes.windll.user32
 
             original = self._clipboard_set(text)
+            with _clip_lock:
+                my_gen = _clip_gen
             time.sleep(0.08)
 
             ctrl_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL))
@@ -592,10 +724,13 @@ class Injector:
             shift_up = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_SHIFT, dwFlags=_KEYEVENTF_KEYUP))
             ctrl_up = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL, dwFlags=_KEYEVENTF_KEYUP))
             arr = (_Input * 6)(ctrl_dn, shift_dn, v_dn, v_up, shift_up, ctrl_up)
-            u32.SendInput(6, arr, ctypes.sizeof(_Input))
+            sent = u32.SendInput(6, arr, ctypes.sizeof(_Input))
             time.sleep(0.08)
 
-            self._clipboard_restore(original)
+            self._clipboard_restore(original, my_gen)
+            if sent != 6:
+                print(f"[Injector] Terminal Ctrl+Shift+V blocked (sent={sent}/6)")
+                return False
             print(f"[Injector] Terminal Ctrl+Shift+V paste {len(text)} chars.")
             return True
 

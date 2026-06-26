@@ -32,6 +32,11 @@ class Recorder:
         self._chunks: list[np.ndarray] = []
         self._stream: Optional[sd.InputStream] = None
         self._lock = threading.Lock()
+        # Guards stream open/close so a concurrent start()/stop()/monitor can
+        # never double-close or leak the underlying PortAudio stream. Separate
+        # from _lock (which the high-frequency audio callback holds) so opening
+        # a stream never blocks — or is blocked by — the callback.
+        self._stream_lifecycle_lock = threading.Lock()
         self._recording = False
         self._active_device_index: Optional[int] = None
         self._active_device_name: str = ""
@@ -77,8 +82,9 @@ class Recorder:
             self._last_peak = 0.0
 
         try:
-            self._stream = self._open_best_input_stream()
-            self._stream.start()
+            with self._stream_lifecycle_lock:
+                self._stream = self._open_best_input_stream()
+                self._stream.start()
             where = self._active_device_name or "default input"
             print(
                 f"[Recorder] Recording started ({where}, {self.active_sample_rate} Hz)."
@@ -114,14 +120,15 @@ class Recorder:
 
         self._recording = False
 
-        if self._stream is not None:
+        with self._stream_lifecycle_lock:
+            stream = self._stream
+            self._stream = None
+        if stream is not None:
             try:
-                self._stream.stop()
-                self._stream.close()
+                stream.stop()
+                stream.close()
             except Exception as e:
                 print(f"[Recorder] Error closing stream: {e}")
-            finally:
-                self._stream = None
 
         with self._lock:
             if not self._chunks:

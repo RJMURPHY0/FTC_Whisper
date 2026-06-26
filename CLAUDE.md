@@ -14,7 +14,7 @@ or double-click `run.bat`.
 ```
 install.bat
 ```
-Creates `venv\`, installs `requirements.txt`, runs `installer.py` (creates config, desktop shortcut, Task Scheduler entry).
+Creates `venv\`, installs `requirements.txt`, runs `installer.py` (creates config, desktop shortcut, registers the `ftcwhisper://` URL protocol). Note: auto-launch is **not** set up by the installer — the running app registers it itself (see Auto-launch below).
 
 **Build the distributable exe:**
 ```
@@ -83,6 +83,14 @@ The popup is a borderless `tk.Toplevel` that stays `topmost` and never takes foc
 
 ### Update flow
 `updater.py` checks `https://api.github.com/repos/RJMURPHY0/FTC_Whisper/releases/latest` for an asset named `FTC-Whisper.exe`. If a newer version is found, `apply_update()` writes a detached batch script that waits for the running process to exit, copies the downloaded exe over itself, relaunches, then self-deletes.
+
+### Auto-launch (boot)
+The **running app** owns auto-launch, not the installer. On every launch `main()` spawns `_ensure_startup_task()` (daemon thread) which:
+1. For frozen builds, calls `_ensure_installed_copy()` to keep a canonical exe at the **stable** path `%LOCALAPPDATA%\FTC Whisper\FTC Whisper.exe` (so the logon task never points at the volatile location the user double-clicked from, e.g. Downloads).
+2. Registers a Task Scheduler logon task `FTC Whisper` pointing at that stable path, with a domain-qualified `UserId` and `RestartOnFailure`. The "already registered" check is strict — it re-registers if the task is missing or points anywhere other than the stable path.
+3. Calls `_reconcile_legacy_launchers()` to delete competing launchers (the `HKCU\...\Run` fallback value and stale Startup-folder shortcuts `FTC Whisper.lnk` / `FTC Transcribe.lnk`) so exactly one launcher exists — no boot-time double-launch race.
+
+`_ensure_startup_registry_fallback()` writes the `HKCU\Run` value only if `schtasks` is unavailable. Any uncaught exception during startup is written to `%LOCALAPPDATA%\FTC Whisper\startup-error.log` (via `_log_startup_error` and a global `threading.excepthook`), so a launch-then-crash in the `console=False` build is diagnosable instead of silent.
 
 ### Auth and Supabase
 `AuthManager` in `auth.py` handles Supabase email auth. Session tokens are encrypted on disk using Windows DPAPI — only readable by the same Windows user. `SupabaseLogger` in `supabase_client.py` does all DB writes fire-and-forget. Both are optional; the app works fully offline without them.
