@@ -457,21 +457,15 @@ class Injector:
             return self._terminal_paste(text)
 
         if _is_browser_class(cls) and not _is_game_class(cls):
-            # Short text (≤80 chars): VK_PACKET first — fires keyboard events that
-            # search bars, React inputs, and Electron inputs handle without DOM focus.
-            # Long text (>80 chars): clipboard first — more reliable for Google Docs,
-            # Gmail compose, and rich editors where 500+ SendInput events can be
-            # dropped or reordered by the browser's event queue.
-            if len(text) <= 80:
-                if self._direct_inject(text):
-                    return True
-                print("[Injector] Browser VK_PACKET failed -> clipboard fallback")
-                return self._clipboard_paste(text)
-            else:
-                if self._clipboard_paste(text):
-                    return True
-                print("[Injector] Browser clipboard failed -> VK_PACKET fallback")
-                return self._direct_inject(text)
+            # Clipboard paste (Ctrl+V) is the most reliable method for ALL browser
+            # inputs: search bars, React/Vue inputs, contenteditable, rich editors,
+            # and Electron apps. SendInput/VK_PACKET returns "success" even when
+            # Chrome discards the events due to uncertain DOM focus state — making
+            # it an unreliable primary path. Clipboard never has that problem.
+            if self._clipboard_paste(text):
+                return True
+            print("[Injector] Browser clipboard failed -> VK_PACKET fallback")
+            return self._direct_inject(text)
 
         # Non-browser: respect config-driven injection mode.
         # - clipboard  : most universal for office/web/chat apps

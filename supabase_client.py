@@ -4,6 +4,8 @@ Logs transcriptions and AI refinements. All calls are fire-and-forget
 on a background thread — a Supabase outage will never block the app.
 """
 
+import json
+import os
 import threading
 import datetime
 from queue import Queue, Full
@@ -11,6 +13,15 @@ from typing import Optional
 
 # Table name in Supabase
 _TABLE = "transcriptions"
+
+_local_history_lock = threading.Lock()
+
+
+def _local_history_path() -> str:
+    app_data = os.environ.get("APPDATA") or os.path.expanduser("~")
+    folder = os.path.join(app_data, "FTC Whisper")
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, "history.json")
 
 
 class SupabaseLogger:
@@ -49,6 +60,7 @@ class SupabaseLogger:
 
     def log_transcription(self, text: str) -> None:
         """Save a new transcription record."""
+        self._append_local(text)
         if not self._enabled:
             return
         payload = {
@@ -100,9 +112,10 @@ class SupabaseLogger:
         return result[0]
 
     def fetch_history(self, limit: int = 30) -> list:
-        """Fetch recent transcriptions (synchronous, 10 s timeout)."""
+        """Fetch recent transcriptions (synchronous, 10 s timeout).
+        Falls back to the local history file if Supabase is unavailable or empty."""
         if not self._enabled:
-            return []
+            return self._fetch_local(limit)
 
         result: list = [None]
         error: list = [None]
@@ -127,12 +140,12 @@ class SupabaseLogger:
         t.join(timeout=10.0)
 
         if t.is_alive():
-            print("[Supabase] Fetch history timed out")
-            return []
+            print("[Supabase] Fetch history timed out — using local history")
+            return self._fetch_local(limit)
         if error[0]:
-            print(f"[Supabase] Fetch history failed: {error[0]}")
-            return []
-        return result[0] or []
+            print(f"[Supabase] Fetch history failed: {error[0]} — using local history")
+            return self._fetch_local(limit)
+        return result[0] or self._fetch_local(limit)
 
     def clear_history(self) -> bool:
         """Delete all transcription records for the current user. Returns True on success."""
@@ -150,6 +163,40 @@ class SupabaseLogger:
         except Exception as e:
             print(f"[Supabase] Clear history failed: {e}")
             return False
+
+    def _append_local(self, text: str) -> None:
+        try:
+            path = _local_history_path()
+            with _local_history_lock:
+                entries = []
+                if os.path.exists(path):
+                    try:
+                        with open(path, "r", encoding="utf-8") as f:
+                            entries = json.load(f)
+                    except Exception:
+                        entries = []
+                entries.insert(0, {
+                    "transcribed_text": text,
+                    "created_at": datetime.datetime.utcnow().isoformat(),
+                })
+                entries = entries[:200]
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(entries, f, ensure_ascii=False)
+        except Exception as e:
+            print(f"[LocalHistory] Write failed: {e}")
+
+    def _fetch_local(self, limit: int = 30) -> list:
+        try:
+            path = _local_history_path()
+            if not os.path.exists(path):
+                return []
+            with _local_history_lock:
+                with open(path, "r", encoding="utf-8") as f:
+                    entries = json.load(f)
+            return entries[:limit]
+        except Exception as e:
+            print(f"[LocalHistory] Read failed: {e}")
+            return []
 
     def _run(self, payload: dict) -> None:
         """Queue payload for background insert without spawning unbounded threads."""
