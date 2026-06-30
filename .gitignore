@@ -28,3 +28,6 @@ startup_test.txt
 build/
 dist/
 *.egg-info/
+
+# Claude Code assistant memory (not project source)
+memory/
