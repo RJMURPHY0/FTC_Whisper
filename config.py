@@ -37,6 +37,16 @@ def _bootstrap_config() -> None:
             print(f"[Config] Extracted default config to {user_cfg}")
 
 
+# Canonical shared auth backend. This is the SAME Supabase project as FTC Contacts,
+# so a single account signs in to both apps. Older whisper builds shipped a separate
+# project (below) whose user pool did NOT contain FTC Contacts accounts — so the same
+# login could not sign in. Installs still pointing at a legacy project are migrated to
+# the shared one on next launch (bootstrap only seeds *fresh* installs).
+_SHARED_SUPABASE_URL = "https://ijeeghdxokfvlfarojlm.supabase.co"
+_SHARED_SUPABASE_KEY = "sb_publishable_G96rQQGq8BEtutrsdusjlQ_R0WxNzFw"
+_LEGACY_SUPABASE_URLS = ("https://mbxwqtsesxgpcfyicphs.supabase.co",)
+
+
 @dataclass
 class Config:
     """Application configuration with defaults."""
@@ -118,5 +128,20 @@ class Config:
             # Create default config file
             config.save()
             print(f"[Config] Created default config at {path}")
+
+        # One-time migration: repoint installs still on a legacy Supabase project at
+        # the shared FTC backend so the FTC Contacts login works here too. The stale
+        # silent-auth creds (for the old project) are dropped — the user re-signs in
+        # once with their FTC Contacts account, then the saved session persists.
+        if config.supabase_url in _LEGACY_SUPABASE_URLS:
+            config.supabase_url = _SHARED_SUPABASE_URL
+            config.supabase_key = _SHARED_SUPABASE_KEY
+            config.supabase_email = ""
+            config.supabase_password = ""
+            try:
+                config.save()
+                print("[Config] Migrated Supabase backend to shared FTC project.")
+            except Exception as e:
+                print(f"[Config] Backend migration save failed (non-fatal): {e}")
 
         return config

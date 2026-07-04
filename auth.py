@@ -243,6 +243,12 @@ class AuthManager:
         """Called at startup — returns True if a valid saved session exists."""
         return self._load_saved_session()
 
+    def has_saved_session(self) -> bool:
+        """True if an encrypted session file still exists on disk. A failed restore
+        keeps the file on network/timeout errors and deletes it only on a definitive
+        auth failure — so this signals whether a restore is still worth retrying."""
+        return os.path.exists(_session_path())
+
     def sign_in_offline(self) -> None:
         """Mark as authenticated without Supabase — used when auth is disabled."""
         import types

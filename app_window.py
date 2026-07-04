@@ -173,6 +173,15 @@ class AppWindow:
                 self._fire_authenticated()
             else:
                 self._switch_to_login()
+                # A saved session that exists but didn't restore means the startup
+                # attempt failed on network/timeout — common when the logon task
+                # launches before Wi-Fi is up after a reboot. Retry in the
+                # background and promote to the dashboard once it succeeds, so the
+                # user isn't forced to sign in again just because the network wasn't
+                # ready yet. (Definitive auth failures delete the file, so the loop
+                # stops and correctly leaves the login screen up.)
+                if self._auth.has_saved_session():
+                    self._start_session_restore_retry()
 
         except Exception:
             import traceback
@@ -2015,6 +2024,41 @@ class AppWindow:
         threading.Thread(
             target=self._on_authenticated, args=(self._auth,), daemon=True
         ).start()
+
+    def _start_session_restore_retry(self) -> None:
+        """Retry restoring a saved session in the background (see run())."""
+        threading.Thread(
+            target=self._session_restore_retry_loop,
+            daemon=True, name="session-restore-retry",
+        ).start()
+
+    def _session_restore_retry_loop(self) -> None:
+        import time
+        # Retry for ~5 min: long enough to cover a slow Wi-Fi reconnect after a
+        # cold boot, but bounded so we don't spin forever. Stops early if the
+        # session becomes valid, gets cleared (definitive auth failure), or the
+        # user signs in manually in the meantime.
+        for _ in range(30):
+            time.sleep(10)
+            if self._auth.is_authenticated:
+                return
+            if not self._auth.has_saved_session():
+                return  # file cleared → invalid session, leave login up
+            try:
+                if self._auth.try_restore_session():
+                    if self._root:
+                        self._root.after(0, self._promote_restored_session)
+                    return
+            except Exception:
+                pass
+
+    def _promote_restored_session(self) -> None:
+        """Main-thread: a background retry restored the session — switch to the
+        dashboard and boot services, exactly as a startup restore would have."""
+        if not self._auth.is_authenticated:
+            return
+        self._switch_to_dashboard()
+        self._fire_authenticated()
 
     def _do_sign_action(self) -> None:
         if self._auth.user_email:
