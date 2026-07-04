@@ -210,8 +210,7 @@ class AppWindow:
         self._root = None
 
     def show(self) -> None:
-        if self._root:
-            self._root.after(0, self._do_show)
+        self._ui_after(0, self._do_show)
 
     def _do_show(self) -> None:
         self._root.deiconify()
@@ -240,7 +239,20 @@ class AppWindow:
     def update_status(self, state: str) -> None:
         if self._root and hasattr(self, "_status_lbl"):
             text, color = self._STATUS.get(state, ("● Ready", C["success"]))
-            self._root.after(0, lambda: self._status_lbl.configure(text=text, fg=color))
+            self._ui_after(0, lambda: self._status_lbl.configure(text=text, fg=color))
+
+    def _ui_after(self, delay_ms: int, callback, *args) -> None:
+        """Schedule a UI callback from a background thread. Drops the update
+        silently if the mainloop has already exited (RuntimeError) or the root
+        was destroyed (tk.TclError) — e.g. app closed while a daemon thread
+        was still in flight; otherwise the excepthook logs it as a crash."""
+        root = self._root
+        if not root:
+            return
+        try:
+            root.after(delay_ms, callback, *args)
+        except (tk.TclError, RuntimeError):
+            pass
 
     # ── Windows dark title bar ────────────────────────────────────────────────
 
@@ -918,7 +930,7 @@ class AppWindow:
         self._hist_set_placeholder("Loading…")
         def _fetch():
             items = self._db.fetch_history() if self._db else []
-            self._root.after(0, self._populate_history, items)
+            self._ui_after(0, self._populate_history, items)
         threading.Thread(target=_fetch, daemon=True).start()
 
     def _hist_set_placeholder(self, msg: str) -> None:
@@ -1038,7 +1050,7 @@ class AppWindow:
     def _clear_history(self) -> None:
         if self._db:
             self._db.clear_history()
-        self._root.after(0, self._load_history)
+        self._ui_after(0, self._load_history)
 
     # ── Settings tab ─────────────────────────────────────────────────────────
 
@@ -1137,8 +1149,7 @@ class AppWindow:
                 devs = self._get_input_devices() if self._get_input_devices else []
             except Exception:
                 devs = []
-            if self._root:
-                self._root.after(0, lambda: _populate_mic_menu(devs))
+            self._ui_after(0, lambda: _populate_mic_menu(devs))
         threading.Thread(target=_async_populate, daemon=True, name="mic-enum").start()
 
         # ── Mic test button + level meter ─────────────────────────────────────
@@ -1256,7 +1267,7 @@ class AppWindow:
 
             mics_to_test = [d for d in unique_devs if _mic_rank(d) < 2]
             if not mics_to_test:
-                self._root.after(0, lambda: _scan_done(None, 0.0))
+                self._ui_after(0, lambda: _scan_done(None, 0.0))
                 return
 
             SR = 16000
@@ -1278,11 +1289,11 @@ class AppWindow:
                     print(f"[MicScan] Could not open {d['name']}: {e}")
 
             if not streams:
-                self._root.after(0, lambda: _scan_done(None, 0.0))
+                self._ui_after(0, lambda: _scan_done(None, 0.0))
                 return
 
             for remaining in range(3, 0, -1):
-                self._root.after(0, lambda r=remaining: test_status.configure(
+                self._ui_after(0, lambda r=remaining: test_status.configure(
                     text=f"Recording all mics… {r}s", fg=C["accent"]))
                 time.sleep(1.0)
 
@@ -1306,9 +1317,9 @@ class AppWindow:
 
             if results:
                 best = max(results, key=results.get)
-                self._root.after(0, lambda b=best, v=results[best]: _scan_done(b, v))
+                self._ui_after(0, lambda b=best, v=results[best]: _scan_done(b, v))
             else:
-                self._root.after(0, lambda: _scan_done(None, 0.0))
+                self._ui_after(0, lambda: _scan_done(None, 0.0))
 
         def _start_scan():
             if not self._recorder or scan_active[0]:
@@ -1460,7 +1471,7 @@ class AppWindow:
 
             for i, model_name in enumerate(models_to_test):
                 msg = f"Testing {model_name} ({i + 1}/{len(models_to_test)})…"
-                self._root.after(0, lambda m=msg: bench_status.configure(text=m, fg=C["subtext"]))
+                self._ui_after(0, lambda m=msg: bench_status.configure(text=m, fg=C["subtext"]))
                 try:
                     import time as _t
                     t0 = _t.time()
@@ -1489,7 +1500,7 @@ class AppWindow:
                         results.append((rem, None, "", "skipped — previous too slow"))
                     break
 
-            self._root.after(0, lambda: _show_results(results))
+            self._ui_after(0, lambda: _show_results(results))
 
         def _start_benchmark():
             if bench_active[0]:
@@ -1816,7 +1827,7 @@ class AppWindow:
                     # show_update_banner creates tk widgets — it must run on the
                     # UI thread, not the updater worker thread (crash/corruption).
                     self.show_update_banner(version, url)
-                self._root.after(0, _apply)
+                self._ui_after(0, _apply)
 
             def _no_update_fallback():
                 import time; time.sleep(6)
@@ -1825,7 +1836,7 @@ class AppWindow:
                         self._update_status_lbl.configure(
                             text="Up to date ✓", fg=C["success"])
                         _restore_check_btn()
-                self._root.after(0, _apply)
+                self._ui_after(0, _apply)
 
             check_for_update(self._version, _done)
             threading.Thread(target=_no_update_fallback, daemon=True).start()
