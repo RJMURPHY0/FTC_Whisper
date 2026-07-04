@@ -79,6 +79,24 @@ _VK_MAP: dict = {
 }
 
 
+def _mask_menu_tap() -> None:
+    """Inject a no-op key (VK 0xFF press+release) into the input stream.
+
+    RegisterHotKey swallows the base key, so the foreground app sees the
+    hotkey's Alt (or Win) go down and up with nothing in between — a "clean
+    tap", which Office interprets as ribbon KeyTips activation (the yellow
+    letter badges in Outlook/Word) and Explorer as menu/Start activation.
+    VK 0xFF maps to no character and no action, but its presence between the
+    modifier's down and up breaks the clean-tap detection in every app.
+    Same trick AutoHotkey/PowerToys use for their Alt-based hotkeys.
+    """
+    try:
+        _user32.keybd_event(0xFF, 0, 0, 0)
+        _user32.keybd_event(0xFF, 0, _KEYEVENTF_KEYUP, 0)
+    except Exception:
+        pass
+
+
 def _vk_code(key: str) -> int:
     k = key.lower()
     if k in _VK_MAP:
@@ -142,6 +160,8 @@ class HotkeyManager:
         self._base_key = parts[-1]
         self._modifiers = parts[:-1]
         self._is_combo = len(self._modifiers) > 0
+        # Alt and Win activate app menus on a "clean" tap — needs masking
+        self._menu_modifier = any(m in ("alt", "super") for m in self._modifiers)
         self._suppress_caps = hotkey.replace(" ", "").lower() in (
             "capslock",
             "caps_lock",
@@ -271,6 +291,10 @@ class HotkeyManager:
         if not self._win32_ok:
             return
         try:
+            # An injected Alt-up with nothing before it reads as a completed
+            # clean Alt tap — mask first or Office pops KeyTips right here.
+            if self._menu_modifier:
+                _mask_menu_tap()
             for mod in self._modifiers:
                 for vk in _MODIFIER_VKS.get(mod, ()):
                     _user32.keybd_event(vk, 0, _KEYEVENTF_KEYUP, 0)
@@ -325,6 +349,8 @@ class HotkeyManager:
         msg = _wt.MSG()
         while _user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
             if msg.message == _WM_HOTKEY and msg.wParam == HOTKEY_ID:
+                if self._menu_modifier:
+                    _mask_menu_tap()
                 self._on_key_down()
                 if self.mode == "hold" and not self._polling:
                     # Claim the poller slot BEFORE spawning — setting it inside
@@ -530,6 +556,7 @@ class TriggerHotkeyManager:
         self._base_key = parts[-1]
         self._modifiers = parts[:-1]
         self._is_combo = len(self._modifiers) > 0
+        self._menu_modifier = any(m in ("alt", "super") for m in self._modifiers)
 
     def _fire(self) -> None:
         if self.on_trigger:
@@ -557,6 +584,8 @@ class TriggerHotkeyManager:
         msg = _wt.MSG()
         while _user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
             if msg.message == _WM_HOTKEY and msg.wParam == HOTKEY_ID:
+                if self._menu_modifier:
+                    _mask_menu_tap()
                 self._fire()
 
         _user32.UnregisterHotKey(None, HOTKEY_ID)

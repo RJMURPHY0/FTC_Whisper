@@ -45,7 +45,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.2"
+APP_VERSION = "1.6.3"
 
 
 class WhisperFlowApp:
@@ -335,11 +335,21 @@ class WhisperFlowApp:
 
         def _on_update_found(version: str, url: str) -> None:
             print(f"[App] Update available: {version}")
-            self.app_window._root.after(
+            self.app_window._ui_after(
                 0, lambda: self.app_window.show_update_banner(version, url)
             )
 
-        check_for_update(APP_VERSION, _on_update_found)
+        # Re-check periodically, not just at launch: the app runs for days via
+        # the logon task, so a startup-only check leaves users on a stale build
+        # until they happen to restart. show_update_banner is idempotent.
+        def _check_loop():
+            while True:
+                check_for_update(APP_VERSION, _on_update_found)
+                time.sleep(6 * 3600)
+
+        threading.Thread(
+            target=_check_loop, daemon=True, name="update-check-loop"
+        ).start()
 
     def _on_hotkey_change(self, new_hotkey: str) -> None:
         """Called when the user saves a new hotkey in the dashboard."""

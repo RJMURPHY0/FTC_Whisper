@@ -412,8 +412,9 @@ class AppWindow:
 
         # Bind scroll to the appropriate scrollable area
         if name == "history":
-            if not getattr(self, "_history_loaded", False):
-                self._load_history()
+            # Always refetch — a cached list goes stale as soon as the next
+            # dictation lands, which reads as "history not working".
+            self._load_history()
             if self._root:
                 self._root.bind_all("<MouseWheel>", self._hist_scroll)
         elif name == "settings":
@@ -935,10 +936,16 @@ class AppWindow:
             self._hist_cv.yview_scroll(int(-1 * (event.delta / 40)), "units")
 
     def _load_history(self) -> None:
-        self._history_loaded = False
+        if getattr(self, "_history_loading", False):
+            return  # a fetch is already in flight (rapid tab switching)
+        self._history_loading = True
         self._hist_set_placeholder("Loading…")
         def _fetch():
-            items = self._db.fetch_history() if self._db else []
+            try:
+                items = self._db.fetch_history() if self._db else []
+            except Exception as e:
+                print(f"[AppWindow] History fetch failed: {e}")
+                items = []
             self._ui_after(0, self._populate_history, items)
         threading.Thread(target=_fetch, daemon=True).start()
 
@@ -951,7 +958,7 @@ class AppWindow:
                  padx=12, pady=16).pack(fill="x")
 
     def _populate_history(self, items: list) -> None:
-        self._history_loaded = True
+        self._history_loading = False
         for w in self._hist_items.winfo_children():
             w.destroy()
         if not items:
@@ -961,8 +968,8 @@ class AppWindow:
             self._make_history_row(i, item)
 
     def _make_history_row(self, index: int, item: dict) -> None:
-        text = item.get("refined_text") or item.get("transcribed_text", "")
-        raw_ts = item.get("created_at", "")
+        text = item.get("refined_text") or item.get("transcribed_text") or ""
+        raw_ts = item.get("created_at") or ""
         try:
             dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
             ts_str = dt.astimezone().strftime("%d %b %Y  %H:%M")
