@@ -1352,6 +1352,7 @@ class WhisperFlowApp:
 
 _SINGLETON_MUTEX = None  # kept alive at module level so the handle isn't GC'd
 _LOCAL_PORT = 47832
+_INSTALL_COPY_LOCK = threading.Lock()  # serialises _ensure_installed_copy across startup threads
 
 
 def _start_local_server(app_window, version: str) -> None:
@@ -1522,19 +1523,28 @@ def _ensure_installed_copy() -> str:
 
     current = sys.executable
     target = _stable_exe_path()
-    try:
-        if os.path.normcase(os.path.abspath(current)) == os.path.normcase(target):
-            return target  # already running from the stable copy
-        needs_copy = (not os.path.exists(target)) or (
-            os.path.getmtime(current) > os.path.getmtime(target)
-        )
-        if needs_copy:
-            shutil.copy2(current, target)
-            print(f"[App] Installed canonical copy at {target}")
-        return target
-    except Exception as e:
-        print(f"[App] Could not stage stable exe copy ({e}); using current path.")
-        return current
+    # Serialised: the startup-task and url-protocol threads both call this at
+    # launch. Two concurrent 130MB copy2 calls made one thread hit the half-
+    # written/locked file, fall into the exception path, and register the
+    # VOLATILE current path (Downloads, dist, ...) as the boot target.
+    with _INSTALL_COPY_LOCK:
+        try:
+            if os.path.normcase(os.path.abspath(current)) == os.path.normcase(target):
+                return target  # already running from the stable copy
+            needs_copy = (not os.path.exists(target)) or (
+                os.path.getmtime(current) > os.path.getmtime(target)
+            )
+            if needs_copy:
+                # Copy to a temp name then atomically replace — a crash mid-copy
+                # can never leave a truncated exe at the stable path.
+                tmp = target + ".staging"
+                shutil.copy2(current, tmp)
+                os.replace(tmp, target)
+                print(f"[App] Installed canonical copy at {target}")
+            return target
+        except Exception as e:
+            print(f"[App] Could not stage stable exe copy ({e}); using current path.")
+            return current
 
 
 def _startup_target() -> str:
