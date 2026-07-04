@@ -24,6 +24,9 @@ for pkg in [
     'pystray',
     'PIL',
     'anthropic',
+    'openai',              # OpenRouter path (openai-compatible SDK)
+    'onnxruntime',         # Parakeet engine runtime
+    'onnx_asr',            # Parakeet model loader (pure Python)
     'httpx',
     'httpcore',
     'anyio',
@@ -46,10 +49,33 @@ for pkg in [
         print(f"[spec] Warning: could not collect {pkg}: {e}")
 
 # ── App data files ────────────────────────────────────────────────────────────
+# The bundled config is SANITIZED: raw API keys must never ship inside a
+# public GitHub release exe (anyone can extract them). Signed-in clients
+# fetch the AI keys from Supabase app_settings at runtime instead.
+import json as _json
+_SECRET_KEYS = ("anthropic_api_key", "openrouter_api_key", "supabase_password")
+_src_cfg = os.path.join(APP_DIR, 'config.json')
+# Must keep the basename 'config.json' — the frozen bootstrap reads
+# sys._MEIPASS/config.json — so sanitize into a build subfolder.
+_build_cfg = os.path.join(APP_DIR, 'build', 'sanitized', 'config.json')
+os.makedirs(os.path.dirname(_build_cfg), exist_ok=True)
+try:
+    with open(_src_cfg, encoding='utf-8') as _f:
+        _cfg = _json.load(_f)
+    for _k in _SECRET_KEYS:
+        if _cfg.get(_k):
+            print(f"[spec] Stripping secret '{_k}' from bundled config")
+            _cfg[_k] = ""
+    _cfg["supabase_email"] = ""
+    with open(_build_cfg, 'w', encoding='utf-8') as _f:
+        _json.dump(_cfg, _f, indent=2)
+except Exception as _e:
+    raise SystemExit(f"[spec] Could not sanitize config.json: {_e}")
+
 datas += [
     (os.path.join(APP_DIR, 'logo.png'),    '.'),
     (os.path.join(APP_DIR, 'logo.ico'),    '.'),
-    (os.path.join(APP_DIR, 'config.json'), '.'),   # bundled with API keys
+    (_build_cfg, '.'),
 ]
 
 # ── Extra hidden imports that PyInstaller often misses ───────────────────────

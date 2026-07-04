@@ -73,16 +73,26 @@ class AIRefiner:
         polished = refiner.refine("hello how are you doing today", mode="email")
     """
 
+    # Verified live on OpenRouter (July 2026). gemini-2.0-flash-001 was
+    # DELISTED — requests to it fail, which silently killed the whole
+    # OpenRouter path. Fallbacks are tried in-request by OpenRouter itself.
+    DEFAULT_OPENROUTER_MODEL = "google/gemini-2.5-flash-lite"
+    OPENROUTER_FALLBACK_MODELS = [
+        "meta-llama/llama-4-scout",
+        "anthropic/claude-haiku-4.5",
+    ]
+
     def __init__(
         self,
         api_key: Optional[str] = None,
         openrouter_api_key: Optional[str] = None,
-        openrouter_model: str = "google/gemini-2.0-flash-001",
+        openrouter_model: str = DEFAULT_OPENROUTER_MODEL,
     ):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self.openrouter_api_key = openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", "")
-        self.openrouter_model = openrouter_model
+        self.openrouter_model = openrouter_model or self.DEFAULT_OPENROUTER_MODEL
         self._client = None
+        self._openrouter_client = None
 
     def update_api_key(self, api_key: str) -> None:
         self.api_key = api_key.strip()
@@ -91,12 +101,39 @@ class AIRefiner:
     def update_openrouter_key(self, key: str) -> None:
         self.openrouter_api_key = key.strip()
         self._client = None  # force re-init with new key
+        self._openrouter_client = None
 
     @property
     def is_available(self) -> bool:
         return bool(self.openrouter_api_key or self.api_key)
 
-    def _refine_via_openrouter(self, text: str, prompt: str) -> str:
+    _STYLE_SYSTEM_PROMPT = (
+        "You are a text refinement assistant. Write in plain prose only. "
+        "No bullet points, numbered lists, dashes at line starts, asterisks, markdown, or headers. "
+        "Use clear, simple language. Keep sentences short and direct. Use active voice. "
+        "Avoid em dashes, semicolons, filler words, and cliches. "
+        "Write as a human would: natural, direct, easy to read. "
+        "Return only the refined text, nothing else."
+    )
+    # context_fix must NOT get the style prompt — "keep sentences short",
+    # "avoid semicolons" etc. directly contradict "change nothing but misheard
+    # words" and push the model to rewrite.
+    _CORRECTOR_SYSTEM_PROMPT = (
+        "You are a transcription corrector. You only fix misheard words. "
+        "You never rewrite, rephrase, or restyle. "
+        "Return only the corrected text, nothing else."
+    )
+
+    @staticmethod
+    def _max_tokens_for(text: str) -> int:
+        # 1024 silently truncated long dictations (~750+ words). Scale with
+        # input; generous ceiling since output ≈ input length for our modes.
+        return min(8192, max(1024, len(text.split()) * 4))
+
+    def _system_prompt_for(self, mode: str) -> str:
+        return self._CORRECTOR_SYSTEM_PROMPT if mode == "context_fix" else self._STYLE_SYSTEM_PROMPT
+
+    def _refine_via_openrouter(self, text: str, prompt: str, mode: str) -> str:
         """Call OpenRouter using the openai-compatible SDK. Lazy import so missing package doesn't crash."""
         try:
             import openai  # type: ignore
@@ -104,34 +141,35 @@ class AIRefiner:
             print("[AIRefiner] openai package not installed — falling back to Anthropic")
             return ""
 
-        client = openai.OpenAI(
-            api_key=self.openrouter_api_key,
-            base_url="https://openrouter.ai/api/v1",
-        )
-        response = client.chat.completions.create(
+        if self._openrouter_client is None:
+            self._openrouter_client = openai.OpenAI(
+                api_key=self.openrouter_api_key,
+                base_url="https://openrouter.ai/api/v1",
+                timeout=20.0,
+                max_retries=1,
+            )
+        response = self._openrouter_client.chat.completions.create(
             model=self.openrouter_model,
-            max_tokens=1024,
+            max_tokens=self._max_tokens_for(text),
+            temperature=0,
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a text refinement assistant. Write in plain prose only. "
-                        "No bullet points, numbered lists, dashes at line starts, asterisks, markdown, or headers. "
-                        "Use clear, simple language. Keep sentences short and direct. Use active voice. "
-                        "Avoid em dashes, semicolons, filler words, and cliches. "
-                        "Write as a human would: natural, direct, easy to read. "
-                        "Return only the refined text, nothing else."
-                    ),
-                },
+                {"role": "system", "content": self._system_prompt_for(mode)},
                 {"role": "user", "content": f"{prompt}\n\n{text}"},
             ],
+            # OpenRouter-native fallback: tries these in order if the primary
+            # model errors or is rate-limited — one request, no extra latency.
+            extra_body={"models": self.OPENROUTER_FALLBACK_MODELS},
         )
         return response.choices[0].message.content.strip()
 
     def _get_anthropic_client(self):
         if self._client is None:
             import anthropic
-            self._client = anthropic.Anthropic(api_key=self.api_key)
+            # SDK defaults are 600s timeout + 2 retries ≈ minutes of hang on a
+            # bad connection; a transcript fix is worthless after ~20s.
+            self._client = anthropic.Anthropic(
+                api_key=self.api_key, timeout=20.0, max_retries=1
+            )
         return self._client
 
     def refine(self, text: str, mode: str = "punctuation", custom_prompt: Optional[str] = None) -> str:
@@ -158,7 +196,7 @@ class AIRefiner:
         # OpenRouter takes priority over Anthropic direct
         if self.openrouter_api_key:
             try:
-                result = self._refine_via_openrouter(text, prompt)
+                result = self._refine_via_openrouter(text, prompt, mode)
                 if result:
                     print(f"[AIRefiner] Refined via OpenRouter ({mode}): '{result}'")
                     return result
@@ -177,15 +215,8 @@ class AIRefiner:
             client = self._get_anthropic_client()
             message = client.messages.create(
                 model="claude-haiku-4-5-20251001",
-                max_tokens=1024,
-                system=(
-                    "You are a text refinement assistant. "
-                    "Write in plain prose only. No bullet points, numbered lists, dashes at line starts, asterisks, markdown, or headers. "
-                    "Use clear, simple language. Keep sentences short and direct. Use active voice. "
-                    "Avoid em dashes, semicolons, filler words, and cliches. "
-                    "Write as a human would: natural, direct, easy to read. "
-                    "Return only the refined text, nothing else."
-                ),
+                max_tokens=self._max_tokens_for(text),
+                system=self._system_prompt_for(mode),
                 messages=[
                     {
                         "role": "user",

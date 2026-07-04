@@ -33,6 +33,8 @@ if sys.platform == "win32":
 from config import Config
 from recorder import Recorder
 from transcriber import Transcriber
+from asr_engine import ParakeetTranscriber, model_files_present, download_model
+from stream_session import StreamingSession
 from injector import Injector, _release_modifiers
 from hotkey_manager import HotkeyManager, TriggerHotkeyManager, AppState
 from feedback import Feedback
@@ -43,7 +45,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.5.2"
+APP_VERSION = "1.6.0"
 
 
 class WhisperFlowApp:
@@ -79,6 +81,11 @@ class WhisperFlowApp:
             vad_speech_pad_ms=30, min_silence_duration_ms=100,
             cpu_threads=4, auto_punctuate=_ap,
         )
+        # Primary engine: Parakeet TDT 0.6b v2 (int8 ONNX) — better accuracy
+        # than whisper-large-v3 at ~20x realtime on CPU with punctuation built
+        # in. English only; whisper pipeline remains the fallback (other
+        # languages, or model not yet downloaded).
+        self.parakeet = ParakeetTranscriber(auto_punctuate=_ap)
         self._recording_timer: threading.Timer | None = None
         self.recorder = Recorder(
             sample_rate=config.sample_rate,
@@ -90,6 +97,8 @@ class WhisperFlowApp:
         self.ai_refiner = AIRefiner(
             api_key=config.anthropic_api_key,
             openrouter_api_key=config.openrouter_api_key,
+            openrouter_model=(getattr(config, "openrouter_model", "") or "").strip()
+            or AIRefiner.DEFAULT_OPENROUTER_MODEL,
         )
         self.db = SupabaseLogger(url=config.supabase_url, key=config.supabase_key)
 
@@ -129,33 +138,34 @@ class WhisperFlowApp:
         self.popup = FloatingPopup()
         self.popup.set_ai_refiner(self.ai_refiner)
         self.popup.set_voice_prompt_callback(
-            lambda audio, rate, blocking=True: self.fast_transcriber.transcribe(audio, rate, blocking=blocking)
+            lambda audio, rate, blocking=True: self._fast_engine().transcribe(audio, rate, blocking=blocking)
         )
 
         self._recording_hwnd: int = 0
         self._mic_loop_running = threading.Event()
         self._mic_level_smooth = 0.0
 
-        # ── Live captions ──────────────────────────────────────────────
-        # Captions reuse the already-loaded fast model (base.en) — no extra
-        # model download/load to fail on. Caption ticks always use blocking=False
-        # so they NEVER queue ahead of the final injection transcription, and the
-        # caption loop never injects, never calls _update_context, and never
-        # touches stream state — so the final injected text is unchanged whether
-        # captions are on or off (accuracy > speed, preserved structurally).
+        # ── Live captions (whisper-fallback path only) ─────────────────
+        # In Parakeet mode captions come from the StreamingSession worker.
+        # _caption_loop_running gates whether the loop should keep going;
+        # _caption_stop_event is CLEAR while running and set to stop — the
+        # pacing wait uses the stop event (waiting on the running event, which
+        # is set, returned immediately and busy-spun the loop).
         self._caption_loop_running = threading.Event()
+        self._caption_stop_event = threading.Event()
         self._caption_thread: threading.Thread | None = None
 
         # Rolling context: last ~30 words from recent transcriptions fed into Whisper initial_prompt
         self._context_deque: deque = deque(maxlen=150)
         self._context_lock = threading.Lock()
 
-        # Streaming transcription state
-        self._stream_last_text: str = ""
-        self._stream_inject_count: int = 0
-        self._stream_lock = threading.Lock()
-        self._stream_stop_event = threading.Event()
-        self._stream_thread = None
+        # Streaming transcription session (Parakeet mode) — one per recording
+        self._session: StreamingSession | None = None
+        # Monotonic id per dictation: stale upgrade results from a previous
+        # dictation are discarded instead of contaminating the current popup.
+        self._dictation_seq = 0
+        # Model change requested while recording — applied when idle again
+        self._pending_model_change: str | None = None
 
         self.hotkey_manager = HotkeyManager(
             hotkey=config.hotkey,
@@ -171,16 +181,64 @@ class WhisperFlowApp:
             on_trigger=self._on_refine_selection,
         )
 
-        # ── Pre-load both models immediately in background ────────────
+        # ── Pre-load all models immediately in background ─────────────
         threading.Thread(
             target=self.transcriber.load_model, daemon=True, name="model-preload"
         ).start()
         threading.Thread(
             target=self.fast_transcriber.load_model, daemon=True, name="fast-model-preload"
         ).start()
+        threading.Thread(
+            target=self._init_parakeet, daemon=True, name="parakeet-preload"
+        ).start()
+
+        # Warm mic: keep a persistent input stream with a ~1.5s pre-roll ring
+        # buffer so recording starts instantly and the first syllable — even
+        # speech that began ON the go-beep — is captured.
+        if getattr(config, "warm_mic", True):
+            threading.Thread(
+                target=lambda: self.recorder.set_warm(True),
+                daemon=True, name="warm-mic",
+            ).start()
 
         # ── Local HTTP server so the web app can detect + surface this window ──
         _start_local_server(self.app_window, APP_VERSION)
+
+    def _init_parakeet(self) -> None:
+        """Download (first run only) and load the Parakeet engine. Any failure
+        leaves the whisper pipeline in charge — strictly additive."""
+        try:
+            if not getattr(self.config, "use_parakeet", True):
+                print("[App] Parakeet disabled in config — whisper pipeline only.")
+                return
+            if not model_files_present():
+                print("[App] Parakeet model not found — downloading (~660 MB, one-time)…")
+                last_pct = [-10]
+
+                def _progress(frac: float, msg: str) -> None:
+                    pct = int(frac * 100)
+                    if pct - last_pct[0] >= 10:
+                        last_pct[0] = pct
+                        print(f"[App] {msg} ({pct}%)")
+
+                if not download_model(progress=_progress):
+                    return
+            self.parakeet.load_model()
+            if self.parakeet.is_loaded:
+                print("[App] Parakeet engine active — near-instant transcription enabled.")
+        except Exception as e:
+            print(f"[App] Parakeet init failed ({e}) — using Whisper pipeline.")
+
+    def _use_parakeet(self) -> bool:
+        """Parakeet handles English; anything else stays on the whisper path."""
+        if not getattr(self.config, "use_parakeet", True):
+            return False
+        lang = (getattr(self.config, "language", "en") or "en").lower()
+        return lang in ("", "en", "english") and self.parakeet.is_loaded
+
+    def _fast_engine(self):
+        """Engine used for immediate/injection transcription."""
+        return self.parakeet if self._use_parakeet() else self.fast_transcriber
 
     # ------------------------------------------------------------------
     # Startup
@@ -216,20 +274,13 @@ class WhisperFlowApp:
 
         print(f"[App] Authenticated as {auth.user_email}")
 
-        # If no local API key, try to fetch from Supabase app_settings
+        # If no local API key, fetch from Supabase app_settings — in a daemon
+        # thread: these are two sequential network calls and used to gate
+        # hotkey registration, delaying time-to-first-dictation by seconds.
         if self.db.is_enabled:
-            if not self.ai_refiner.openrouter_api_key:
-                or_key = self.db.fetch_app_setting("openrouter_api_key")
-                if or_key:
-                    self.ai_refiner.update_openrouter_key(or_key)
-                    self.popup.set_ai_refiner(self.ai_refiner)
-                    print("[App] Loaded OpenRouter API key from Supabase.")
-            if not self.ai_refiner.api_key:
-                key = self.db.fetch_app_setting("anthropic_api_key")
-                if key:
-                    self.ai_refiner.update_api_key(key)
-                    self.popup.set_ai_refiner(self.ai_refiner)
-                    print("[App] Loaded Anthropic API key from Supabase.")
+            threading.Thread(
+                target=self._fetch_remote_api_keys, daemon=True, name="api-key-fetch"
+            ).start()
 
         if self.ai_refiner.is_available:
             print("[App] AI refinement enabled.")
@@ -260,6 +311,25 @@ class WhisperFlowApp:
         # Check for updates in the background; show banner in Settings if found
         self._start_update_check()
 
+    def _fetch_remote_api_keys(self) -> None:
+        try:
+            if not self.ai_refiner.openrouter_api_key:
+                or_key = self.db.fetch_app_setting("openrouter_api_key")
+                if or_key:
+                    self.ai_refiner.update_openrouter_key(or_key)
+                    self.popup.set_ai_refiner(self.ai_refiner)
+                    print("[App] Loaded OpenRouter API key from Supabase.")
+            if not self.ai_refiner.api_key:
+                key = self.db.fetch_app_setting("anthropic_api_key")
+                if key:
+                    self.ai_refiner.update_api_key(key)
+                    self.popup.set_ai_refiner(self.ai_refiner)
+                    print("[App] Loaded Anthropic API key from Supabase.")
+            if self.ai_refiner.is_available:
+                print("[App] AI refinement enabled.")
+        except Exception as e:
+            print(f"[App] Remote API key fetch failed: {e}")
+
     def _start_update_check(self) -> None:
         from updater import check_for_update
 
@@ -274,6 +344,10 @@ class WhisperFlowApp:
     def _on_hotkey_change(self, new_hotkey: str) -> None:
         """Called when the user saves a new hotkey in the dashboard."""
         print(f"[App] Updating hotkey to: {new_hotkey}")
+        # Re-registering mid-recording kills the release-poll thread without
+        # firing key-up, wedging the state machine at RECORDING — cancel first.
+        if self.hotkey_manager.state == AppState.RECORDING:
+            self._on_cancel_recording()
         self.config.hotkey = new_hotkey
         self.config.save()
         self.hotkey_manager.update_hotkey(new_hotkey)
@@ -301,25 +375,25 @@ class WhisperFlowApp:
             # Clear cached device index so next recording re-enumerates with the new choice
             self.recorder._active_device_index = None
             self.recorder._active_device_name = ""
+            # Warm stream is bound to the old device — reopen on the new one
+            threading.Thread(
+                target=self.recorder.restart_warm, daemon=True, name="warm-restart"
+            ).start()
+        elif key == "warm_mic":
+            threading.Thread(
+                target=lambda: self.recorder.set_warm(bool(value)),
+                daemon=True, name="warm-toggle",
+            ).start()
         elif key == "whisper_model":
-            if not self.hotkey_manager.state == AppState.RECORDING:
-                _ap = getattr(self.config, "auto_punctuate", True)
-                new_t = Transcriber(
-                    model_size=value,
-                    language=self.config.language,
-                    num_workers=2,
-                    auto_punctuate=_ap,
-                )
-                self.transcriber = new_t
-                threading.Thread(
-                    target=new_t.load_model, daemon=True, name="model-reload"
-                ).start()
-                print(f"[App] Transcriber reloading model '{value}' in background…")
+            self._apply_model_change(value)
         elif key == "sound_feedback":
             self.feedback.sound_enabled = bool(value)
+        elif key == "openrouter_model":
+            self.ai_refiner.openrouter_model = (value or "").strip() or self.ai_refiner.openrouter_model
         elif key == "auto_punctuate":
             self.transcriber.auto_punctuate = bool(value)
             self.fast_transcriber.auto_punctuate = bool(value)
+            self.parakeet.auto_punctuate = bool(value)
         elif key == "live_captions":
             # Live update, no restart. Captions reuse the already-loaded fast
             # model, so there's nothing to build — the next recording picks it up.
@@ -331,6 +405,28 @@ class WhisperFlowApp:
             if self.hotkey_manager.state == AppState.RECORDING:
                 self._on_cancel_recording()
             self.hotkey_manager.mode = value
+
+    def _apply_model_change(self, value: str) -> None:
+        """Swap the accurate whisper model. No-op when unchanged (every Save
+        used to discard and reload the model). Deferred while recording."""
+        if value == self.transcriber.model_size:
+            return
+        if self.hotkey_manager.state == AppState.RECORDING:
+            self._pending_model_change = value
+            print(f"[App] Model change to '{value}' queued until recording ends.")
+            return
+        self._pending_model_change = None
+        _ap = getattr(self.config, "auto_punctuate", True)
+        new_t = Transcriber(
+            model_size=value,
+            language=self.config.language,
+            auto_punctuate=_ap,
+        )
+        self.transcriber = new_t
+        threading.Thread(
+            target=new_t.load_model, daemon=True, name="model-reload"
+        ).start()
+        print(f"[App] Transcriber reloading model '{value}' in background…")
 
     # ------------------------------------------------------------------
     # Recording pipeline
@@ -350,8 +446,11 @@ class WhisperFlowApp:
                 self._rec_cursor_x, self._rec_cursor_y = pt.x, pt.y
             except Exception:
                 self._rec_cursor_x, self._rec_cursor_y = 0, 0
-            self.feedback.recording_started()
+            # Start capture FIRST, beep second — the beep is the user's cue to
+            # speak, so audio must already be flowing when they hear it. (With
+            # the warm mic this also captures ~0.35s of pre-roll.)
             self.recorder.start()
+            self.feedback.recording_started()
 
             # Auto-stop timer: toggle_timeout (toggle mode only) and max_recording_duration (all modes)
             _timeouts = []
@@ -364,11 +463,20 @@ class WhisperFlowApp:
                 self._recording_timer.daemon = True
                 self._recording_timer.start()
 
-            # Streaming mid-recording injection is disabled — text is inserted only after release
-            self._stream_stop_event.clear()
-            self._stream_last_text = ""
-            self._stream_inject_count = 0
-            self._stream_thread = None
+            # Parakeet mode: incremental committed-prefix transcription. Long
+            # dictations are transcribed while you speak, so the tail left at
+            # hotkey-release is always small — stop latency stays constant.
+            if self._use_parakeet():
+                session = StreamingSession(
+                    self.recorder,
+                    self.parakeet,
+                    context_words=self._get_context_words(),
+                    hotwords=self._get_hotwords(),
+                    on_caption=self.popup.update_caption,
+                    captions_enabled=bool(getattr(self.config, "live_captions", False)),
+                )
+                self._session = session
+                session.start()
         except Exception as e:
             print(f"[App] Failed to start recording: {e}")
             self.feedback.error_occurred(str(e))
@@ -376,98 +484,104 @@ class WhisperFlowApp:
 
     def _on_stop_recording(self) -> None:
         self._cancel_recording_timer()
-        # Stop the live-caption loop and wait for any in-flight tick to finish, so
-        # no caption tick is still holding the fast model's lock when the final
-        # (blocking) injection pass needs it. Mirrors the streaming-thread join.
+        session = self._session
+        self._session = None
+
+        # Stop the whisper-fallback caption loop (Parakeet captions live inside
+        # the streaming session) and wait for any in-flight tick, so no caption
+        # tick still holds the fast model's lock when the final pass needs it.
+        self._caption_stop_event.set()
         self._caption_loop_running.clear()
         _ct = self._caption_thread
         if _ct is not None and _ct.is_alive():
             _ct.join(timeout=0.5)
-        # Stop streaming loop and capture its final state before anything else
-        self._stream_stop_event.set()
-        _st = self._stream_thread
-        if _st is not None and _st.is_alive():
-            _st.join(timeout=0.5)
-        with self._stream_lock:
-            _stream_last = self._stream_last_text
-            _stream_count = self._stream_inject_count
+
+        self._dictation_seq += 1
+        seq = self._dictation_seq
 
         transcribed_text: str = ""
         hwnd = self._recording_hwnd
         upgrading = False
         final_audio = None
-        capture_rate = 1
-        _inject_text = ""
-        _total_inject_count = 0
+        capture_rate = max(1, self.recorder.active_sample_rate)
 
         try:
-            audio = self.recorder.stop()
+            # A quick-tap can race the async start thread: this handler may run
+            # before recorder.start() executed. Wait briefly so we stop the real
+            # stream instead of leaving an orphaned always-on recording.
+            if not self.recorder.is_recording:
+                for _ in range(25):
+                    if self.recorder.is_recording:
+                        break
+                    time.sleep(0.02)
+
+            total_samples = self.recorder.total_recorded_samples
             self.feedback.recording_stopped()
-            capture_rate = max(1, self.recorder.active_sample_rate)
 
-            if audio is None or len(audio) < capture_rate * 0.3:
-                print("[App] Recording too short, ignoring.")
-                self.hotkey_manager.set_idle()
-                self.feedback.error_occurred("Recording too short")
-                return
-
-            # Never truncate the final clip — long recordings must transcribe in
-            # full. faster-whisper internally chunks long audio at 30 s and
-            # concatenates every segment, so there is no length cap.
-            # Exception: when streaming was active, keep matching its 30 s window
-            # so _stream_extension can still find the extension point.
-            if _stream_count > 0:
-                max_samples = int(capture_rate * 30.0)
-                final_audio = audio[-max_samples:] if len(audio) > max_samples else audio
-            else:
-                final_audio = audio
-            print(
-                f"[App] Transcribing {len(final_audio) / capture_rate:.1f}s of audio at {capture_rate} Hz..."
-            )
-            # Fast pass — inject only the delta beyond what streaming already inserted
             _ctx = self._get_context_words()
-            _hw  = self._get_hotwords()
-            fast_text = self.fast_transcriber.transcribe(
-                final_audio, capture_rate, context_words=_ctx, hotwords_str=_hw).strip()
-            if fast_text:
-                transcribed_text = fast_text
-                upgrading = True
-                print(f"[App] Fast transcription: '{fast_text}'")
-                if _stream_count > 0 and _stream_last:
-                    delta = self._stream_extension(_stream_last, fast_text)
-                    if delta:
-                        _inject_text = delta
-                        _total_inject_count = _stream_count + 1
-                    else:
-                        # Streaming covered it all (or Whisper revised — avoid double-inject)
-                        _inject_text = ""
-                        _total_inject_count = _stream_count
-                else:
-                    _inject_text = fast_text
-                    _total_inject_count = 1
-            else:
-                # Fast model found nothing — wait for accurate model
-                text = self.transcriber.transcribe(
-                    final_audio, capture_rate, context_words=_ctx, hotwords_str=_hw).strip()
+            _hw = self._get_hotwords()
+
+            if session is not None:
+                # ── Parakeet path: committed prefix + tail-only final pass ──
+                text, tail_audio, capture_rate = session.finalize()
+                final_audio = tail_audio
                 if not text:
-                    print("[App] Empty transcription result.")
+                    if total_samples < capture_rate * 0.3:
+                        print("[App] Recording too short, ignoring.")
+                        self.feedback.error_occurred("Recording too short")
+                    else:
+                        print("[App] Empty transcription result.")
+                        self.feedback.error_occurred("No speech detected")
                     self.hotkey_manager.set_idle()
-                    self.feedback.error_occurred("No speech detected")
                     return
                 transcribed_text = text
-                self._update_context(text)
-                print(f"[App] Transcription: '{text}'")
-                if _stream_count > 0 and _stream_last:
-                    delta = self._stream_extension(_stream_last, text)
-                    if delta:
-                        _inject_text = delta
-                        _total_inject_count = _stream_count + 1
-                    else:
-                        _inject_text = ""
-                        _total_inject_count = _stream_count
+                # Upgrade = LLM context-fix only. Parakeet already beats the
+                # local whisper models on English accuracy, so a whisper
+                # re-pass would usually be a downgrade — skip it.
+                upgrading = self.ai_refiner.is_available and len(text.split()) >= 4
+                print(f"[App] Transcription (parakeet): '{text}'")
+            else:
+                # ── Whisper fallback path ──
+                audio = self.recorder.stop()
+
+                if audio is None or len(audio) < capture_rate * 0.3:
+                    print("[App] Recording too short, ignoring.")
+                    self.hotkey_manager.set_idle()
+                    self.feedback.error_occurred("Recording too short")
+                    return
+
+                final_audio = audio
+                print(
+                    f"[App] Transcribing {len(final_audio) / capture_rate:.1f}s of audio at {capture_rate} Hz..."
+                )
+                fast_text = self.fast_transcriber.transcribe(
+                    final_audio, capture_rate, context_words=_ctx, hotwords_str=_hw).strip()
+                if fast_text:
+                    transcribed_text = fast_text
+                    upgrading = True
+                    print(f"[App] Fast transcription: '{fast_text}'")
                 else:
-                    _inject_text = text
-                    _total_inject_count = 1
+                    # Fast model found nothing. If the clip is essentially
+                    # silence, report immediately — the old behaviour queued a
+                    # synchronous accurate pass behind any in-flight upgrade on
+                    # the same lock, freezing "Transcribing…" for 10-30s.
+                    import numpy as _np
+                    peak = float(_np.max(_np.abs(final_audio))) if len(final_audio) else 0.0
+                    if peak < 0.002:
+                        print("[App] Silence detected — skipping accurate fallback.")
+                        self.hotkey_manager.set_idle()
+                        self.feedback.error_occurred("No speech detected")
+                        return
+                    text = self.transcriber.transcribe(
+                        final_audio, capture_rate, context_words=_ctx, hotwords_str=_hw).strip()
+                    if not text:
+                        print("[App] Empty transcription result.")
+                        self.hotkey_manager.set_idle()
+                        self.feedback.error_occurred("No speech detected")
+                        return
+                    transcribed_text = text
+                    self._update_context(text)
+                    print(f"[App] Transcription: '{text}'")
 
         except Exception as e:
             print(f"[App] Transcription pipeline error: {e}")
@@ -484,7 +598,35 @@ class WhisperFlowApp:
         # on screen (it hides via the is_user_facing guard in _on_state_change).
         result = False
         try:
-            self._focus_window(hwnd)
+            # Fast path: in the overwhelmingly common case the target window
+            # never lost focus during recording (the popup is WS_EX_NOACTIVATE),
+            # so both the SetForegroundWindow dance AND the browser DOM-focus
+            # click are unnecessary — skipping them saves ~0.5-0.7s per dictation
+            # and avoids the synthetic click pressing arbitrary page UI.
+            fg_now = 0
+            try:
+                fg_now = ctypes.windll.user32.GetForegroundWindow()
+            except Exception:
+                pass
+            # In hold mode the user's hand is on the hotkey — they can't have
+            # clicked elsewhere. In toggle mode, require the mouse to be where
+            # it was at recording start: a click inside the same browser window
+            # would have moved DOM focus without changing the Win32 foreground.
+            same_cursor = True
+            if self.config.mode != "hold":
+                try:
+                    pt = ctypes.wintypes.POINT()
+                    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+                    same_cursor = (
+                        abs(pt.x - getattr(self, "_rec_cursor_x", 0))
+                        + abs(pt.y - getattr(self, "_rec_cursor_y", 0))
+                    ) < 4
+                except Exception:
+                    same_cursor = False
+            focus_unchanged = bool(hwnd) and fg_now == hwnd and same_cursor
+
+            if not focus_unchanged:
+                self._focus_window(hwnd)
 
             # Release modifier keys BEFORE the browser focus click so Chrome never
             # receives a spurious Alt key-up that would activate its menu bar and
@@ -495,7 +637,9 @@ class WhisperFlowApp:
             # SetForegroundWindow restores the Chrome/Firefox Win32 focus but does
             # NOT restore the JS/DOM focus of the contenteditable or ProseMirror
             # input. Simulate a click at the recording-start cursor position to
-            # re-establish the browser's internal focus before Ctrl+V.
+            # re-establish the browser's internal focus before Ctrl+V. Only needed
+            # when focus was actually lost — if the browser stayed foreground the
+            # DOM focus is still intact.
             _BROWSER_PREFIXES = ("Chrome_WidgetWin_", "Mozilla", "CEF-")
             _BROWSER_EXACT = {
                 "Chrome_WidgetWin_1",
@@ -503,11 +647,7 @@ class WhisperFlowApp:
                 "MozillaDialogClass",
                 "Chrome_RenderWidgetHostHWND",
             }
-            # Only click to restore DOM focus when streaming hasn't already injected text.
-            # If streaming injected words the cursor is already positioned correctly —
-            # clicking at the recording-start position would move it backward and cause
-            # the final delta to land mid-sentence.
-            if _stream_count == 0:
+            if not focus_unchanged:
                 try:
                     cls = self._get_window_class(hwnd)
                     if cls and (
@@ -521,16 +661,13 @@ class WhisperFlowApp:
                     print(f"[App] Browser focus click error: {e}")
 
             try:
-                if _inject_text:
-                    _text_to_inject = _inject_text
-                    if getattr(self.config, "trailing_space", False):
-                        _text_to_inject += " "
-                    print(f"[App] Injecting delta: {len(_text_to_inject)} chars")
-                    # Modifiers already released above — skip the second release
-                    result = self.injector.inject(_text_to_inject, release_mods=False)
-                    print(f"[App] Inject result: {result}")
-                elif _stream_count > 0:
-                    result = True  # streaming already injected successfully
+                _text_to_inject = transcribed_text
+                if getattr(self.config, "trailing_space", False):
+                    _text_to_inject += " "
+                print(f"[App] Injecting: {len(_text_to_inject)} chars")
+                # Modifiers already released above — skip the second release
+                result = self.injector.inject(_text_to_inject, release_mods=False)
+                print(f"[App] Inject result: {result}")
             except Exception as e:
                 print(f"[App] Injection error (popup will still appear): {e}")
 
@@ -545,73 +682,110 @@ class WhisperFlowApp:
             print(f"[App] Finalize error (popup will still appear): {e}")
         finally:
             self.hotkey_manager.set_idle()
+            if self._pending_model_change:
+                self._apply_model_change(self._pending_model_change)
 
         # ── Popup always shown — works as manual-insert fallback if inject failed ─
-        _undo_n = max(1, _total_inject_count)
+        # undo_count=0 when injection failed: Replace must NOT Ctrl+Z the user's
+        # own prior edits when there is nothing of ours to undo.
+        _undo_n = 1 if result else 0
         self.popup.show_cursor_icon(
             transcribed_text,
             on_insert=lambda t=transcribed_text, h=hwnd: self._insert_text(t, h),
             on_replace=lambda new_text, t=transcribed_text, h=hwnd, uc=_undo_n: self._replace_text(new_text, h, t, undo_count=uc),
+            on_insert_result=lambda new_text, h=hwnd: self._insert_text(new_text, h),
             inserted=result,
             hwnd=hwnd,
             cursor_x=0,
             cursor_y=0,
             upgrading=upgrading,
+            session=seq,
         )
 
-        # If fast model was used, run accurate transcription + LLM context-fix in background
-        if upgrading and final_audio is not None:
-            _fast = transcribed_text
-            _upg_ctx = _ctx
-            _upg_hw  = _hw
-            def _upgrade(_audio=final_audio, _rate=capture_rate, _ft=_fast,
-                         _ctx=_upg_ctx, _hw=_upg_hw):
-                accurate = self.transcriber.transcribe(
-                    _audio, _rate, context_words=_ctx, hotwords_str=_hw).strip()
-                if not accurate:
-                    return
-                # Show Whisper result immediately so the upgrade button appears fast
-                if accurate != _ft:
-                    print(f"[App] Accurate transcription: '{accurate}'")
-                    self.popup.set_upgrade_result(accurate)
-                final = accurate
-                if self.ai_refiner.is_available:
+        # Background upgrade — session-stamped so a slow upgrade from dictation
+        # N can never attach its text to dictation N+1's popup.
+        if upgrading:
+            if session is not None:
+                def _upgrade_llm(_text=transcribed_text, _seq=seq):
+                    final = _text
                     try:
-                        fixed = self.ai_refiner.context_fix(accurate)
-                        if fixed and fixed != accurate:
-                            print(f"[App] LLM context-fix: '{accurate}' -> '{fixed}'")
+                        fixed = self.ai_refiner.context_fix(_text)
+                        if fixed and fixed != _text:
+                            print(f"[App] LLM context-fix: '{_text}' -> '{fixed}'")
                             final = fixed
-                            self.popup.set_upgrade_result(final)
+                            self.popup.set_upgrade_result(final, session=_seq)
+                        else:
+                            self.popup.clear_upgrading(session=_seq)
                     except Exception as e:
-                        print(f"[App] LLM context-fix error, using Whisper result: {e}")
-                self._update_context(final)
-            threading.Thread(target=_upgrade, daemon=True, name="accurate-transcription").start()
+                        print(f"[App] LLM context-fix error: {e}")
+                        self.popup.clear_upgrading(session=_seq)
+                    self._update_context(final)
+                threading.Thread(target=_upgrade_llm, daemon=True, name="context-fix").start()
+            elif final_audio is not None:
+                _fast = transcribed_text
+                _upg_ctx = _ctx
+                _upg_hw = _hw
+                def _upgrade(_audio=final_audio, _rate=capture_rate, _ft=_fast,
+                             _ctx=_upg_ctx, _hw=_upg_hw, _seq=seq):
+                    accurate = self.transcriber.transcribe(
+                        _audio, _rate, context_words=_ctx, hotwords_str=_hw).strip()
+                    if not accurate:
+                        self.popup.clear_upgrading(session=_seq)
+                        return
+                    offered = False
+                    # Show Whisper result immediately so the upgrade button appears fast
+                    if accurate != _ft:
+                        print(f"[App] Accurate transcription: '{accurate}'")
+                        self.popup.set_upgrade_result(accurate, session=_seq)
+                        offered = True
+                    final = accurate
+                    if self.ai_refiner.is_available:
+                        try:
+                            fixed = self.ai_refiner.context_fix(accurate)
+                            if fixed and fixed != accurate:
+                                print(f"[App] LLM context-fix: '{accurate}' -> '{fixed}'")
+                                final = fixed
+                                self.popup.set_upgrade_result(final, session=_seq)
+                                offered = True
+                        except Exception as e:
+                            print(f"[App] LLM context-fix error, using Whisper result: {e}")
+                    if not offered:
+                        self.popup.clear_upgrading(session=_seq)
+                    self._update_context(final)
+                threading.Thread(target=_upgrade, daemon=True, name="accurate-transcription").start()
+        else:
+            # No upgrade pass — the injected text is the best we'll have; feed
+            # it to the rolling context now.
+            if session is not None:
+                self._update_context(transcribed_text)
 
     def _on_cancel_recording(self) -> None:
-        self._stream_stop_event.set()
+        session = self._session
+        self._session = None
+        self._caption_stop_event.set()
+        self._caption_loop_running.clear()
         try:
+            if session is not None:
+                session.abort()
+            # Wait briefly for an in-flight async start before deciding there is
+            # nothing to stop — otherwise a quick tap leaves an orphaned stream
+            # recording forever (and prepends stale audio to the next dictation).
+            if not self.recorder.is_recording:
+                for _ in range(25):
+                    if self.recorder.is_recording:
+                        break
+                    time.sleep(0.02)
             if self.recorder.is_recording:
                 self.recorder.stop()
-            _st = self._stream_thread
-            if _st is not None and _st.is_alive():
-                _st.join(timeout=1.0)
-            with self._stream_lock:
-                _stream_count = self._stream_inject_count
             self.feedback.recording_stopped()
             print("[App] Recording cancelled (short tap).")
-            if _stream_count > 0:
-                hwnd = self._recording_hwnd
-                self._focus_window(hwnd, short=True)
-                import keyboard as kb
-                for _ in range(_stream_count):
-                    kb.send("ctrl+z")
-                    time.sleep(0.04)
-                print(f"[App] Undid {_stream_count} streaming injection(s)")
         except Exception as e:
             print(f"[App] Error cancelling recording: {e}")
         finally:
             self._cancel_recording_timer()
             self.hotkey_manager.set_idle()
+            if self._pending_model_change:
+                self._apply_model_change(self._pending_model_change)
 
     def _cancel_recording_timer(self) -> None:
         t = self._recording_timer
@@ -638,68 +812,6 @@ class WhisperFlowApp:
 
     def _get_hotwords(self) -> str:
         return (getattr(self.config, "custom_vocabulary", "") or "").strip()
-
-    def _streaming_loop(self, stop_event: threading.Event) -> None:
-        """Append-only live transcription: inject new words every ~900 ms while recording."""
-        TICK_INTERVAL = 0.9
-        MIN_AUDIO_SECS = 0.6
-
-        last_text = ""
-        inject_count = 0
-
-        for _ in range(25):
-            if self.recorder.is_recording:
-                break
-            time.sleep(0.04)
-
-        while not stop_event.is_set() and self.recorder.is_recording:
-            tick_start = time.time()
-            try:
-                audio = self.recorder.get_current_audio(max_seconds=30.0)
-                rate = self.recorder.active_sample_rate
-                if audio is not None and len(audio) >= rate * MIN_AUDIO_SECS:
-                    ctx = self._get_context_words()
-                    hw = self._get_hotwords()
-                    result = self.fast_transcriber.transcribe(
-                        audio, rate,
-                        context_words=ctx,
-                        hotwords_str=hw,
-                        blocking=False,
-                    ).strip()
-                    if result:
-                        new_words = self._stream_extension(last_text, result)
-                        if new_words:
-                            # Strip trailing punctuation — mid-sentence chunks shouldn't end with a period
-                            suffix = new_words.rstrip(".,!?;:") + " "
-                            self.injector.inject_immediate(suffix)
-                            inject_count += 1
-                            last_text = result
-                            print(f"[Stream] +'{new_words}'")
-            except Exception as e:
-                print(f"[Stream] Tick error: {e}")
-
-            elapsed = time.time() - tick_start
-            remaining = TICK_INTERVAL - elapsed
-            if remaining > 0:
-                stop_event.wait(remaining)
-
-        with self._stream_lock:
-            self._stream_last_text = last_text
-            self._stream_inject_count = inject_count
-        print(f"[Stream] Ended — {inject_count} injection(s), last='{last_text[:60]}'")
-
-    @staticmethod
-    def _stream_extension(prev: str, curr: str) -> str:
-        """Return the new words if curr cleanly extends prev; empty string if not."""
-        prev_words = prev.split()
-        curr_words = curr.split()
-        if len(curr_words) <= len(prev_words):
-            return ""
-        prev_norm = [w.rstrip(".,!?;:") for w in prev_words]
-        curr_norm = [w.rstrip(".,!?;:") for w in curr_words]
-        if curr_norm[: len(prev_words)] == prev_norm:
-            return " ".join(curr_words[len(prev_words) :])
-        return ""
 
     def _on_state_change(self, state: AppState) -> None:
         self.app_window.update_status(
@@ -733,9 +845,11 @@ class WhisperFlowApp:
                 cursor_y=cy,
             )
             if _captions_on:
-                # Live-caption mode REPLACES the waveform bar. Run only the
-                # caption loop (the mic-level loop would fight it for the same pill).
-                if not self._caption_loop_running.is_set():
+                # Live-caption mode REPLACES the waveform bar. In Parakeet mode
+                # captions are pushed by the StreamingSession worker; the whisper
+                # fallback runs its own caption loop.
+                if not self._use_parakeet() and not self._caption_loop_running.is_set():
+                    self._caption_stop_event.clear()
                     self._caption_loop_running.set()
                     self._caption_thread = threading.Thread(
                         target=self._caption_loop, daemon=True, name="caption-loop")
@@ -748,6 +862,7 @@ class WhisperFlowApp:
         elif state == AppState.PROCESSING:
             # Stop captions immediately so no caption tick holds the fast model
             # while the final injection pass needs it.
+            self._caption_stop_event.set()
             self._caption_loop_running.clear()
             self.popup.show_status(
                 "Transcribing…",
@@ -758,6 +873,7 @@ class WhisperFlowApp:
             )
         elif state == AppState.IDLE:
             self._mic_loop_running.clear()
+            self._caption_stop_event.set()
             self._caption_loop_running.clear()
             if not self.popup.is_user_facing:
                 self.popup.hide()
@@ -793,11 +909,11 @@ class WhisperFlowApp:
         self.popup.update_mic_level(0.0)
 
     def _captions_active(self) -> bool:
-        """True only when live captions are enabled AND the fast model is loaded.
-        If the model isn't ready yet we fall back to the waveform for that
-        recording so the user always gets visual feedback (never a blank bar)."""
+        """True only when live captions are enabled AND a caption-capable engine
+        is loaded. If no model is ready yet we fall back to the waveform for
+        that recording so the user always gets visual feedback (never a blank bar)."""
         return bool(getattr(self.config, "live_captions", False)) \
-            and self.fast_transcriber.is_loaded
+            and (self._use_parakeet() or self.fast_transcriber.is_loaded)
 
     def _caption_loop(self) -> None:
         """Show live captions of what the user is saying while recording.
@@ -820,7 +936,11 @@ class WhisperFlowApp:
             time.sleep(0.04)
 
         produced_any = False
-        while self.recorder.is_recording and self._caption_loop_running.is_set():
+        while (
+            self.recorder.is_recording
+            and self._caption_loop_running.is_set()
+            and not self._caption_stop_event.is_set()
+        ):
             tick_start = time.time()
             try:
                 audio = self.recorder.get_current_audio(max_seconds=TAIL_SECONDS)
@@ -841,7 +961,10 @@ class WhisperFlowApp:
             elapsed = time.time() - tick_start
             remaining = TICK_INTERVAL - elapsed
             if remaining > 0:
-                self._caption_loop_running.wait(remaining)
+                # Wait on the STOP event (clear while running) — waiting on the
+                # running event returned immediately and busy-spun the loop,
+                # pegging cores and starving the final pass of the model lock.
+                self._caption_stop_event.wait(remaining)
 
         self._caption_loop_running.clear()
         if not produced_any:
@@ -898,11 +1021,11 @@ class WhisperFlowApp:
             saved_pt = ctypes.wintypes.POINT()
             u32.GetCursorPos(ctypes.byref(saved_pt))
             u32.SetCursorPos(x, y)
-            time.sleep(0.05)
-            u32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
             time.sleep(0.03)
+            u32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            time.sleep(0.02)
             u32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-            time.sleep(0.35)  # let Chrome process click and fire JS focus events
+            time.sleep(0.15)  # let Chrome process click and fire JS focus events
             u32.SetCursorPos(saved_pt.x, saved_pt.y)
             print(f"[App] Browser DOM focus click at ({x}, {y})")
         except Exception as e:
@@ -916,6 +1039,13 @@ class WhisperFlowApp:
             return False
 
         u32 = ctypes.windll.user32
+
+        # Already foreground — nothing to do (saves the full dance + sleeps).
+        try:
+            if u32.GetForegroundWindow() == hwnd:
+                return True
+        except Exception:
+            pass
 
         # Detect fullscreen-exclusive windows (games, presentations) —
         # they already own the display; attempting SetForegroundWindow can
@@ -1045,20 +1175,40 @@ class WhisperFlowApp:
         except Exception:
             return 0, 0
 
-    def _insert_text(self, text: str, hwnd: int) -> None:
-        """Manual insert — called when user clicks Insert in the popup.
-        Waits for the popup to fully close before focusing the target window,
-        otherwise the popup steals focus back and the injection lands nowhere."""
+    def _restore_target_focus(self, hwnd: int) -> None:
+        """Popup Insert/Replace paths: wait for the popup to withdraw, focus the
+        target, and (for browsers) click to re-establish DOM focus — the popup's
+        refinement panel takes real focus, which clears contenteditable focus."""
         time.sleep(0.25)  # let popup withdraw and OS settle focus
         self._focus_window(hwnd)
+        try:
+            cls = self._get_window_class(hwnd)
+            if cls and (
+                cls in ("Chrome_WidgetWin_1", "MozillaWindowClass",
+                        "MozillaDialogClass", "Chrome_RenderWidgetHostHWND")
+                or cls.startswith(("Chrome_WidgetWin_", "Mozilla", "CEF-"))
+            ):
+                self._click_to_restore_focus(
+                    getattr(self, "_rec_cursor_x", 0),
+                    getattr(self, "_rec_cursor_y", 0),
+                    hwnd,
+                )
+        except Exception as e:
+            print(f"[App] Focus-restore click error: {e}")
+
+    def _insert_text(self, text: str, hwnd: int) -> None:
+        """Manual insert — called when user clicks Insert in the popup."""
+        self._restore_target_focus(hwnd)
         self.injector.inject(text)
         print(f"[App] Manual insert: {len(text)} chars")
 
     def _replace_text(self, new_text: str, hwnd: int, original_text: str = "", undo_count: int = 1) -> None:
         import keyboard as kb
 
-        self._focus_window(hwnd)
-        for _ in range(max(1, undo_count)):
+        self._restore_target_focus(hwnd)
+        # undo_count=0 means the original injection failed — there is nothing of
+        # ours to undo, and Ctrl+Z would destroy the user's own last edit.
+        for _ in range(max(0, undo_count)):
             kb.send("ctrl+z")
             time.sleep(0.05)
         self.injector.inject(new_text)
@@ -1167,18 +1317,9 @@ class WhisperFlowApp:
         self.tray.set_user_email(auth.user_email or "")
         print(f"[App] Signed in as {auth.user_email}")
         if self.db.is_enabled:
-            if not self.ai_refiner.openrouter_api_key:
-                or_key = self.db.fetch_app_setting("openrouter_api_key")
-                if or_key:
-                    self.ai_refiner.update_openrouter_key(or_key)
-                    self.popup.set_ai_refiner(self.ai_refiner)
-                    print("[App] Loaded OpenRouter API key from Supabase.")
-            if not self.ai_refiner.api_key:
-                key = self.db.fetch_app_setting("anthropic_api_key")
-                if key:
-                    self.ai_refiner.update_api_key(key)
-                    self.popup.set_ai_refiner(self.ai_refiner)
-                    print("[App] Loaded Anthropic API key from Supabase.")
+            threading.Thread(
+                target=self._fetch_remote_api_keys, daemon=True, name="api-key-fetch"
+            ).start()
 
     def _sign_out(self) -> None:
         print("[App] Signing out...")

@@ -252,7 +252,10 @@ def foreground_is_elevated_blocked() -> bool:
         try:
             TOKEN_QUERY = 0x0008
             token = ctypes.wintypes.HANDLE()
-            if not k32.OpenProcessToken(h, TOKEN_QUERY, ctypes.byref(token)):
+            # OpenProcessToken lives in advapi32 — calling it on kernel32 raised
+            # AttributeError into the blanket except, so this check always
+            # returned False and elevated windows failed silently.
+            if not adv.OpenProcessToken(h, TOKEN_QUERY, ctypes.byref(token)):
                 return False
             try:
                 TokenElevation = 20
@@ -276,7 +279,7 @@ def foreground_is_elevated_blocked() -> bool:
 # ── Injection methods ─────────────────────────────────────────────────────────
 
 
-def _post_wm_char(text: str) -> bool:
+def _post_wm_char(text: str) -> tuple[int, int]:
     """
     Inject text by posting WM_CHAR messages directly to the focused child HWND.
 
@@ -285,11 +288,15 @@ def _post_wm_char(text: str) -> bool:
     - No clipboard involvement — no Paste Special dialog
     - Works while the hotkey modifiers (Alt, Ctrl) are still physically held
     - Handles surrogate pairs for emoji / extended Unicode
+
+    Returns (posted, failed) character counts. A partial post (some landed,
+    some failed) must NOT be retried with another method — the characters that
+    DID land would be duplicated.
     """
     u32 = _u32
     fg = u32.GetForegroundWindow()
     if not fg:
-        return False
+        return 0, len(text)
     target = _get_focused_child(fg)
     posted = 0
     failed = 0
@@ -310,13 +317,9 @@ def _post_wm_char(text: str) -> bool:
             posted += 1
         else:
             failed += 1
-    # Treat it as success only if at least one char posted and none failed.
-    # A target HWND that rejects WM_CHAR (PostMessage returns 0) now correctly
-    # reports failure so the caller can fall back instead of silently dropping text.
-    if posted and not failed:
-        return True
-    print(f"[Injector] WM_CHAR posted={posted} failed={failed} -> reporting failure")
-    return False
+    if failed:
+        print(f"[Injector] WM_CHAR posted={posted} failed={failed}")
+    return posted, failed
 
 
 def _send_unicode(text: str) -> bool:
@@ -388,16 +391,27 @@ def _release_modifiers() -> None:
     """
     u32 = ctypes.windll.user32
     events: list[_Input] = []
+    alt_released = False
     for vk in _MODIFIERS:
         if u32.GetAsyncKeyState(vk) & 0x8000:
+            if vk in (0x12, 0xA4, 0xA5):
+                alt_released = True
             inp = _Input(type=_INPUT_KEYBOARD)
             inp.ki.wVk = vk
             inp.ki.dwFlags = _KEYEVENTF_KEYUP
             events.append(inp)
     if events:
+        if alt_released:
+            # A bare Alt-down/Alt-up (the base key was swallowed by
+            # RegisterHotKey) activates the menu bar in browsers/Office. A
+            # harmless dummy key BEFORE the Alt key-up cancels menu activation —
+            # 0xFF (VK__none_) is the documented no-op key for this.
+            dummy_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=0xFF))
+            dummy_up = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=0xFF, dwFlags=_KEYEVENTF_KEYUP))
+            events = [dummy_dn, dummy_up] + events
         arr = (_Input * len(events))(*events)
         u32.SendInput(len(events), arr, ctypes.sizeof(_Input))
-        time.sleep(0.07)  # settle before injecting
+        time.sleep(0.05)  # settle before injecting
 
 
 # ── Injector class ────────────────────────────────────────────────────────────
@@ -408,6 +422,7 @@ class Injector:
         m = (method or "").strip().lower()
         self.method = m if m in {"clipboard", "keystrokes", "auto"} else "clipboard"
         self._lock = threading.Lock()
+        self._partial_direct = False  # set when a direct inject partially landed
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -416,13 +431,16 @@ class Injector:
         Inject text into the focused window. Thread-safe.
         release_mods=True: release hotkey modifiers first (use for final injection).
         release_mods=False: skip modifier release (use during streaming while key held).
-        Automatically retries once on failure after a short settle delay.
+        Automatically retries once on failure after a short settle delay —
+        UNLESS the failure was a partial direct injection (some characters
+        landed), where a full re-send would duplicate them.
         """
         if not text or not text.strip():
             return False
         with self._lock:
+            self._partial_direct = False
             result = self._inject(text, release_mods=release_mods)
-            if not result:
+            if not result and not self._partial_direct:
                 # First attempt failed — give Windows time to settle focus,
                 # then try once more. Modifiers are already released.
                 print("[Injector] First attempt failed — retrying in 200 ms…")
@@ -471,6 +489,18 @@ class Injector:
         # - clipboard  : most universal for office/web/chat apps
         # - keystrokes : direct Win32/SendInput path first
         # - auto       : clipboard first, then direct fallback
+        # Auto-mode exception: when the clipboard holds non-text content (a
+        # screenshot, copied files) that we cannot back up, try direct injection
+        # first so the user's clipboard isn't destroyed. Explicit clipboard mode
+        # keeps clipboard-first — the user chose the most reliable paste path.
+        if self.method == "auto" and self._clipboard_has_nontext():
+            print("[Injector] Clipboard holds non-text content — trying direct inject first")
+            if self._direct_inject(text):
+                return True
+            if self._partial_direct:
+                return False  # some chars landed — a paste now would duplicate them
+            return self._clipboard_paste(text)
+
         if self.method == "clipboard":
             if self._clipboard_paste(text):
                 return True
@@ -480,6 +510,8 @@ class Injector:
         if self.method == "keystrokes":
             if self._direct_inject(text):
                 return True
+            if self._partial_direct:
+                return False  # some chars landed — a paste now would duplicate them
             print("[Injector] Keystrokes mode fallback -> clipboard")
             return self._clipboard_paste(text)
 
@@ -502,14 +534,24 @@ class Injector:
             ok = _send_unicode(text)
             method = "SendInput/VK_PACKET"
             if not ok:
-                ok = _post_wm_char(text)
+                posted, failed = _post_wm_char(text)
+                ok = posted > 0 and failed == 0
+                if posted > 0 and failed > 0:
+                    self._partial_direct = True
                 method = "WM_CHAR (fallback)"
         else:
             # Native apps (Outlook, Word, etc.): WM_CHAR — modifier-state agnostic
-            ok = _post_wm_char(text)
+            posted, failed = _post_wm_char(text)
+            ok = posted > 0 and failed == 0
             method = "WM_CHAR"
             if not ok:
-                # WM_CHAR failed (no foreground window?) — try VK_PACKET
+                if posted > 0:
+                    # Partial: SOME characters landed. Falling through to another
+                    # method (or the inject() retry) would duplicate them.
+                    self._partial_direct = True
+                    print("[Injector] Partial WM_CHAR injection — not retrying to avoid duplicates")
+                    return False
+                # Nothing landed at all — safe to try VK_PACKET
                 ok = _send_unicode(text)
                 method = "SendInput/VK_PACKET (fallback)"
 
@@ -523,12 +565,38 @@ class Injector:
     # ── Clipboard helpers ──────────────────────────────────────────────────────
 
     @staticmethod
-    def _clipboard_set(text: str, bump: bool = True) -> str:
+    def _clipboard_has_nontext() -> bool:
+        """True when the clipboard holds content with no text representation
+        (screenshot, copied files, cells) — content we can't back up/restore."""
+        CF_UNICODETEXT = 13
+        CF_TEXT = 1
+        has_any = False
+        has_text = False
+        if _u32.OpenClipboard(None):
+            try:
+                fmt = 0
+                while True:
+                    fmt = ctypes.windll.user32.EnumClipboardFormats(fmt)
+                    if not fmt:
+                        break
+                    has_any = True
+                    if fmt in (CF_UNICODETEXT, CF_TEXT):
+                        has_text = True
+                        break
+            except Exception:
+                pass
+            finally:
+                _u32.CloseClipboard()
+        return has_any and not has_text
+
+    @staticmethod
+    def _clipboard_set(text: str, bump: bool = True) -> tuple[bool, str]:
         """
         Write *text* to the Windows clipboard via ctypes (no pyperclip dependency).
-        Returns the previous clipboard text so the caller can restore it later,
-        or '' if the previous content could not be read.
-        Works for any text length without subprocess overhead.
+        Returns (success, previous_text). Success is verified by readback —
+        callers MUST NOT send Ctrl+V when success is False, or whatever stale
+        content sits on the clipboard (a password, an old copy) gets pasted
+        instead of the dictation.
 
         bump=True advances the global clipboard generation so a delayed restore
         from an earlier paste knows it has been superseded. Restores pass
@@ -601,20 +669,23 @@ class Injector:
                         _u32.CloseClipboard()
 
                 if verified:
-                    print(f"[Injector] Clipboard verified on attempt {_attempt + 1}")
-                    return previous
+                    return True, previous
 
                 print(f"[Injector] Clipboard readback mismatch on attempt {_attempt + 1} — retrying")
 
             time.sleep(0.02)
 
         print("[Injector] Clipboard set failed after 3 attempts")
-        return previous
+        return False, previous
 
     @staticmethod
     def _clipboard_restore(original: str, gen: int) -> None:
         """Restore the clipboard to *original* after a short delay, but only if
         no newer paste has happened in the meantime (otherwise we'd clobber it)."""
+        if not original:
+            # Nothing to restore. Writing "" would EmptyClipboard for no benefit
+            # (and the dictated text staying on the clipboard is often useful).
+            return
 
         def _do():
             time.sleep(0.45)  # 0.45s: enough for slow Chrome tabs to process the paste
@@ -632,36 +703,29 @@ class Injector:
         """
         Copy *text* to the clipboard then send Ctrl+V via SendInput.
         Works for all apps — native, browsers, React/Vue/Angular (ChatGPT etc.)
-        and any text length.
+        and any text length. Returns False WITHOUT sending Ctrl+V when the
+        clipboard write could not be verified — pasting stale clipboard content
+        (a password, an old copy) into the target would be far worse than
+        falling back to direct injection.
         """
         try:
-            VK_CTRL = 0x11
-            VK_V = 0x56
-            VK_MENU = 0x12
             u32 = ctypes.windll.user32
 
-            original = self._clipboard_set(text)
+            ok, original = self._clipboard_set(text)
+            if not ok:
+                return False
             with _clip_lock:
                 my_gen = _clip_gen
-            time.sleep(0.08)  # let clipboard settle
+            time.sleep(0.04)  # settle (write already readback-verified)
 
-            # Release Alt if still held — prevents Paste Special in Office
-            if u32.GetAsyncKeyState(VK_MENU) & 0x8000:
-                inp = _Input(type=_INPUT_KEYBOARD)
-                inp.ki.wVk = VK_MENU
-                inp.ki.dwFlags = _KEYEVENTF_KEYUP
-                u32.SendInput(1, (_Input * 1)(inp), ctypes.sizeof(_Input))
-                time.sleep(0.03)
-
-            # Also release Ctrl if held (prevents Ctrl+V being treated as Ctrl+Ctrl+V)
-            if u32.GetAsyncKeyState(VK_CTRL) & 0x8000:
-                inp = _Input(type=_INPUT_KEYBOARD)
-                inp.ki.wVk = VK_CTRL
-                inp.ki.dwFlags = _KEYEVENTF_KEYUP
-                u32.SendInput(1, (_Input * 1)(inp), ctypes.sizeof(_Input))
-                time.sleep(0.02)
+            # Release ALL held modifiers (Alt → Paste Special in Office,
+            # Ctrl → Ctrl+Ctrl+V, Shift → Ctrl+Shift+V paste-without-format,
+            # Win → Win+V clipboard-history popup).
+            _release_modifiers()
 
             # Atomic Ctrl+V via SendInput (no interleaving with hardware events)
+            VK_CTRL = 0x11
+            VK_V = 0x56
             fg_now = u32.GetForegroundWindow()
             print(f"[Injector] Sending Ctrl+V, fg_hwnd={fg_now:#x}")
             ctrl_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL))
@@ -706,10 +770,12 @@ class Injector:
             VK_V = 0x56
             u32 = ctypes.windll.user32
 
-            original = self._clipboard_set(text)
+            ok, original = self._clipboard_set(text)
+            if not ok:
+                return False
             with _clip_lock:
                 my_gen = _clip_gen
-            time.sleep(0.08)
+            time.sleep(0.04)
 
             ctrl_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL))
             shift_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_SHIFT))

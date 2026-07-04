@@ -95,6 +95,8 @@ class FloatingPopup:
         self._mode: Optional[str] = None
         self._on_insert: Optional[Callable] = None
         self._on_replace: Optional[Callable] = None
+        self._on_insert_result: Optional[Callable] = None
+        self._session_token: int = 0
         self._target_hwnd: int = 0
         self._cursor_x: int = 0
         self._cursor_y: int = 0
@@ -164,15 +166,22 @@ class FloatingPopup:
         cursor_x: int = 0,
         cursor_y: int = 0,
         upgrading: bool = False,
+        session: int = 0,
+        on_insert_result: Callable[[str], None] = None,
     ) -> None:
         self._on_insert = on_insert
         self._on_replace = on_replace
+        self._on_insert_result = on_insert_result
         self._inserted_ok = inserted
         self._target_hwnd = hwnd
         self._original_text = text
         self._current_result = None
         self._upgrading = upgrading
         self._upgrade_result = None
+        # Session token: a slow upgrade thread from a PREVIOUS dictation must
+        # not attach its text to this popup (Replace would then undo the new
+        # dictation and inject the old one).
+        self._session_token = session
         # If explicit cursor coords are provided (e.g. refine-selection flow where
         # show_status was never called), also update _status_cx/cy so _enter_icon_mode
         # and _expand_to_panel position the popup on the correct monitor.
@@ -970,6 +979,9 @@ class FloatingPopup:
         self._unregister_space_dismiss()
         self._mode = None
         self._ai_busy = False
+        # Stop an in-flight voice-prompt recording — closing the panel must not
+        # leave the mic stream open with a late transcription going nowhere.
+        self._mic_recording = False
         self._upgrading = False
         self._upgrade_result = None
         self._ai_status.configure(text="")
@@ -978,12 +990,36 @@ class FloatingPopup:
         self._hide_all_frames()
         self.root.withdraw()
 
-    def set_upgrade_result(self, accurate_text: str) -> None:
-        """Called from background thread when the accurate model finishes."""
+    def clear_upgrading(self, session: int = 0) -> None:
+        """Upgrade finished with nothing better to offer — stop showing
+        'Improving accuracy…' (it previously stayed forever in that case)."""
+        if session and session != getattr(self, "_session_token", 0):
+            return
         if self.root:
-            self.root.after(0, lambda: self._on_upgrade_ready(accurate_text))
+            def _clear():
+                if session and session != getattr(self, "_session_token", 0):
+                    return
+                self._upgrading = False
+                if self._mode == "refinement" and not self._ai_busy and self._current_result is None:
+                    self._ai_status.configure(text="")
+                    self._ai_status.pack_forget()
+            self.root.after(0, _clear)
 
-    def _on_upgrade_ready(self, accurate_text: str) -> None:
+    def set_upgrade_result(self, accurate_text: str, session: int = 0) -> None:
+        """Called from background thread when the accurate model finishes.
+        session must match the token passed to show_cursor_icon — stale results
+        from an earlier dictation are dropped."""
+        if session and session != getattr(self, "_session_token", 0):
+            print(f"[Popup] Discarding stale upgrade result (session {session})")
+            return
+        if self.root:
+            self.root.after(0, lambda: self._on_upgrade_ready(accurate_text, session))
+
+    def _on_upgrade_ready(self, accurate_text: str, session: int = 0) -> None:
+        # Re-check on the UI thread — a new dictation may have arrived between
+        # the after() call and now.
+        if session and session != getattr(self, "_session_token", 0):
+            return
         self._upgrading = False
         self._upgrade_result = accurate_text
         if self._mode == "refinement":
@@ -1007,8 +1043,14 @@ class FloatingPopup:
             threading.Thread(target=cb, daemon=True).start()
 
     def _do_insert_result(self) -> None:
-        """Insert the AI result — undoes the original and inserts the refined version."""
-        if self._current_result and self._on_replace:
+        """Insert the AI result at the caret WITHOUT undoing anything — for when
+        the original injection failed or the user wants the result appended.
+        (Replace & Close is the undo-and-swap action.)"""
+        if self._current_result and self._on_insert_result:
+            result = self._current_result
+            self._do_hide()
+            threading.Thread(target=self._on_insert_result, args=(result,), daemon=True).start()
+        elif self._current_result and self._on_replace:
             result = self._current_result
             self._do_hide()
             threading.Thread(target=self._on_replace, args=(result,), daemon=True).start()
@@ -1194,8 +1236,16 @@ class FloatingPopup:
         self._result_text.insert("1.0", text)
         self._result_text.configure(state="disabled")
 
-        # Auto-size height: grow up to 8 lines, then scroll
-        line_count = int(self._result_text.index("end-1c").split(".")[0])
+        # Auto-size height: count DISPLAY lines (wrapped), not logical newlines —
+        # a single-paragraph result (the normal case) wraps to many display
+        # lines but has line_count == 1, which clamped the box to 2 rows.
+        self._result_text.update_idletasks()
+        try:
+            line_count = int(
+                self._result_text.count("1.0", "end-1c", "displaylines")[0]
+            )
+        except Exception:
+            line_count = int(self._result_text.index("end-1c").split(".")[0])
         self._result_text.configure(height=min(max(line_count, 2), 8))
 
         # Show scrollbar only when text exceeds visible area

@@ -224,6 +224,13 @@ class HotkeyManager:
                             target=self.on_start_recording, daemon=True
                         ).start()
             elif self.mode == "toggle":
+                # Debounce: single-key hotkeys (F-keys, CapsLock fallback) auto-
+                # repeat while held, firing _on_key_down every ~30ms — without
+                # this a held key toggles recording on/off repeatedly.
+                now = time.time()
+                if now - getattr(self, "_last_toggle_ts", 0.0) < 0.35:
+                    return
+                self._last_toggle_ts = now
                 if self._state == AppState.IDLE:
                     self._set_state(AppState.RECORDING)
                     if self.on_start_recording:
@@ -320,6 +327,9 @@ class HotkeyManager:
             if msg.message == _WM_HOTKEY and msg.wParam == HOTKEY_ID:
                 self._on_key_down()
                 if self.mode == "hold" and not self._polling:
+                    # Claim the poller slot BEFORE spawning — setting it inside
+                    # the thread let two rapid WM_HOTKEYs spawn two pollers.
+                    self._polling = True
                     threading.Thread(
                         target=self._poll_release, args=(vk,), daemon=True
                     ).start()
@@ -386,23 +396,74 @@ class HotkeyManager:
                 if registered:
                     self._install_base_key_suppressor()
                 else:
-                    print(
-                        "[HotkeyManager] Hotkey not active — combo was not registered."
-                    )
+                    # RegisterHotKey failed (another app owns the combo). Fall
+                    # back to the keyboard library so the app is never left with
+                    # NO dictation hotkey at all — combo detection still works,
+                    # just without OS-level suppression.
+                    try:
+                        self._kb_hooks.append(
+                            kb.on_press_key(self._base_key, self._kb_combo_down)
+                        )
+                        self._kb_hooks.append(
+                            kb.on_release_key(self._base_key, self._kb_combo_up)
+                        )
+                        registered = True
+                        print(
+                            "[HotkeyManager] Win32 combo unavailable — using "
+                            "keyboard-hook fallback (no OS suppression)."
+                        )
+                    except Exception as e:
+                        print(f"[HotkeyManager] Fallback registration failed: {e}")
 
         else:
-            # Single key — use keyboard library
-            self._kb_hooks.append(kb.on_press_key(self._base_key, self._on_key_down))
-            self._kb_hooks.append(kb.on_release_key(self._base_key, self._on_key_up))
+            # Single key — use keyboard library. suppress=True so the key does
+            # not leak a character into the focused app on every press/release.
+            try:
+                self._kb_hooks.append(
+                    kb.on_press_key(self._base_key, self._on_key_down, suppress=True))
+                self._kb_hooks.append(
+                    kb.on_release_key(self._base_key, self._on_key_up, suppress=True))
+            except Exception:
+                # Some keys can't be hooked with suppression — degrade gracefully
+                self._kb_hooks.append(kb.on_press_key(self._base_key, self._on_key_down))
+                self._kb_hooks.append(kb.on_release_key(self._base_key, self._on_key_up))
             registered = True
 
         self._registered = registered
         if registered:
             print(f"[HotkeyManager] Registered '{self.hotkey}' (mode: {self.mode})")
 
+    def _kb_combo_down(self, _event=None) -> None:
+        """Keyboard-library fallback for combos: fire only when all modifiers
+        are physically held (RegisterHotKey did this filtering for us)."""
+        if self._combo_modifiers_held():
+            self._on_key_down()
+
+    def _kb_combo_up(self, _event=None) -> None:
+        if self.mode == "hold" and self._state == AppState.RECORDING:
+            self._on_key_up()
+
+    def _combo_modifiers_held(self) -> bool:
+        for mod in self._modifiers:
+            vks = _MODIFIER_VKS.get(mod, ())
+            if vks and not any(_user32.GetAsyncKeyState(vk) & 0x8000 for vk in vks):
+                return False
+        return True
+
     def unregister(self) -> None:
         if not self._registered:
             return
+
+        # Unregistering mid-recording would kill the release-poller without
+        # ever firing key-up, wedging the state machine at RECORDING. Cancel
+        # the recording first so downstream state stays consistent.
+        fire_cancel = False
+        with self._lock:
+            if self._state == AppState.RECORDING:
+                self._set_state(AppState.IDLE)
+                fire_cancel = True
+        if fire_cancel and self.on_cancel_recording:
+            threading.Thread(target=self.on_cancel_recording, daemon=True).start()
 
         self._polling = False
         self._remove_base_key_suppressor()

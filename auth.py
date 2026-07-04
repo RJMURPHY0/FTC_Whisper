@@ -285,7 +285,7 @@ class AuthManager:
             return False, "Sign-in failed — please check your email and password."
         except Exception as e:
             # Supabase wraps the real message in several ways
-            msg = getattr(e, "message", None) or getattr(e, "args", [""])[0] if e.args else str(e)
+            msg = getattr(e, "message", None) or (e.args[0] if e.args else str(e))
             msg = str(msg)
             print(f"[Auth] Sign-in error: {msg!r}")
             if "email not confirmed" in msg.lower() or "email_not_confirmed" in msg.lower():

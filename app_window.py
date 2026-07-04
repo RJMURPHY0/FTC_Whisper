@@ -1166,6 +1166,7 @@ class AppWindow:
 
         mic_test_active = [False]
         mic_test_job = [None]
+        mic_test_stamp = [0]
         scan_active = [False]
 
         scan_btn.bind("<Enter>", lambda _e: scan_btn.configure(bg=C["accent"], fg=C["bg"]) if not scan_active[0] else None)
@@ -1213,7 +1214,16 @@ class AppWindow:
             meter_cv.pack(fill="x", pady=(6, 0))
             test_btn.configure(text="Stop")
             test_status.configure(text="Say something…", fg=C["subtext"])
-            self._root.after(5000, lambda: _stop_test() if mic_test_active[0] else None)
+            # Stamp the auto-stop timer: a stale timer from a previous test
+            # must not kill a newly started test early.
+            mic_test_stamp[0] += 1
+            _stamp = mic_test_stamp[0]
+            self._root.after(
+                5000,
+                lambda: _stop_test()
+                if mic_test_active[0] and mic_test_stamp[0] == _stamp
+                else None,
+            )
             _poll_meter()
 
         def _toggle_test():
@@ -1706,6 +1716,10 @@ class AppWindow:
                      "Append a space after each injection (useful for mid-sentence dictation)", False)
         _toggle_card("auto_enter", "Press Enter After Insert",
                      "Send Enter after injecting (useful for chat / search boxes)", False)
+        _toggle_card("warm_mic", "Instant Mic Start",
+                     "Keep the microphone warm so recording starts instantly and the "
+                     "first word is never clipped (mic indicator stays on; audio is "
+                     "only kept for 1.5s and never stored)", True)
 
         # ── Injection method ──────────────────────────────────────────────────
         inj_card = self._card(parent, margin=(0, 4))
@@ -1799,8 +1813,10 @@ class AppWindow:
                     self._update_status_lbl.configure(
                         text=f"Update available: {version}", fg=C["accent"])
                     _restore_check_btn()
+                    # show_update_banner creates tk widgets — it must run on the
+                    # UI thread, not the updater worker thread (crash/corruption).
+                    self.show_update_banner(version, url)
                 self._root.after(0, _apply)
-                self.show_update_banner(version, url)
 
             def _no_update_fallback():
                 import time; time.sleep(6)

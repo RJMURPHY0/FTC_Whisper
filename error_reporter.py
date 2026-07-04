@@ -12,7 +12,14 @@ import urllib.request
 
 def _load_contacts_config() -> tuple[str, str]:
     """Returns (api_url, secret) from config.json, or empty strings if missing."""
-    config_path = os.path.join(os.path.dirname(__file__), "config.json")
+    try:
+        # Use the writable config next to the exe (frozen) / script — reading
+        # os.path.dirname(__file__) resolved to the read-only bundle dir in
+        # PyInstaller builds, so user-edited values were ignored.
+        from config import get_config_path
+        config_path = get_config_path()
+    except Exception:
+        config_path = os.path.join(os.path.dirname(__file__), "config.json")
     try:
         with open(config_path, encoding="utf-8") as f:
             cfg = json.load(f)

@@ -1,12 +1,31 @@
 """
 Microphone audio recorder using sounddevice.
-Records audio in real-time chunks and returns a numpy array when stopped.
+
+Two capture modes:
+  Warm (default): a persistent input stream runs continuously, feeding a small
+  pre-roll ring buffer (~1.5s). start() is then instant — it just flips a flag
+  and seeds the recording with the last ~0.35s of pre-roll, so the first
+  syllable is never lost to stream-open latency (~50-300ms on Windows) and
+  speech that begins ON the go-beep is fully captured.
+
+  Cold (fallback): the stream is opened on start() and closed on stop(),
+  exactly like the pre-1.6 behaviour. Used when the warm stream can't be
+  opened (device unplugged, exclusive-mode conflict) or warm mode is disabled
+  in settings.
+
+Recording keeps an absolute sample counter so the streaming transcription
+session can ask for ranges (get_audio_range) and release committed audio
+(drop_audio_before) without re-copying the whole buffer every tick.
 """
 
 import threading
 import numpy as np
 import sounddevice as sd
+from collections import deque
 from typing import Optional
+
+_PREROLL_KEEP_SECONDS = 1.5   # ring buffer length while idle
+_PREROLL_SEED_SECONDS = 0.35  # how much pre-hotkey audio to prepend to a recording
 
 
 class Recorder:
@@ -15,6 +34,7 @@ class Recorder:
 
     Usage:
         recorder = Recorder(sample_rate=16000)
+        recorder.set_warm(True)   # optional persistent stream
         recorder.start()
         # ... user speaks ...
         audio = recorder.stop()  # returns numpy array of float32 samples
@@ -30,7 +50,14 @@ class Recorder:
         self.channels = channels
         self.input_device = (input_device or "").strip()
         self._chunks: list[np.ndarray] = []
+        self._chunks_samples: int = 0     # samples currently held in _chunks
+        self._chunks_offset: int = 0      # samples dropped from the front (absolute base)
+        self._preroll: deque = deque()    # ring buffer of idle-time chunks (warm mode)
+        self._preroll_samples: int = 0
         self._stream: Optional[sd.InputStream] = None
+        self._warm_enabled = False
+        self._warm_stream_is_open = False
+        self._warm_restart_pending = False  # device changed mid-recording
         self._lock = threading.Lock()
         # Guards stream open/close so a concurrent start()/stop()/monitor can
         # never double-close or leak the underlying PortAudio stream. Separate
@@ -43,6 +70,9 @@ class Recorder:
         self._active_sample_rate: int = sample_rate
         self._last_rms: float = 0.0
         self._last_peak: float = 0.0
+        self._monitor_rms: float = 0.0
+        self._monitor_peak: float = 0.0
+        self._monitor_active = False
 
     @property
     def is_recording(self) -> bool:
@@ -53,29 +83,173 @@ class Recorder:
     def active_sample_rate(self) -> int:
         return int(self._active_sample_rate or self.sample_rate)
 
+    @property
+    def total_recorded_samples(self) -> int:
+        """Absolute number of samples captured since start() (monotonic)."""
+        with self._lock:
+            return self._chunks_offset + self._chunks_samples
+
+    @property
+    def dropped_samples(self) -> int:
+        """Absolute sample position of the start of the retained buffer."""
+        with self._lock:
+            return self._chunks_offset
+
+    # ------------------------------------------------------------------
+    # Stream callbacks
+    # ------------------------------------------------------------------
+
     def _audio_callback(
         self, indata: np.ndarray, _frames: int, _time_info, status
     ) -> None:
-        """Called by sounddevice for each audio chunk."""
+        """Called by sounddevice for each audio chunk (recording OR warm-idle)."""
         if status:
             print(f"[Recorder] Stream status: {status}")
         mono = indata[:, 0] if indata.ndim > 1 else indata
         rms = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
         peak = float(np.max(np.abs(mono))) if mono.size else 0.0
+        data = indata.copy()
+        n = data.shape[0]
         with self._lock:
             self._last_rms = rms
             self._last_peak = peak
             if self._recording:
-                self._chunks.append(indata.copy())
+                self._chunks.append(data)
+                self._chunks_samples += n
+            elif self._warm_enabled:
+                self._preroll.append(data)
+                self._preroll_samples += n
+                max_keep = int(self.active_sample_rate * _PREROLL_KEEP_SECONDS)
+                while self._preroll_samples > max_keep and len(self._preroll) > 1:
+                    dropped = self._preroll.popleft()
+                    self._preroll_samples -= dropped.shape[0]
+
+    def _monitor_callback(
+        self, indata: np.ndarray, _frames: int, _time_info, status
+    ) -> None:
+        """Level-only callback for the Test Mic stream — never stores audio, so
+        a recording started while Test Mic runs can't get interleaved chunks."""
+        mono = indata[:, 0] if indata.ndim > 1 else indata
+        with self._lock:
+            self._monitor_rms = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
+            self._monitor_peak = float(np.max(np.abs(mono))) if mono.size else 0.0
+
+    # ------------------------------------------------------------------
+    # Warm (persistent) stream
+    # ------------------------------------------------------------------
+
+    def set_warm(self, enabled: bool) -> None:
+        """Enable/disable the always-open input stream with pre-roll buffer."""
+        self._warm_enabled = bool(enabled)
+        if enabled:
+            self._ensure_warm_stream()
+        else:
+            self._close_stream_if_idle()
+
+    def restart_warm(self) -> None:
+        """Re-open the warm stream (after an input-device change)."""
+        if not self._warm_enabled:
+            return
+        with self._stream_lifecycle_lock:
+            if self._recording:
+                # Can't swap streams mid-recording — stop() sees this flag,
+                # closes the old-device stream and reopens on the new device.
+                self._warm_restart_pending = True
+                return
+            self._close_stream_locked()
+        self._ensure_warm_stream()
+
+    def _ensure_warm_stream(self) -> bool:
+        """Open the persistent stream if not already running. Returns success."""
+        with self._stream_lifecycle_lock:
+            if self._stream is not None:
+                try:
+                    if self._stream.active:
+                        return True
+                except Exception:
+                    pass
+                self._close_stream_locked()
+            try:
+                self._stream = self._open_best_input_stream()
+                self._stream.start()
+                self._warm_stream_is_open = True
+                where = self._active_device_name or "default input"
+                print(f"[Recorder] Warm mic stream open ({where}, {self.active_sample_rate} Hz).")
+                return True
+            except Exception as e:
+                self._stream = None
+                self._warm_stream_is_open = False
+                print(f"[Recorder] Warm stream unavailable ({e}) — cold-open per recording.")
+                return False
+
+    def _close_stream_locked(self) -> None:
+        stream = self._stream
+        self._stream = None
+        self._warm_stream_is_open = False
+        if stream is not None:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception as e:
+                print(f"[Recorder] Error closing stream: {e}")
+
+    def _close_stream_if_idle(self) -> None:
+        with self._stream_lifecycle_lock:
+            if not self._recording:
+                self._close_stream_locked()
+
+    # ------------------------------------------------------------------
+    # Recording
+    # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Start recording with resilient input-device selection/fallback."""
-        if self._recording:
-            print("[Recorder] Already recording.")
+        """Start recording. Instant when the warm stream is running."""
+        with self._lock:
+            if self._recording:
+                # Defensive: a previous session that was never stopped must not
+                # leak its audio into this one.
+                print("[Recorder] Already recording — resetting buffer.")
+                self._chunks = []
+                self._chunks_samples = 0
+                self._chunks_offset = 0
+                return
+
+        warm_ready = self._warm_enabled and self._ensure_warm_stream()
+
+        if warm_ready:
+            with self._lock:
+                self._chunks = []
+                self._chunks_samples = 0
+                self._chunks_offset = 0
+                # Seed with the last ~0.35s of pre-roll so speech that started
+                # slightly before the hotkey (or during it) is captured.
+                seed_max = int(self.active_sample_rate * _PREROLL_SEED_SECONDS)
+                seeded = 0
+                seed_chunks: list[np.ndarray] = []
+                for chunk in reversed(self._preroll):
+                    seed_chunks.append(chunk)
+                    seeded += chunk.shape[0]
+                    if seeded >= seed_max:
+                        break
+                for chunk in reversed(seed_chunks):
+                    self._chunks.append(chunk)
+                    self._chunks_samples += chunk.shape[0]
+                self._preroll.clear()
+                self._preroll_samples = 0
+                self._last_rms = 0.0
+                self._last_peak = 0.0
+                self._recording = True
+            print(
+                f"[Recorder] Recording started instantly (warm, "
+                f"{self._active_device_name or 'default input'}, {self.active_sample_rate} Hz)."
+            )
             return
 
+        # Cold path — open the stream now (legacy behaviour)
         with self._lock:
             self._chunks = []
+            self._chunks_samples = 0
+            self._chunks_offset = 0
             self._recording = True
             self._active_sample_rate = self.sample_rate
             self._last_rms = 0.0
@@ -90,7 +264,8 @@ class Recorder:
                 f"[Recorder] Recording started ({where}, {self.active_sample_rate} Hz)."
             )
         except Exception as e:
-            self._recording = False
+            with self._lock:
+                self._recording = False
             self._stream = None
             print(f"[Recorder] Failed to start recording: {e}")
             raise
@@ -109,26 +284,75 @@ class Recorder:
             recent = self._chunks[-max_chunks:]
             return np.concatenate(recent, axis=0).flatten()
 
+    def get_audio_range(self, start_sample: int) -> Optional[np.ndarray]:
+        """Return audio from absolute sample position start_sample to now."""
+        with self._lock:
+            if not self._chunks:
+                return None
+            rel = start_sample - self._chunks_offset
+            if rel <= 0:
+                chunks = list(self._chunks)
+                skip = 0
+            else:
+                pos = 0
+                chunks = []
+                skip = 0
+                for i, c in enumerate(self._chunks):
+                    n = c.shape[0]
+                    if pos + n <= rel:
+                        pos += n
+                        continue
+                    if not chunks:
+                        skip = rel - pos
+                    chunks.append(c)
+                    pos += n
+                if not chunks:
+                    return None
+        audio = np.concatenate(chunks, axis=0).flatten()
+        return audio[skip:] if skip else audio
+
+    def drop_audio_before(self, abs_sample: int) -> None:
+        """Discard whole chunks that lie entirely before abs_sample (memory bound
+        for long streamed recordings; committed audio is never needed again)."""
+        with self._lock:
+            while self._chunks:
+                n = self._chunks[0].shape[0]
+                if self._chunks_offset + n > abs_sample:
+                    break
+                self._chunks_offset += n
+                self._chunks_samples -= n
+                self._chunks.pop(0)
+
     def stop(self) -> Optional[np.ndarray]:
         """
-        Stop recording and return the captured audio as a 1D float32 numpy array.
-        Returns None if no audio was captured.
+        Stop recording and return the captured audio as a 1D float32 numpy array
+        (only audio since the last drop_audio_before call). Returns None if no
+        audio was captured. In warm mode the stream stays open for the next
+        recording; in cold mode it is closed.
         """
-        if not self._recording:
-            print("[Recorder] Not currently recording.")
-            return None
+        with self._lock:
+            if not self._recording:
+                print("[Recorder] Not currently recording.")
+                return None
+            self._recording = False
 
-        self._recording = False
-
-        with self._stream_lifecycle_lock:
-            stream = self._stream
-            self._stream = None
-        if stream is not None:
-            try:
-                stream.stop()
-                stream.close()
-            except Exception as e:
-                print(f"[Recorder] Error closing stream: {e}")
+        # Keep the stream open only when warm mode is (still) on and no device
+        # change is pending. Closing here also covers warm mode being disabled
+        # MID-recording — otherwise the stale open stream would double-feed
+        # _chunks alongside the next cold-opened stream.
+        keep_open = (
+            self._warm_enabled
+            and self._warm_stream_is_open
+            and not self._warm_restart_pending
+        )
+        if not keep_open:
+            with self._stream_lifecycle_lock:
+                self._close_stream_locked()
+            if self._warm_enabled:
+                self._warm_restart_pending = False
+                threading.Thread(
+                    target=self._ensure_warm_stream, daemon=True, name="warm-reopen"
+                ).start()
 
         with self._lock:
             if not self._chunks:
@@ -136,34 +360,52 @@ class Recorder:
                 return None
             audio = np.concatenate(self._chunks, axis=0).flatten()
             self._chunks = []
+            self._chunks_samples = 0
+            self._chunks_offset = 0
 
         duration = len(audio) / max(self.active_sample_rate, 1)
         print(f"[Recorder] Captured {duration:.1f}s of audio.")
         return audio
 
+    # ------------------------------------------------------------------
+    # Mic test monitor
+    # ------------------------------------------------------------------
+
     def start_monitor(self, device_name: str = "") -> None:
-        """Open a non-recording stream just to read live levels (mic test)."""
+        """Open a level-only stream for the Test Mic feature. Uses a dedicated
+        callback so it can never contaminate a recording's audio buffer."""
         self.stop_monitor()
         old_device = self.input_device
         old_index = self._active_device_index
         old_name = self._active_device_name
+        old_rate = self._active_sample_rate
         self.input_device = device_name.strip()
+        # Force re-resolution: the cached index would silently ignore the
+        # explicitly requested device.
+        self._active_device_index = None
+        self._active_device_name = ""
         try:
-            self._monitor_stream = self._open_best_input_stream()
+            self._monitor_stream = self._open_best_input_stream(
+                callback=self._monitor_callback
+            )
             self._monitor_stream.start()
+            self._monitor_active = True
         except Exception:
             self.input_device = old_device
             self._active_device_index = old_index
             self._active_device_name = old_name
+            self._active_sample_rate = old_rate
             self._monitor_stream = None
             raise
         # Restore recording-device state — monitor must not pollute the cache
         self.input_device = old_device
         self._active_device_index = old_index
         self._active_device_name = old_name
+        self._active_sample_rate = old_rate
 
     def stop_monitor(self) -> None:
         """Close the mic-test monitor stream if open."""
+        self._monitor_active = False
         stream = getattr(self, "_monitor_stream", None)
         if stream is not None:
             try:
@@ -172,6 +414,9 @@ class Recorder:
             except Exception:
                 pass
             self._monitor_stream = None
+        with self._lock:
+            self._monitor_rms = 0.0
+            self._monitor_peak = 0.0
 
     def get_input_devices(self) -> list[dict]:
         """List available input audio devices."""
@@ -190,16 +435,25 @@ class Recorder:
         return input_devices
 
     def get_live_levels(self) -> tuple[float, float]:
-        """Return most recent (rms, peak) levels from the stream callback."""
+        """Return most recent (rms, peak) levels. While the Test Mic monitor is
+        active its levels take priority (they reflect the selected device)."""
         with self._lock:
+            if self._monitor_active:
+                return self._monitor_rms, self._monitor_peak
             return self._last_rms, self._last_peak
 
-    def _open_best_input_stream(self) -> sd.InputStream:
+    # ------------------------------------------------------------------
+    # Stream opening / device selection
+    # ------------------------------------------------------------------
+
+    def _open_best_input_stream(self, callback=None) -> sd.InputStream:
         # Fast path: reuse the last known good device index — skips sd.query_devices()
         # enumeration on every recording after the first (~20-100ms saved per press).
         if self._active_device_index is not None:
             try:
-                stream = self._open_stream_with_rates(self._active_device_index)
+                stream = self._open_stream_with_rates(
+                    self._active_device_index, callback=callback
+                )
                 return stream
             except Exception:
                 # Device disappeared or changed — fall through to full enumeration
@@ -208,12 +462,12 @@ class Recorder:
 
         candidates = self._candidate_device_indices()
         if not candidates:
-            return self._open_stream_with_rates(None)
+            return self._open_stream_with_rates(None, callback=callback)
 
         last_err: Optional[Exception] = None
         for dev_index in candidates:
             try:
-                stream = self._open_stream_with_rates(dev_index)
+                stream = self._open_stream_with_rates(dev_index, callback=callback)
                 info = sd.query_devices(dev_index)
                 self._active_device_index = int(dev_index)
                 self._active_device_name = str(info.get("name", f"device {dev_index}"))
@@ -234,7 +488,9 @@ class Recorder:
             ) from last_err
         raise RuntimeError("No working microphone device found")
 
-    def _open_stream_with_rates(self, dev_index: Optional[int]) -> sd.InputStream:
+    def _open_stream_with_rates(
+        self, dev_index: Optional[int], callback=None
+    ) -> sd.InputStream:
         rates = [int(self.sample_rate)]
         try:
             dev_info = (
@@ -257,11 +513,12 @@ class Recorder:
                     samplerate=rate,
                     channels=self.channels,
                     dtype="float32",
-                    callback=self._audio_callback,
+                    callback=callback or self._audio_callback,
                     blocksize=1024,
                     device=dev_index,
                 )
-                self._active_sample_rate = int(rate)
+                if callback is None:
+                    self._active_sample_rate = int(rate)
                 return stream
             except Exception as e:
                 last_err = e

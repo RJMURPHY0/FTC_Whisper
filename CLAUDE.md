@@ -44,14 +44,37 @@ The app is intentionally multi-threaded. tkinter runs on the **main thread** (`A
 
 Consequence: **never call tkinter widgets from a background thread directly** — always use `self._root.after(0, lambda: ...)`.
 
-### Transcription pipeline (the core flow)
-`_on_stop_recording()` in `app.py` orchestrates everything:
+### Transcription pipeline (the core flow, v1.6+)
+Two engines exist. **Parakeet** (`asr_engine.py`, NVIDIA Parakeet TDT 0.6b v2 int8 ONNX
+via `onnx-asr`) is the primary for English: better accuracy than whisper-large-v3 at
+~20x realtime on CPU, punctuation/caps built in, cost proportional to audio length.
+The **whisper pipeline** (`transcriber.py`, faster-whisper) is the fallback: non-English
+language configured, Parakeet model not yet downloaded (~660 MB one-time into
+`%LOCALAPPDATA%\FTC Whisper\models` via plain HTTPS — NOT the hf_hub cache, whose
+symlink-based layout raises WinError 1314 on stock Windows), or load failure.
 
-1. **Fast pass** — `fast_transcriber` (always `base.en`) transcribes and injects immediately
-2. **Fallback** — if fast returns empty, `transcriber` (user-configured model) runs synchronously
-3. **Background upgrade** — if fast succeeded, `_upgrade()` thread runs `transcriber` + optional LLM `context_fix`, then calls `popup.set_upgrade_result()` so the user can accept it
+**Parakeet path** (`_use_parakeet()` true): `_on_start_recording` creates a
+`StreamingSession` (`stream_session.py`). While recording, its worker transcribes
+incrementally: once uncommitted audio exceeds ~10s it finds a silence boundary,
+transcribes up to it once, appends to a committed list, and releases that audio
+(`recorder.drop_audio_before`). At hotkey-release, `session.finalize()` stops the
+recorder and transcribes only the remaining tail — stop-latency stays constant
+(~0.3-0.8s) regardless of dictation length. The upgrade pass is LLM `context_fix`
+only (a whisper re-pass would usually be a downgrade). Live captions are pushed from
+the same worker (`on_caption`) — no separate caption thread in this mode.
 
-Both transcribers are pre-loaded at startup in parallel daemon threads. `Transcriber.transcribe()` has a `blocking=False` mode that returns `""` instead of queuing — used to avoid stacking calls.
+**Whisper path**: fast pass (`base.en`, beam=1) on the full clip → inject; a silence
+energy-gate runs before the synchronous accurate fallback; background `_upgrade()`
+runs the user model + `context_fix`. The whisper caption loop paces on
+`_caption_stop_event` (CLEAR while running) — never wait on `_caption_loop_running`,
+which is SET while running so `Event.wait()` returns immediately (busy-spin bug).
+
+All upgrade results are stamped with `self._dictation_seq` and passed as `session=` to
+`popup.set_upgrade_result()` — the popup discards stale results from an earlier dictation.
+
+All engines share the same `transcribe(audio, rate, blocking=, context_words=, hotwords_str=)`
+surface and are pre-loaded at startup in parallel daemon threads. `blocking=False`
+returns `""` instead of queuing — used by caption/preview ticks.
 
 ### Accuracy pipeline (added in v1.0.7)
 Three layers that cost zero latency on the injection path:
@@ -79,7 +102,15 @@ The popup is a borderless `tk.Toplevel` that stays `topmost` and never takes foc
 `Config` is a `@dataclass` in `config.py`. Saved to `config.json` next to the exe (or next to `app.py` when running from source). PyInstaller frozen builds bootstrap the config from `sys._MEIPASS/config.json` on first run. `_on_settings_change()` in `app.py` handles live updates — most fields take effect immediately; `input_device` and `whisper_model` require a restart.
 
 ### AI refinement
-`AIRefiner` in `ai_refiner.py` wraps Claude Haiku (`claude-haiku-4-5-20251001`). All modes are defined in `REFINE_PROMPTS` at the top of the file. The `context_fix` mode is special — it must NOT append `_NO_FORMAT` and has a strict "fix misheard words only" prompt with a word-count validation guard in `context_fix()`. The `punctuation` mode fixes punctuation, grammar, and spelling (shown in the popup as "✨ Fix All"). All other modes are user-triggered from the popup refinement panel.
+`AIRefiner` in `ai_refiner.py` prefers OpenRouter (`config.openrouter_model`, default
+`google/gemini-2.5-flash-lite`, with an in-request `models` fallback array) and falls
+back to Anthropic Claude Haiku direct. Both clients use a 20s timeout / 1 retry. All
+modes are defined in `REFINE_PROMPTS` at the top of the file. The `context_fix` mode is
+special — it must NOT append `_NO_FORMAT`, uses the minimal corrector system prompt
+(NOT the style prompt, which contradicts "change nothing"), and has a word-count
+tolerance guard in `context_fix()`. `max_tokens` scales with input length. The
+`punctuation` mode fixes punctuation, grammar, and spelling (shown in the popup as
+"✨ Fix All"). All other modes are user-triggered from the popup refinement panel.
 
 ### Update flow
 `updater.py` checks `https://api.github.com/repos/RJMURPHY0/FTC_Whisper/releases/latest` for an asset named `FTC-Whisper.exe`. If a newer version is found, `apply_update()` writes a detached batch script that waits for the running process to exit, copies the downloaded exe over itself, relaunches, then self-deletes.
@@ -95,13 +126,27 @@ The **running app** owns auto-launch, not the installer. On every launch `main()
 ### Auth and Supabase
 `AuthManager` in `auth.py` handles Supabase email auth. Session tokens are encrypted on disk using Windows DPAPI — only readable by the same Windows user. `SupabaseLogger` in `supabase_client.py` does all DB writes fire-and-forget. Both are optional; the app works fully offline without them.
 
-### Mic monitoring
-`Recorder.start_monitor(device_name)` and `stop_monitor()` open a lightweight stream purely for level-reading (used by the Test Mic feature in Settings) — they share the same `_audio_callback` but do not set `_recording`, so no audio is stored. These are separate from `start()`/`stop()` which control the actual recording stream.
+### Warm mic and monitoring
+By default (`config.warm_mic`) the Recorder keeps a persistent input stream open,
+feeding a ~1.5s pre-roll ring buffer. `start()` is then instant: it flips a flag and
+seeds the recording with ~0.35s of pre-roll, so the first syllable is never lost to
+stream-open latency — and the go-beep fires AFTER capture is flowing. `stop()` keeps
+the warm stream open. Cold open/close per recording remains as the fallback. The
+recorder tracks absolute sample positions (`total_recorded_samples`, `get_audio_range`,
+`drop_audio_before`, `dropped_samples`) for the streaming session.
+
+`Recorder.start_monitor(device_name)` / `stop_monitor()` (Test Mic in Settings) use a
+DEDICATED level-only callback — never the recording callback — so a recording started
+during a mic test can't get interleaved chunks from two streams. `get_live_levels()`
+returns the monitor's levels while a monitor is active.
 
 ## Key invariants
 
-- `_update_context()` is called with the **accurate** result only, never the fast-model result — so the rolling context always reflects the highest-quality transcription
-- `context_fix()` validates word count matches before accepting the LLM result — rejecting additions/deletions keeps output exactly what the user said
-- The `_transcribe_lock` in `Transcriber` serialises all transcription calls on a single model instance — do not call `transcribe()` concurrently on the same object
+- `_update_context()` is called with the **best available** result only (Parakeet final / whisper accurate / LLM-fixed), never the whisper fast-model result — so the rolling context always reflects the highest-quality transcription
+- `context_fix()` validates word count (with small tolerance) before accepting the LLM result — rejecting additions/deletions keeps output exactly what the user said
+- The `_transcribe_lock` in `Transcriber`/`ParakeetTranscriber` serialises all transcription calls on a single model instance — do not call `transcribe()` concurrently on the same object
 - Popup widget mutations always happen via `root.after(0, ...)` from background threads
+- `popup.set_upgrade_result()` must always be called with the `session=` stamp of the dictation the result belongs to
+- `_clipboard_paste` must NEVER send Ctrl+V when `_clipboard_set` reported failure — that pastes stale clipboard content (possibly a password) and reports success
+- The bundled config in `ftc_whisper.spec` is sanitized at build time — API keys must never ship inside the public release exe
 - `APP_VERSION` in `app.py`, `filevers`/`prodvers` tuples, and `FileVersion`/`ProductVersion` strings in `version_info.txt` must all be kept in sync before every build

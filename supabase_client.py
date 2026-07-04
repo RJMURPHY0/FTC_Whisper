@@ -65,7 +65,7 @@ class SupabaseLogger:
             return
         payload = {
             "transcribed_text": text,
-            "created_at": datetime.datetime.utcnow().isoformat(),
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }
         if self._user_id and self._user_id != "local":
             payload["user_id"] = self._user_id
@@ -79,7 +79,7 @@ class SupabaseLogger:
             "transcribed_text": original,
             "refined_text": refined,
             "refinement_mode": mode,
-            "created_at": datetime.datetime.utcnow().isoformat(),
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }
         if self._user_id and self._user_id != "local":
             payload["user_id"] = self._user_id
@@ -148,12 +148,16 @@ class SupabaseLogger:
         return result[0] or self._fetch_local(limit)
 
     def clear_history(self) -> bool:
-        """Delete all transcription records for the current user. Returns True on success."""
+        """Delete all transcription records for the current user AND the local
+        history file. Returns True if anything was cleared. (Clearing only the
+        remote left fetch_history falling back to the untouched local file, so
+        'Clear' visibly did nothing.)"""
+        local_ok = self._clear_local()
         if not self._enabled:
-            return False
+            return local_ok
         if not self._user_id or self._user_id == "local":
-            print("[Supabase] Clear history skipped: no authenticated user_id")
-            return False
+            print("[Supabase] Remote clear skipped: no authenticated user_id")
+            return local_ok
         try:
             q = self._get_client().table(_TABLE).delete()
             q = q.eq("user_id", self._user_id)
@@ -162,6 +166,18 @@ class SupabaseLogger:
             return True
         except Exception as e:
             print(f"[Supabase] Clear history failed: {e}")
+            return local_ok
+
+    def _clear_local(self) -> bool:
+        try:
+            path = _local_history_path()
+            with _local_history_lock:
+                if os.path.exists(path):
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump([], f)
+            return True
+        except Exception as e:
+            print(f"[LocalHistory] Clear failed: {e}")
             return False
 
     def _append_local(self, text: str) -> None:
@@ -177,7 +193,7 @@ class SupabaseLogger:
                         entries = []
                 entries.insert(0, {
                     "transcribed_text": text,
-                    "created_at": datetime.datetime.utcnow().isoformat(),
+                    "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 })
                 entries = entries[:200]
                 with open(path, "w", encoding="utf-8") as f:

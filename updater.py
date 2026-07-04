@@ -25,7 +25,18 @@ def cached_release() -> Optional[dict]:
 
 
 def _version_tuple(v: str):
-    return tuple(int(x) for x in v.lstrip("v").split("."))
+    """Tolerant parse: 'v1.6.0-beta' / '1.6.0rc1' -> (1, 6, 0). A non-numeric
+    tag must not make is_newer fail closed and hide real updates."""
+    parts = []
+    for seg in v.lstrip("vV").split("."):
+        digits = ""
+        for ch in seg:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
 
 
 def is_newer(latest: str, current: str) -> bool:
@@ -133,8 +144,8 @@ while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{
 Log "Old process exited."
 # Remove Mark-of-the-Web so Defender releases its scan lock on the download
 Unblock-File -Path $NewExe -ErrorAction SilentlyContinue
-Log "Unblocked download. Waiting 25 s for Defender to finish scanning..."
-Start-Sleep -Seconds 25
+Log "Unblocked download. Brief settle before copy (retry loop handles any remaining scan lock)..."
+Start-Sleep -Seconds 3
 # Try to overwrite (up to 30 retries, 2 s apart = 60 s total)
 $ok = $false
 for ($i = 0; $i -lt 30; $i++) {{
