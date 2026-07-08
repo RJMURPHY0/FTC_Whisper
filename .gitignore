@@ -31,3 +31,8 @@ dist/
 
 # Claude Code assistant memory (not project source)
 memory/
+
+# Build logs + dream/memory backup dumps (local artefacts, not source)
+build_*.log
+memory-backup-dream-*/
+backup-dream-*/
