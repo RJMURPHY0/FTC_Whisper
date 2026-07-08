@@ -45,7 +45,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.3"
+APP_VERSION = "1.6.4"
 
 
 class WhisperFlowApp:
@@ -166,6 +166,10 @@ class WhisperFlowApp:
         self._dictation_seq = 0
         # Model change requested while recording — applied when idle again
         self._pending_model_change: str | None = None
+        # Auto-update: restart only after a stretch of inactivity. Seeded with
+        # "now" so a just-launched app never restarts under the user's feet.
+        self._last_dictation_ts = time.time()
+        self._auto_update_versions: set = set()
 
         self.hotkey_manager = HotkeyManager(
             hotkey=config.hotkey,
@@ -311,6 +315,9 @@ class WhisperFlowApp:
         # Check for updates in the background; show banner in Settings if found
         self._start_update_check()
 
+        # If this launch is the first run of a new version, toast it
+        self._announce_update_if_any()
+
     def _fetch_remote_api_keys(self) -> None:
         try:
             if not self.ai_refiner.openrouter_api_key:
@@ -335,9 +342,12 @@ class WhisperFlowApp:
 
         def _on_update_found(version: str, url: str) -> None:
             print(f"[App] Update available: {version}")
+            auto = getattr(self.config, "auto_update", True)
             self.app_window._ui_after(
-                0, lambda: self.app_window.show_update_banner(version, url)
+                0, lambda: self.app_window.show_update_banner(version, url, auto=auto)
             )
+            if auto:
+                self._start_auto_update(version, url)
 
         # Re-check periodically, not just at launch: the app runs for days via
         # the logon task, so a startup-only check leaves users on a stale build
@@ -350,6 +360,67 @@ class WhisperFlowApp:
         threading.Thread(
             target=_check_loop, daemon=True, name="update-check-loop"
         ).start()
+
+    def _start_auto_update(self, version: str, url: str) -> None:
+        """Download + install *version* in the background, restarting only once
+        the app has been idle for a while. One attempt per version per process —
+        the periodic check loop must not stack duplicate workers."""
+        from updater import current_exe_path, run_auto_update
+
+        exe_path = current_exe_path()
+        if not exe_path:
+            print("[App] Auto-update skipped — running from source.")
+            return
+        if version in self._auto_update_versions:
+            return
+        self._auto_update_versions.add(version)
+
+        def _worker():
+            try:
+                run_auto_update(
+                    version, url, exe_path,
+                    is_idle=self._safe_to_restart,
+                    on_status=self.app_window.set_update_status,
+                )
+                # run_auto_update only returns on download failure — allow the
+                # next 6-hour check to retry this version from scratch.
+                self._auto_update_versions.discard(version)
+            except Exception as exc:
+                self._auto_update_versions.discard(version)
+                from error_reporter import report_error
+                report_error(
+                    f"Auto-update failed: {exc}",
+                    context={"version": version, "url": url},
+                    user_email=getattr(self._auth, "user_email", None),
+                )
+
+        threading.Thread(target=_worker, daemon=True, name="auto-update").start()
+
+    def _safe_to_restart(self) -> bool:
+        """True when an update-restart won't interrupt the user: nothing is
+        recording/processing and the last dictation was a while ago (which also
+        keeps the post-dictation popup with its Insert/Undo buttons usable)."""
+        if self.hotkey_manager.state != AppState.IDLE:
+            return False
+        return (time.time() - self._last_dictation_ts) > 120
+
+    def _announce_update_if_any(self) -> None:
+        """First run after an update: show a transient 'Updated to vX' toast."""
+        from updater import is_newer, read_last_run_version, write_last_run_version
+
+        try:
+            prev = read_last_run_version()
+            write_last_run_version(APP_VERSION)
+            if prev and is_newer(APP_VERSION, prev):
+                print(f"[App] Updated {prev} → {APP_VERSION}")
+                self.app_window._ui_after(
+                    1500,
+                    lambda: self.app_window.show_toast(
+                        f"FTC Whisper updated to v{APP_VERSION} ✓", 6000
+                    ),
+                )
+        except Exception as e:
+            print(f"[App] Update announce failed (non-fatal): {e}")
 
     def _on_hotkey_change(self, new_hotkey: str) -> None:
         """Called when the user saves a new hotkey in the dashboard."""
@@ -443,6 +514,7 @@ class WhisperFlowApp:
     # ------------------------------------------------------------------
 
     def _on_start_recording(self) -> None:
+        self._last_dictation_ts = time.time()
         try:
             try:
                 self._recording_hwnd = ctypes.windll.user32.GetForegroundWindow()
@@ -493,6 +565,7 @@ class WhisperFlowApp:
             self.hotkey_manager.set_idle()
 
     def _on_stop_recording(self) -> None:
+        self._last_dictation_ts = time.time()
         self._cancel_recording_timer()
         session = self._session
         self._session = None
@@ -1231,6 +1304,7 @@ class WhisperFlowApp:
         try:
             if self.hotkey_manager.state != AppState.IDLE:
                 return
+            self._last_dictation_ts = time.time()
 
             hwnd = ctypes.windll.user32.GetForegroundWindow()
             if hwnd and hwnd == self.popup._popup_hwnd:
@@ -1412,7 +1486,7 @@ def _start_local_server(app_window, version: str) -> None:
                     json.dumps({"ok": True, "version": version}).encode()
                 )
             elif self.path.startswith("/update"):
-                from updater import cached_release, is_newer, download_update, apply_update, current_exe_path
+                from updater import cached_release, is_newer, download_update, apply_update, current_exe_path, verify_exe
                 import tempfile
                 info = cached_release()
                 if info and is_newer(info["version"], version):
@@ -1428,6 +1502,7 @@ def _start_local_server(app_window, version: str) -> None:
                             tmp = os.path.join(tempfile.gettempdir(), "FTC-Whisper-update.exe")
                             try:
                                 download_update(url, tmp, lambda *_: None)
+                                verify_exe(tmp)
                                 apply_update(tmp, dst)
                             except Exception:
                                 pass

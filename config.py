@@ -65,6 +65,7 @@ class Config:
     openrouter_api_key: str = ""  # Optional — enables AI via OpenRouter (alternative to Anthropic direct)
     openrouter_model: str = "google/gemini-2.5-flash-lite"  # OpenRouter model for refinement/context-fix
     warm_mic: bool = True  # Keep mic stream open with ~1.5s pre-roll: instant start, first syllable never lost
+    auto_update: bool = True  # Silently download new releases and install them when the app is idle
     use_parakeet: bool = True  # Parakeet TDT engine (near-instant, high accuracy, English) with whisper fallback
     custom_vocabulary: str = ""  # Comma-separated terms to boost in Whisper (names, acronyms, domain words)
     auto_punctuate: bool = True   # Add trailing period when Whisper output has no terminal punctuation

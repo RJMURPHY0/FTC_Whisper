@@ -34,6 +34,49 @@ WINDOW_W = 420
 DASH_H   = 560
 
 
+def show_toast(root: tk.Misc, message: str, duration_ms: int = 5000) -> None:
+    """Transient bottom-right notification that never takes focus.
+    Must be called on the tkinter main thread."""
+    toast = tk.Toplevel(root)
+    toast.overrideredirect(True)
+    toast.attributes("-topmost", True)
+    toast.attributes("-alpha", 0.0)
+    toast.configure(bg=C["accent"])  # 1px accent border via padding frame
+
+    inner = tk.Frame(toast, bg=C["surface"])
+    inner.pack(fill="both", expand=True, padx=1, pady=1)
+    tk.Label(
+        inner, text=message,
+        fg=C["text"], bg=C["surface"],
+        font=("Segoe UI", 10), padx=18, pady=12,
+    ).pack()
+
+    toast.update_idletasks()
+    w, h = toast.winfo_reqwidth(), toast.winfo_reqheight()
+    # Bottom-right, above the taskbar
+    x = toast.winfo_screenwidth() - w - 16
+    y = toast.winfo_screenheight() - h - 60
+    toast.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _fade(alpha: float, step: float):
+        try:
+            alpha = max(0.0, min(1.0, alpha + step))
+            toast.attributes("-alpha", alpha)
+            if step > 0 and alpha < 1.0:
+                toast.after(25, _fade, alpha, step)
+            elif step < 0:
+                if alpha > 0.0:
+                    toast.after(25, _fade, alpha, step)
+                else:
+                    toast.destroy()
+        except tk.TclError:
+            pass  # root died mid-animation
+
+    _fade(0.0, 0.1)
+    toast.after(duration_ms, lambda: _fade(1.0, -0.1))
+    toast.bind("<Button-1>", lambda _e: toast.destroy())
+
+
 # ── Pill toggle widget ────────────────────────────────────────────────────────
 
 class TogglePill(tk.Frame):
@@ -1925,10 +1968,30 @@ class AppWindow:
         save_btn = self._surface_btn(save_wrap, "Save Settings", _save)
         save_btn.pack(side="right")
 
-    # ── Update banner ─────────────────────────────────────────────────────────
+    # ── Update banner / toast ─────────────────────────────────────────────────
 
-    def show_update_banner(self, version: str, download_url: str) -> None:
-        """Show update banner at top of Settings and an inline button in the version card."""
+    def show_toast(self, message: str, duration_ms: int = 5000) -> None:
+        """Thread-safe transient notification (bottom-right, auto-dismisses)."""
+        if not self._root:
+            return
+        self._ui_after(0, lambda: show_toast(self._root, message, duration_ms))
+
+    def set_update_status(self, text: str) -> None:
+        """Thread-safe update of the status label in the Settings version card."""
+        def _apply():
+            lbl = getattr(self, "_update_status_lbl", None)
+            if lbl is not None:
+                try:
+                    lbl.configure(text=text, fg=C["accent"])
+                except tk.TclError:
+                    pass
+        self._ui_after(0, _apply)
+
+    def show_update_banner(self, version: str, download_url: str,
+                           auto: bool = False) -> None:
+        """Show update banner at top of Settings and an inline button in the version card.
+        With auto=True the wording reflects that the update installs itself; the
+        button stays as a manual "restart now" override."""
         if not self._root:
             return
 
@@ -1949,7 +2012,7 @@ class AppWindow:
         def _do_update(_e=None):
             if _updating[0]:
                 return
-            from updater import download_update, apply_update, current_exe_path
+            from updater import download_update, apply_update, current_exe_path, verify_exe
             import tempfile, os, threading
             exe_path = current_exe_path()
             if exe_path:
@@ -1958,6 +2021,7 @@ class AppWindow:
                     tmp = os.path.join(tempfile.gettempdir(), "FTC-Whisper-update.exe")
                     try:
                         download_update(download_url, tmp, lambda *_: None)
+                        verify_exe(tmp)
                         apply_update(tmp, exe_path)
                     except Exception as exc:
                         from error_reporter import report_error
@@ -1985,9 +2049,11 @@ class AppWindow:
             top_row = tk.Frame(card, bg=C["surface"])
             top_row.pack(fill="x")
 
+            banner_text = (f"Update {version} installing automatically…" if auto
+                           else f"Update available → {version}")
             tk.Label(
                 top_row,
-                text=f"Update available → {version}",
+                text=banner_text,
                 fg=C["accent"], bg=C["surface"],
                 font=("Segoe UI", 10, "bold"), anchor="w",
             ).pack(side="left")

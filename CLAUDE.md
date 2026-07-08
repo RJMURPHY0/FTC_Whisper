@@ -112,8 +112,8 @@ tolerance guard in `context_fix()`. `max_tokens` scales with input length. The
 `punctuation` mode fixes punctuation, grammar, and spelling (shown in the popup as
 "✨ Fix All"). All other modes are user-triggered from the popup refinement panel.
 
-### Update flow
-`updater.py` checks `https://api.github.com/repos/RJMURPHY0/FTC_Whisper/releases/latest` for an asset named `FTC-Whisper.exe`. If a newer version is found, `apply_update()` writes a detached batch script that waits for the running process to exit, copies the downloaded exe over itself, relaunches, then self-deletes.
+### Update flow (fully automatic since v1.6.4)
+`updater.py` checks `https://api.github.com/repos/RJMURPHY0/FTC_Whisper/releases/latest` for an asset named `FTC-Whisper.exe` every 6 hours. When one is found (and `config.auto_update` is true, the default), `run_auto_update()` downloads to `%LOCALAPPDATA%\FTC Whisper\FTC-Whisper-new.exe` (3 attempts with backoff), verifies it (`verify_exe`: MZ header + ≥5 MB + Content-Length match), waits until the app is idle (`_safe_to_restart`: state IDLE and >120s since last dictation, 6 consecutive 5s polls), then `apply_update()` spawns a hidden PowerShell swap script and exits via `os._exit(0)`. The script waits for the PID to die, `Unblock-File`s the download, copies it over the installed exe with 30×2s retries, relaunches, and self-deletes. `apply_update` is guarded against double-invocation (manual button + auto worker can race). On the first launch of a new version, `_announce_update_if_any()` compares `%LOCALAPPDATA%\FTC Whisper\last-version.txt` and shows a transient "Updated to vX.Y.Z" toast (`show_toast` in `app_window.py`). The Settings banner remains as a manual "Update Now" override.
 
 ### Auto-launch (boot)
 The **running app** owns auto-launch, not the installer. On every launch `main()` spawns `_ensure_startup_task()` (daemon thread) which:
@@ -148,5 +148,6 @@ returns the monitor's levels while a monitor is active.
 - Popup widget mutations always happen via `root.after(0, ...)` from background threads
 - `popup.set_upgrade_result()` must always be called with the `session=` stamp of the dictation the result belongs to
 - `_clipboard_paste` must NEVER send Ctrl+V when `_clipboard_set` reported failure — that pastes stale clipboard content (possibly a password) and reports success
+- The updater's swap script must be spawned with `CREATE_NO_WINDOW` (+ `CREATE_NEW_PROCESS_GROUP`, DEVNULL std handles) — NEVER add `DETACHED_PROCESS`, which conflicts with `CREATE_NO_WINDOW` and makes powershell.exe exit 0 without running the script (this exact bug silently broke every in-app update ≤ v1.6.3)
 - The bundled config in `ftc_whisper.spec` is sanitized at build time — API keys must never ship inside the public release exe
 - `APP_VERSION` in `app.py`, `filevers`/`prodvers` tuples, and `FileVersion`/`ProductVersion` strings in `version_info.txt` must all be kept in sync before every build

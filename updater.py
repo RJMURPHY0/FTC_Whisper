@@ -10,6 +10,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.request
 from typing import Callable, Optional
 
@@ -17,6 +19,47 @@ _GITHUB_API = "https://api.github.com/repos/RJMURPHY0/FTC_Whisper/releases/lates
 _DOWNLOAD_FILENAME = "FTC-Whisper.exe"
 
 _cached_release: Optional[dict] = None
+
+# A release exe bundles Python + models glue; anything smaller than this is a
+# GitHub error page or a truncated download, never a real build.
+_MIN_EXE_BYTES = 5 * 1024 * 1024
+
+_APPLY_LOCK = threading.Lock()
+_apply_started = False
+
+
+def _app_data_dir() -> str:
+    """Per-user data dir shared with app.py (%LOCALAPPDATA%\\FTC Whisper)."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(
+        os.path.expanduser("~"), "AppData", "Local"
+    )
+    d = os.path.join(base, "FTC Whisper")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    return d
+
+
+def _last_version_path() -> str:
+    return os.path.join(_app_data_dir(), "last-version.txt")
+
+
+def read_last_run_version() -> str:
+    """Version the app last ran as, or "" (fresh install / file missing)."""
+    try:
+        with open(_last_version_path(), "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def write_last_run_version(version: str) -> None:
+    try:
+        with open(_last_version_path(), "w", encoding="utf-8") as f:
+            f.write(version)
+    except Exception:
+        pass
 
 
 def cached_release() -> Optional[dict]:
@@ -113,6 +156,20 @@ def download_update(
                 f.write(chunk)
                 done += len(chunk)
                 progress_cb(done, total)
+    if total and done != total:
+        raise IOError(f"Truncated download: got {done} of {total} bytes")
+
+
+def verify_exe(path: str, min_bytes: int = _MIN_EXE_BYTES) -> None:
+    """Sanity-check a downloaded update before it is allowed to replace the
+    installed exe. Raises IOError on anything suspicious — installing a
+    corrupt/HTML-error-page 'exe' bricks the install until manual reinstall."""
+    size = os.path.getsize(path)
+    if size < min_bytes:
+        raise IOError(f"Downloaded file too small ({size} bytes) — not a release exe")
+    with open(path, "rb") as f:
+        if f.read(2) != b"MZ":
+            raise IOError("Downloaded file is not a Windows executable (no MZ header)")
 
 
 def apply_update(new_exe: str, current_exe: str) -> None:
@@ -121,9 +178,26 @@ def apply_update(new_exe: str, current_exe: str) -> None:
     copies the new exe over the current one (with retries for AV file locks),
     relaunches, then self-deletes. Falls back to launching from temp if the
     copy keeps failing. Exits the current process immediately via os._exit.
+
+    Idempotent per process: the manual "Update Now" button and the automatic
+    updater can both reach this — only the first caller wins, the rest no-op
+    (two swap scripts racing over the same exe corrupts the install).
     """
-    import os as _os
-    pid = _os.getpid()
+    global _apply_started
+    with _APPLY_LOCK:
+        if _apply_started:
+            return
+        _apply_started = True
+    spawn_swap_script(new_exe, current_exe, os.getpid())
+    # os._exit guarantees the process dies immediately so the PS script unblocks
+    os._exit(0)
+
+
+def spawn_swap_script(new_exe: str, current_exe: str, pid: int) -> str:
+    """Write + launch the detached PowerShell swap script. Waits for *pid* to
+    exit, then copies new_exe over current_exe and relaunches. Returns the log
+    file path. Split from apply_update so it can be exercised against a dummy
+    process in tests without killing the caller."""
     # Escape single quotes in paths for PowerShell single-quoted strings
     new_ps  = new_exe.replace("'", "''")
     cur_ps  = current_exe.replace("'", "''")
@@ -171,18 +245,32 @@ Log "Done."
     with open(ps_file, "w", encoding="utf-8") as f:
         f.write(script)
 
-    subprocess.Popen(
-        [
-            "powershell",
-            "-NoProfile",
-            "-ExecutionPolicy", "Bypass",
-            "-WindowStyle", "Hidden",
-            "-File", ps_file,
-        ],
-        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
-    )
-    # os._exit guarantees the process dies immediately so the PS script unblocks
-    _os._exit(0)
+    cmd = [
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-WindowStyle", "Hidden",
+        "-File", ps_file,
+    ]
+    # NEVER combine DETACHED_PROCESS with CREATE_NO_WINDOW: they are conflicting
+    # console modes and powershell.exe exits 0 without ever running -File. That
+    # exact combination shipped in every build ≤1.6.3 — the app killed itself
+    # via os._exit and the swap script silently never started, which is why
+    # updates never applied. CREATE_NO_WINDOW alone gives the child its own
+    # hidden console, and children outlive their parent by default on Windows.
+    flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+    std = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+               stderr=subprocess.DEVNULL)
+    try:
+        # Break out of any job object (Task Scheduler wraps the logon-task app
+        # in one) so the swap script can't be reaped when the task's process
+        # tree is torn down at os._exit.
+        subprocess.Popen(
+            cmd, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **std
+        )
+    except OSError:
+        subprocess.Popen(cmd, creationflags=flags, **std)
+    return log_file
 
 
 def current_exe_path() -> Optional[str]:
@@ -190,3 +278,59 @@ def current_exe_path() -> Optional[str]:
     if getattr(sys, "frozen", False):
         return sys.executable
     return None
+
+
+def run_auto_update(
+    version: str,
+    url: str,
+    current_exe: str,
+    is_idle: Callable[[], bool],
+    on_status: Callable[[str], None] = lambda _msg: None,
+    apply_fn: Callable[[str, str], None] = None,
+    poll_interval: float = 5.0,
+    idle_samples: int = 6,
+) -> None:
+    """
+    Fully automatic update: download → verify → wait for the app to be idle →
+    apply (restart). Blocking — run in a daemon thread.
+
+    is_idle() must be cheap and thread-safe; the update is only applied after
+    *idle_samples* consecutive polls report idle, so a restart never lands in
+    the middle of a dictation.
+
+    apply_fn is injectable for tests; the default (apply_update) exits the
+    process and never returns.
+    """
+    dest = os.path.join(_app_data_dir(), "FTC-Whisper-new.exe")
+
+    # Download with retries — transient network errors must not strand the
+    # user on an old build until the next 6-hour check.
+    last_exc = None
+    for attempt, backoff in enumerate((0, 20, 60), start=1):
+        if backoff:
+            time.sleep(backoff)
+        try:
+            on_status(f"Downloading update v{version.lstrip('v')}…")
+            download_update(url, dest, lambda *_: None)
+            verify_exe(dest)
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            print(f"[Updater] Download attempt {attempt} failed: {exc}")
+    if last_exc is not None:
+        on_status("")  # clear status — next 6-hour check retries from scratch
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        return
+
+    on_status("Update downloaded — installing when idle…")
+    consecutive = 0
+    while consecutive < idle_samples:
+        time.sleep(poll_interval)
+        consecutive = consecutive + 1 if is_idle() else 0
+
+    on_status(f"Installing v{version.lstrip('v')} — restarting…")
+    (apply_fn or apply_update)(dest, current_exe)
