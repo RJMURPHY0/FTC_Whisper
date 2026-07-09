@@ -13,6 +13,8 @@ C = {
     "bg": "#0d0d0d",
     "surface": "#1a1a1a",
     "input_bg": "#141414",
+    "field_bg": "#ffffff",    # login email/password bars — white for clarity
+    "field_text": "#1a1a1a",  # dark text on the white bars
     "text": "#ffffff",
     "subtext": "#777777",
     "accent": "#f39200",
@@ -160,12 +162,12 @@ class LoginWindow:
 
         # Password
         self._field_label(self._card, "Password")
-        pass_row = tk.Frame(self._card, bg=C["surface"])
+        pass_row = tk.Frame(self._card, bg=C["field_bg"])
         pass_row.pack(fill="x", pady=(4, 12))
         self._pass_entry = self._entry(pass_row, self._password_var, show="•")
         self._pass_entry.pack(side="left", fill="x", expand=True)
         self._pass_visible = False
-        self._pass_eye = tk.Label(pass_row, text="👁", bg=C["surface"], fg=C["subtext"],
+        self._pass_eye = tk.Label(pass_row, text="👁", bg=C["field_bg"], fg=C["subtext"],
                                   font=("Segoe UI", 11), cursor="hand2", padx=4)
         self._pass_eye.pack(side="left")
         self._pass_eye.bind("<Button-1>", lambda _e: self._toggle_pass())
@@ -178,11 +180,11 @@ class LoginWindow:
             fg=C["subtext"], bg=C["surface"],
             font=("Segoe UI", 10), anchor="w",
         ).pack(fill="x")
-        confirm_row = tk.Frame(self._confirm_section, bg=C["surface"])
+        confirm_row = tk.Frame(self._confirm_section, bg=C["field_bg"])
         confirm_row.pack(fill="x", pady=(4, 12))
         self._confirm_entry = self._entry(confirm_row, self._confirm_var, show="•")
         self._confirm_entry.pack(side="left", fill="x", expand=True)
-        self._confirm_eye = tk.Label(confirm_row, text="👁", bg=C["surface"], fg=C["subtext"],
+        self._confirm_eye = tk.Label(confirm_row, text="👁", bg=C["field_bg"], fg=C["subtext"],
                                      font=("Segoe UI", 11), cursor="hand2", padx=4)
         self._confirm_eye.pack(side="left")
         self._confirm_eye.bind("<Button-1>", lambda _e: self._toggle_confirm())
@@ -307,9 +309,9 @@ class LoginWindow:
             parent,
             textvariable=var,
             show=show,
-            bg=C["input_bg"],
-            fg=C["text"],
-            insertbackground=C["text"],
+            bg=C["field_bg"],
+            fg=C["field_text"],
+            insertbackground=C["field_text"],
             relief="flat",
             font=("Segoe UI", 11),
             bd=0,
