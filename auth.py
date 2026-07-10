@@ -89,6 +89,43 @@ def _session_path() -> str:
     return os.path.join(folder, ".session")
 
 
+def _last_email_path() -> str:
+    """Plain-text file holding the last email that signed in — used only to
+    prefill the login field. No password is ever stored here (the DPAPI
+    session file handles credentials / auto-login)."""
+    app_data = os.environ.get("APPDATA") or os.path.expanduser("~")
+    folder = os.path.join(app_data, "FTC Whisper")
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, "last-email.txt")
+
+
+def _read_last_email() -> str:
+    # Prefer this app's own remembered email; fall back to a shared FTC email
+    # file if a sibling FTC app (e.g. FTC Contacts) left one in the same folder.
+    for path in (_last_email_path(),
+                 os.path.join(os.path.dirname(_last_email_path()), "..",
+                              "FTC", "last-email.txt")):
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    v = f.read().strip()
+                if v:
+                    return v
+        except Exception:
+            pass
+    return ""
+
+
+def _write_last_email(email: str) -> None:
+    try:
+        if not email:
+            return
+        with open(_last_email_path(), "w", encoding="utf-8") as f:
+            f.write(email.strip())
+    except Exception as e:
+        print(f"[Auth] Could not save last email: {e}")
+
+
 # ---------------------------------------------------------------------------
 # AuthManager
 # ---------------------------------------------------------------------------
@@ -239,6 +276,11 @@ class AuthManager:
     def user_email(self) -> Optional[str]:
         return self._user.email if self._user else None
 
+    @property
+    def last_email(self) -> str:
+        """Last email that successfully signed in (for prefilling the form)."""
+        return _read_last_email()
+
     def try_restore_session(self) -> bool:
         """Called at startup — returns True if a valid saved session exists."""
         return self._load_saved_session()
@@ -287,6 +329,7 @@ class AuthManager:
             if result.user and result.session:
                 self._user = result.user
                 self._save_session(result.session)
+                _write_last_email(result.user.email or email)
                 return True, f"Welcome back, {result.user.email}"
             return False, "Sign-in failed — please check your email and password."
         except Exception as e:

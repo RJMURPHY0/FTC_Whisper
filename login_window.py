@@ -23,10 +23,14 @@ C = {
     "error": "#ff5555",
     "success": "#4ade80",
     "divider": "#2d2d2d",
+    "card": "#161616",         # rounded card fill (slightly darker than surface)
+    "card_border": "#2a2a2a",  # hairline around the card
+    "seg_track": "#0f0f0f",    # segmented-toggle track
+    "seg_active": "#2b2b2b",   # active segment pill
 }
 
 WINDOW_W = 400
-WINDOW_H = 560
+WINDOW_H = 648
 
 
 def _round_rect(canvas, x1, y1, x2, y2, r, **kw):
@@ -114,7 +118,10 @@ class LoginWindow:
         """Clear form fields and reset to login mode — call before showing again."""
         self._submitting = False
         if hasattr(self, "_email_var"):
-            self._email_var.set("")
+            try:
+                self._email_var.set(self._auth.last_email or "")
+            except Exception:
+                self._email_var.set("")
             self._password_var.set("")
         if hasattr(self, "_confirm_var"):
             self._confirm_var.set("")
@@ -199,21 +206,44 @@ class LoginWindow:
                 font=("Segoe UI", 22, "bold"),
             ).pack()
 
-        # ── Tab bar ────────────────────────────────────────────────────
-        tabs = tk.Frame(c, bg=C["surface"])
-        tabs.pack(fill="x", padx=32)
+        # ── Rounded card holding the segmented toggle + form ───────────
+        body = tk.Frame(c, bg=C["bg"])
+        body.pack(fill="both", expand=True, padx=22, pady=(0, 24))
 
-        self._login_tab = self._tab(tabs, "Sign In", lambda: self._switch("login"))
-        self._login_tab.pack(side="left", expand=True, fill="x")
+        self._card_cv = tk.Canvas(body, bg=C["bg"], highlightthickness=0, bd=0)
+        self._card_cv.pack(fill="both", expand=True)
 
-        self._signup_tab = self._tab(
-            tabs, "Create Account", lambda: self._switch("signup")
-        )
-        self._signup_tab.pack(side="left", expand=True, fill="x")
+        holder = tk.Frame(self._card_cv, bg=C["surface"])
+        holder_win = self._card_cv.create_window(0, 0, window=holder, anchor="nw")
 
-        # ── Form card ──────────────────────────────────────────────────
-        self._card = tk.Frame(c, bg=C["surface"], padx=32, pady=24)
-        self._card.pack(fill="both", expand=True, padx=32, pady=(0, 32))
+        # Inset the (square-cornered) content frame by >= the corner radius so it
+        # never pokes past the rounded arc — the canvas fill covers the straight
+        # edges seamlessly (same surface colour).
+        _CARD_PAD = 18
+
+        def _draw_card(_e=None):
+            w, h = self._card_cv.winfo_width(), self._card_cv.winfo_height()
+            if w < 2 or h < 2:
+                return
+            self._card_cv.delete("cardbg")
+            _round_rect(self._card_cv, 1, 1, w - 2, h - 2, 18,
+                        fill=C["surface"], outline=C["card_border"], tags="cardbg")
+            self._card_cv.tag_lower("cardbg")
+            self._card_cv.coords(holder_win, _CARD_PAD, _CARD_PAD)
+            self._card_cv.itemconfigure(
+                holder_win, width=w - 2 * _CARD_PAD, height=h - 2 * _CARD_PAD)
+        self._card_cv.bind("<Configure>", _draw_card)
+
+        # Segmented Sign In / Create Account toggle
+        self._seg = tk.Canvas(holder, height=40, bg=C["surface"],
+                              highlightthickness=0, bd=0, cursor="hand2")
+        self._seg.pack(fill="x", pady=(2, 18))
+        self._seg.bind("<Configure>", lambda _e: self._draw_segment())
+        self._seg.bind("<Button-1>", self._seg_click)
+
+        # ── Form area (children keep surface bg — blends into the card) ─
+        self._card = tk.Frame(holder, bg=C["surface"])
+        self._card.pack(fill="both", expand=True)
 
         self._email_var = tk.StringVar()
         self._password_var = tk.StringVar()
@@ -317,19 +347,44 @@ class LoginWindow:
 
         self._switch("login")
 
-    def _tab(self, parent, text, command) -> tk.Label:
-        lbl = tk.Label(
-            parent,
-            text=text,
-            fg=C["subtext"],
-            bg=C["surface"],
-            font=("Segoe UI", 10),
-            padx=12,
-            pady=8,
-            cursor="hand2",
-        )
-        lbl.bind("<Button-1>", lambda _e: command())
-        return lbl
+        # Prefill the last email that signed in — returning users only type their
+        # password (password is never stored; the DPAPI session handles re-login).
+        try:
+            remembered = self._auth.last_email
+        except Exception:
+            remembered = ""
+        if remembered:
+            self._email_var.set(remembered)
+            self._root.after(60, lambda: self._pass_entry.focus_set())
+        else:
+            self._root.after(60, lambda: self._email_entry.focus_set())
+
+    def _draw_segment(self) -> None:
+        t = self._seg
+        w, h = t.winfo_width(), t.winfo_height()
+        if w < 2 or h < 2:
+            return
+        t.delete("all")
+        _round_rect(t, 1, 1, w - 2, h - 2, (h - 2) // 2,
+                    fill=C["seg_track"], outline="")
+        half = w / 2
+        pad = 4
+        if self._mode == "login":
+            x0, x1 = pad, half - pad / 2
+        else:
+            x0, x1 = half + pad / 2, w - pad
+        _round_rect(t, x0, pad, x1, h - pad, (h - 2 * pad) // 2,
+                    fill=C["seg_active"], outline="")
+        login_fg = C["accent"] if self._mode == "login" else C["subtext"]
+        signup_fg = C["accent"] if self._mode == "signup" else C["subtext"]
+        t.create_text(half / 2, h / 2, text="Sign In",
+                      fill=login_fg, font=("Segoe UI", 10, "bold"))
+        t.create_text(half + half / 2, h / 2, text="Create Account",
+                      fill=signup_fg, font=("Segoe UI", 10, "bold"))
+
+    def _seg_click(self, event) -> None:
+        half = self._seg.winfo_width() / 2
+        self._switch("login" if event.x < half else "signup")
 
     def _field_label(self, parent, text) -> tk.Label:
         lbl = tk.Label(
@@ -399,18 +454,20 @@ class LoginWindow:
         self._forgot_link.pack_forget()
         self._resend_link.pack_forget()
         if mode == "login":
-            self._login_tab.configure(fg=C["accent"], bg=C["surface"])
-            self._signup_tab.configure(fg=C["subtext"], bg=C["surface"])
             self._confirm_section.pack_forget()
             self._submit_btn.set(text="Sign In")
-            self._forgot_link.pack(anchor="center", pady=(8, 0))
+            # before=divider so the link sits under Sign In, not below Google
+            # (packing it last was pushing it off the bottom of the window).
+            self._forgot_link.pack(anchor="center", pady=(10, 0),
+                                   before=self._divider_frame)
             if self._pending_confirm_email:
-                self._resend_link.pack(anchor="center", pady=(4, 0))
+                self._resend_link.pack(anchor="center", pady=(4, 0),
+                                       before=self._divider_frame)
         else:
-            self._login_tab.configure(fg=C["subtext"], bg=C["surface"])
-            self._signup_tab.configure(fg=C["accent"], bg=C["surface"])
             self._confirm_section.pack(fill="x", before=self._submit_btn)
             self._submit_btn.set(text="Create Account")
+        if hasattr(self, "_seg"):
+            self._draw_segment()
         if clear_status:
             self._status_var.set("")
             self._status_frame.pack_forget()

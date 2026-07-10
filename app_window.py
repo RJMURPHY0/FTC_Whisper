@@ -12,6 +12,12 @@ from datetime import datetime
 from typing import Callable, Optional
 import ctypes
 
+try:
+    from app_icons import get_app_icon, get_fallback_icon
+except Exception:
+    get_app_icon = lambda *a, **k: None       # noqa: E731
+    get_fallback_icon = lambda *a, **k: None  # noqa: E731
+
 # ── Dark colour palette ───────────────────────────────────────────────────────
 C = {
     "bg":            "#0d0d0d",   # near-black window background
@@ -1044,11 +1050,79 @@ class AppWindow:
         self._ghost_btn(top, "↻ Refresh", self._load_history).pack(side="right")
         self._ghost_btn(top, "✕ Clear",   self._confirm_clear_history).pack(side="right", padx=(0, 8))
 
+        # Search bar — rounded (matches the history card), filters the fetched
+        # history client-side as you type.
+        self._hist_query = ""
+        SEARCH_H = 34
+        search_cv = tk.Canvas(parent, height=SEARCH_H, bg=C["bg"],
+                              highlightthickness=0, bd=0)
+        search_cv.pack(fill="x", padx=20, pady=(0, 10))
+        search_inner = tk.Frame(search_cv, bg=C["input_bg"])
+
+        _mag = tk.Canvas(search_inner, width=18, height=18, bg=C["input_bg"],
+                         highlightthickness=0, bd=0)
+        _mag.create_oval(4, 4, 12, 12, outline=C["subtext"], width=1.5)
+        _mag.create_line(11.5, 11.5, 15.5, 15.5, fill=C["subtext"], width=1.5,
+                         capstyle="round")
+        _mag.pack(side="left", padx=(12, 6))
+
+        _PLACEHOLDER = "Search transcriptions…"
+        self._hist_search = tk.Entry(
+            search_inner, bg=C["input_bg"], fg=C["subtext"], relief="flat", bd=0,
+            highlightthickness=0, insertbackground=C["text"], font=("Segoe UI", 9))
+        self._hist_search.insert(0, _PLACEHOLDER)
+        self._hist_search.pack(side="left", fill="x", expand=True, padx=(0, 12))
+
+        # Inner content is inset 2px so the Canvas-drawn rounded outline stays visible.
+        search_win = search_cv.create_window(2, SEARCH_H // 2, window=search_inner,
+                                             anchor="w")
+        _search_state = {"focus": False}
+
+        def _draw_search(_e=None):
+            w = search_cv.winfo_width()
+            if w <= 1:
+                return
+            search_cv.delete("bg")
+            outline = C["accent"] if _search_state["focus"] else C["border"]
+            _rr(search_cv, 1, 1, w - 1, SEARCH_H - 1, 8,
+                fill=C["input_bg"], outline=outline, width=1, tags="bg")
+            search_cv.tag_lower("bg")
+            search_cv.itemconfigure(search_win, width=w - 4)
+
+        search_cv.bind("<Configure>", _draw_search)
+
+        def _sf_in(_e):
+            if self._hist_search.get() == _PLACEHOLDER:
+                self._hist_search.delete(0, "end")
+                self._hist_search.configure(fg=C["text"])
+            _search_state["focus"] = True
+            _draw_search()
+
+        def _sf_out(_e):
+            _search_state["focus"] = False
+            _draw_search()
+            if not self._hist_search.get().strip():
+                self._hist_search.delete(0, "end")
+                self._hist_search.insert(0, _PLACEHOLDER)
+                self._hist_search.configure(fg=C["subtext"])
+
+        def _sf_key(_e):
+            v = self._hist_search.get()
+            self._hist_query = "" if v == _PLACEHOLDER else v.strip().lower()
+            self._render_history()
+
+        self._hist_search.bind("<FocusIn>", _sf_in)
+        self._hist_search.bind("<FocusOut>", _sf_out)
+        self._hist_search.bind("<KeyRelease>", _sf_key)
+        search_cv.bind("<Button-1>", lambda _e: self._hist_search.focus_set())
+
         # Middle row: the rounded card sits on the left and an external
         # scrollbar sits on the far right, OUTSIDE the card border (matching the
         # Settings/Hotkey tabs, where the scrollbar is on the window background).
+        # padx=(20, 0): left aligns with the search bar; the scrollbar attaches
+        # flush to the window's right edge like the Hotkey/Settings tabs.
         mid = tk.Frame(parent, bg=C["bg"])
-        mid.pack(fill="both", expand=True, padx=20, pady=(0, 8))
+        mid.pack(fill="both", expand=True, padx=(20, 0), pady=(0, 8))
 
         # Rounded card background canvas — packed after the scrollbar (below) so
         # the scrollbar reserves the right edge first, then the card fills the rest.
@@ -1088,7 +1162,9 @@ class AppWindow:
         self._hist_sb = ModernScrollbar(mid, command=self._hist_cv.yview)
         self._hist_cv.configure(yscrollcommand=self._hist_sb.set)
         self._hist_sb.pack(side="right", fill="y")
-        card_cv.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        # Right pad 8 so the card's right edge lines up with the search bar (W-20),
+        # while the 12px scrollbar sits flush at the window edge just beyond it.
+        card_cv.pack(side="left", fill="both", expand=True, padx=(0, 8))
 
         # Inner frame that holds one Frame per history row
         self._hist_items = tk.Frame(self._hist_cv, bg=C["surface"])
@@ -1112,7 +1188,7 @@ class AppWindow:
         self._hist_set_placeholder("Loading…")
         def _fetch():
             try:
-                items = self._db.fetch_history() if self._db else []
+                items = self._db.fetch_history(limit=100) if self._db else []
             except Exception as e:
                 print(f"[AppWindow] History fetch failed: {e}")
                 items = []
@@ -1129,82 +1205,197 @@ class AppWindow:
 
     def _populate_history(self, items: list) -> None:
         self._history_loading = False
+        self._hist_all = items or []
+        self._render_history()
+
+    @staticmethod
+    def _hist_date_label(dt_local) -> str:
+        today = datetime.now().date()
+        d = dt_local.date()
+        if d == today:
+            return "Today"
+        if (today - d).days == 1:
+            return "Yesterday"
+        label = f"{d.day} {dt_local.strftime('%B')}"
+        if d.year != today.year:
+            label += f" {d.year}"
+        return label
+
+    def _render_history(self) -> None:
         for w in self._hist_items.winfo_children():
             w.destroy()
+        items = getattr(self, "_hist_all", [])
+        q = getattr(self, "_hist_query", "")
+        if q:
+            items = [it for it in items
+                     if q in ((it.get("refined_text") or it.get("transcribed_text")
+                               or "").lower())
+                     or q in (it.get("app_name") or "").lower()]
         if not items:
-            self._hist_set_placeholder("No transcriptions yet.")
+            self._hist_set_placeholder(
+                "No matches." if q else "No transcriptions yet.")
             return
-        for i, item in enumerate(items):
-            self._make_history_row(i, item)
 
-    def _make_history_row(self, index: int, item: dict) -> None:
+        last_group = None
+        first_in_group = True
+        for item in items:
+            raw_ts = item.get("created_at") or ""
+            try:
+                dt = datetime.fromisoformat(
+                    raw_ts.replace("Z", "+00:00")).astimezone()
+                group = self._hist_date_label(dt)
+            except Exception:
+                dt, group = None, "Earlier"
+            if group != last_group:
+                tk.Label(self._hist_items, text=group.upper(),
+                         fg=C["subtext"], bg=C["surface"],
+                         font=("Segoe UI", 8, "bold"), anchor="w",
+                         ).pack(fill="x", padx=14,
+                                pady=((12 if last_group is None else 14), 4))
+                last_group = group
+                first_in_group = True
+            self._make_history_row(item, dt, first_in_group)
+            first_in_group = False
+
+    def _make_history_row(self, item: dict, dt, first_in_group: bool) -> None:
         text = item.get("refined_text") or item.get("transcribed_text") or ""
-        raw_ts = item.get("created_at") or ""
-        try:
-            dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
-            ts_str = dt.astimezone().strftime("%d %b %Y  %H:%M")
-        except Exception:
-            ts_str = raw_ts[:16]
+        time_str = dt.strftime("%H:%M") if dt else ""
+        app_name = item.get("app_name") or ""
+        app_exe = item.get("app_exe") or ""
 
-        if index > 0:
-            tk.Frame(self._hist_items, bg=C["border"], height=1).pack(fill="x")
+        if not first_in_group:
+            tk.Frame(self._hist_items, bg=C["divider"], height=1).pack(
+                fill="x", padx=10)
 
         row = tk.Frame(self._hist_items, bg=C["surface"])
         row.pack(fill="x")
 
-        # Header: [▶ toggle]  [timestamp + preview]  [⎘ copy]
         header = tk.Frame(row, bg=C["surface"])
-        header.pack(fill="x", padx=8, pady=(8, 6))
+        header.pack(fill="x", padx=10, pady=8)
 
-        # Pack copy button FIRST (side=right) so mid's expand never pushes it off
-        copy_btn = tk.Label(header, text="⎘", fg=C["subtext"], bg=C["surface"],
-                            font=("Segoe UI", 13), cursor="hand2")
-        copy_btn.pack(side="right")
-        copy_btn.bind("<Button-1>",
-                      lambda _e, t=text, b=copy_btn: self._copy_to_clipboard(t, b))
-        copy_btn.bind("<Enter>", lambda _e: copy_btn.configure(fg=C["accent"]))
-        copy_btn.bind("<Leave>", lambda _e: copy_btn.configure(fg=C["subtext"]))
+        # App icon (real exe icon; generic tile for pre-capture rows).
+        # Two variants per exe — normal and hover row background.
+        icon_n = get_app_icon(app_exe, C["surface"]) or get_fallback_icon(C["surface"])
+        icon_h = get_app_icon(app_exe, C["surface_hover"]) or get_fallback_icon(C["surface_hover"])
+        icon_lbl = tk.Label(header, bg=C["surface"])
+        if icon_n is not None:
+            icon_lbl.configure(image=icon_n)
+            icon_lbl._image_refs = (icon_n, icon_h)  # keep tk references alive
+        icon_lbl.pack(side="left", padx=(0, 10))
 
-        toggle = tk.Label(header, text="▶", fg=C["subtext"], bg=C["surface"],
-                          font=("Segoe UI", 8), cursor="hand2", width=2, anchor="w")
-        toggle.pack(side="left")
+        # Right side packed first so the middle column can never push it off.
+        copy_cv = tk.Canvas(header, width=22, height=22, bg=C["surface"],
+                            highlightthickness=0, bd=0, cursor="hand2")
+        copy_cv.pack(side="right", padx=(6, 0))
+
+        copy_state = {"bg": C["surface"], "fg": C["subtext"], "busy": False}
+
+        def _draw_copy():
+            if copy_state["busy"]:
+                return
+            copy_cv.delete("all")
+            copy_cv.configure(bg=copy_state["bg"])
+            _rr(copy_cv, 8, 3, 18, 13, 3, fill="", outline=copy_state["fg"])
+            _rr(copy_cv, 4, 7, 14, 17, 3, fill=copy_state["bg"],
+                outline=copy_state["fg"])
+        _draw_copy()
+
+        def _copied_feedback():
+            copy_state["busy"] = True
+            copy_cv.delete("all")
+            copy_cv.create_line(5, 12, 9, 16, 17, 6, fill=C["success"],
+                                width=2, capstyle="round", joinstyle="round")
+            def _restore():
+                copy_state["busy"] = False
+                _draw_copy()
+            copy_cv.after(1400, _restore)
+
+        copy_cv.bind("<Button-1>",
+                     lambda _e, t=text: (self._copy_to_clipboard(t),
+                                         _copied_feedback()))
+        copy_cv.bind("<Enter>", lambda _e: (copy_state.update(fg=C["accent"]),
+                                            _draw_copy()))
+        copy_cv.bind("<Leave>", lambda _e: (copy_state.update(fg=C["subtext"]),
+                                            _draw_copy()))
+
+        time_lbl = tk.Label(header, text=time_str, fg=C["subtext"],
+                            bg=C["surface"], font=("Segoe UI", 8))
+        time_lbl.pack(side="right", padx=(6, 0))
 
         mid = tk.Frame(header, bg=C["surface"])
-        mid.pack(side="left", fill="x", expand=True, padx=(4, 4))
+        mid.pack(side="left", fill="x", expand=True)
 
-        tk.Label(mid, text=ts_str, fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 8), anchor="w").pack(fill="x")
-
-        preview = (text[:72] + "…") if len(text) > 72 else text
+        preview = (text[:64] + "…") if len(text) > 64 else text
         prev_lbl = tk.Label(mid, text=preview, fg=C["text"], bg=C["surface"],
                             font=("Segoe UI", 9), anchor="w", justify="left")
         prev_lbl.pack(fill="x")
 
-        # Expanded detail (hidden until toggled; replaces preview to avoid duplication)
+        app_lbl = None
+        if app_name:
+            app_lbl = tk.Label(mid, text=app_name, fg=C["subtext"],
+                               bg=C["surface"], font=("Segoe UI", 8),
+                               anchor="w", justify="left")
+            app_lbl.pack(fill="x")
+
+        # Expanded detail — full text below the header, toggled by clicking the row
         detail = tk.Frame(row, bg=C["surface"])
         detail_lbl = tk.Label(detail, text=text, fg=C["text"], bg=C["surface"],
                               font=("Segoe UI", 9), anchor="w", justify="left",
-                              wraplength=300)
-        detail_lbl.pack(fill="x", padx=(22, 8), pady=(0, 8))
-
+                              wraplength=310)
+        detail_lbl.pack(fill="x", padx=(46, 10), pady=(0, 10))
         expanded = [False]
 
-        def _toggle(_e=None, _detail=detail, _toggle_lbl=toggle, _prev=prev_lbl):
+        hover_widgets = [row, header, icon_lbl, mid, prev_lbl, time_lbl,
+                         detail, detail_lbl] + ([app_lbl] if app_lbl else [])
+
+        def _set_bg(bg: str):
+            for w in hover_widgets:
+                try:
+                    w.configure(bg=bg)
+                except tk.TclError:
+                    return  # row destroyed mid-hover (refresh/search)
+            if icon_n is not None:
+                icon_lbl.configure(
+                    image=icon_h if bg == C["surface_hover"] else icon_n)
+            copy_state["bg"] = bg
+            _draw_copy()
+
+        def _on_enter(_e=None):
+            _set_bg(C["surface_hover"])
+
+        def _on_leave(_e=None):
+            # Enter/Leave also fire when crossing into child widgets — only
+            # un-hover once the pointer has genuinely left the row.
+            def _check():
+                try:
+                    x, y = row.winfo_pointerxy()
+                    rx, ry = row.winfo_rootx(), row.winfo_rooty()
+                    inside = (rx <= x < rx + row.winfo_width()
+                              and ry <= y < ry + row.winfo_height())
+                except tk.TclError:
+                    return
+                if not inside:
+                    _set_bg(C["surface"])
+            row.after(1, _check)
+
+        def _toggle(_e=None):
             if expanded[0]:
-                _detail.pack_forget()
-                _prev.pack(fill="x")
-                _toggle_lbl.configure(text="▶", fg=C["subtext"])
-                expanded[0] = False
+                detail.pack_forget()
+                prev_lbl.configure(text=preview)
             else:
-                _prev.pack_forget()
-                _detail.pack(fill="x", after=header)
-                _toggle_lbl.configure(text="▼", fg=C["accent"])
-                expanded[0] = True
+                detail.pack(fill="x", after=header)
+            expanded[0] = not expanded[0]
 
-        toggle.bind("<Button-1>", _toggle)
-        prev_lbl.bind("<Button-1>", _toggle)
-        mid.bind("<Button-1>", _toggle)
-
+        for w in [row, header, icon_lbl, mid, prev_lbl, time_lbl] + \
+                 ([app_lbl] if app_lbl else []):
+            w.bind("<Enter>", _on_enter)
+            w.bind("<Leave>", _on_leave)
+            w.configure(cursor="hand2")
+            if w is not time_lbl:
+                w.bind("<Button-1>", _toggle)
+        detail_lbl.bind("<Enter>", _on_enter)
+        detail_lbl.bind("<Leave>", _on_leave)
+        detail_lbl.bind("<Button-1>", _toggle)
 
     def _copy_to_clipboard(self, text: str, btn=None) -> None:
         if self._root:

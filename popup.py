@@ -69,6 +69,13 @@ BAR_MIN_H = 5
 CANVAS_W = NUM_BARS * (BAR_W + BAR_GAP) - BAR_GAP
 CANVAS_H = BAR_MAX_H + 6
 
+# Live-caption bar (shown beneath the waveform when captions are on).
+# The bar grows horizontally with the text until it hits CAPTION_MAX_CHARS,
+# then wraps and grows vertically up to CAPTION_MAX_LINES, then scrolls.
+CAPTION_MIN_CHARS = 16
+CAPTION_MAX_CHARS = 52
+CAPTION_MAX_LINES = 5
+
 # How long the post-transcription icon badge stays before auto-dismissing, so it
 # never lingers on screen indefinitely.
 ICON_AUTO_DISMISS_SECS = 30.0
@@ -205,14 +212,15 @@ class FloatingPopup:
 
     def update_caption(self, text: str) -> None:
         """Called from the caption loop (background thread) with live partial text.
-        Shows only the trailing words so the pill stays a stable, readable size."""
+        Keeps a trailing window of words — enough to fill ~5 lines and scroll a
+        little beyond, so the bar tails the latest speech without growing forever."""
         if not text:
             return
         words = text.split()
-        tail = " ".join(words[-12:])
+        tail = " ".join(words[-40:])
         self._last_activity = time.time()
         if self.root:
-            self.root.after(0, lambda: self._caption_var.set(tail))
+            self.root.after(0, lambda: self._update_caption_widget(tail))
 
     def hide(self) -> None:
         if self.root:
@@ -398,10 +406,16 @@ class FloatingPopup:
         f = tk.Frame(self.root, bg=CP["bg"], padx=14, pady=10)
         self._status_frame = f
 
+        # Top row: timer | waveform | status label — packed left-to-right.
+        # The live-caption bar (below) stacks underneath this row.
+        row = tk.Frame(f, bg=CP["bg"])
+        self._status_row = row
+        row.pack(side="top", fill="x")
+
         # Timer label  e.g. "01:16.2"
         self._timer_var = tk.StringVar(value="")
         self._timer_lbl = tk.Label(
-            f,
+            row,
             textvariable=self._timer_var,
             fg=CP["text"],
             bg=CP["bg"],
@@ -411,7 +425,7 @@ class FloatingPopup:
 
         # Waveform canvas — bars animated by microphone level
         self._wave_canvas = tk.Canvas(
-            f,
+            row,
             width=CANVAS_W,
             height=CANVAS_H,
             bg=CP["bg"],
@@ -423,30 +437,56 @@ class FloatingPopup:
 
         # Status text label  "Recording…" / "Transcribing…"
         self._status_label = tk.Label(
-            f,
+            row,
             text="",
             fg=CP["subtext"],
             bg=CP["bg"],
             font=("Segoe UI", 11, "bold"),
         )
-        # Packed at build time — always visible in the status frame
+        # Packed at build time — always visible in the status row
         self._status_label.pack(side="left")
 
-        # Live-caption label — REPLACES the waveform when live captions are on.
-        # Shows the last ~12 words of what the user is saying. Not packed here;
-        # packed on demand in _enter_status_mode.
+        # ── Live-caption bar ────────────────────────────────────────────────
+        # When live captions are on, the waveform stays on top and this bar is
+        # shown beneath it. It grows horizontally with the text until it hits
+        # the max width, then wraps and grows vertically up to CAPTION_MAX_LINES,
+        # then scrolls (tailing the latest words). Not packed here — packed on
+        # demand in _enter_status_mode.
         self._captions_enabled = False
-        self._caption_var = tk.StringVar(value="")
-        self._caption_lbl = tk.Label(
-            f,
-            textvariable=self._caption_var,
+        self._caption_wrap = tk.Frame(f, bg=CP["bg"])
+        self._caption_text = tk.Text(
+            self._caption_wrap,
             fg=CP["text"],
-            bg=CP["bg"],
+            bg=CP["bg_light"],
             font=("Segoe UI", 11),
-            wraplength=360,
-            justify="left",
-            anchor="w",
+            wrap="word",
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            width=CAPTION_MIN_CHARS,
+            height=1,
+            padx=10,
+            pady=6,
+            state="disabled",
+            cursor="arrow",
         )
+        self._caption_scroll = tk.Scrollbar(
+            self._caption_wrap,
+            orient="vertical",
+            command=self._caption_text.yview,
+            bg="#3a3a3a",
+            troughcolor=CP["bg"],
+            activebackground="#505050",
+            relief="flat",
+            borderwidth=0,
+            elementborderwidth=0,
+            highlightthickness=0,
+            bd=0,
+            width=10,
+        )
+        self._caption_text.configure(yscrollcommand=self._caption_scroll.set)
+        self._caption_text.pack(side="left", fill="both", expand=True)
+        self._caption_lines = 0  # last rendered visible-line count (reposition debounce)
 
         # Recording start time (for timer)
         self._rec_start: Optional[float] = None
@@ -813,19 +853,22 @@ class FloatingPopup:
         # Always remove timer/canvas/caption from pack order first so we control placement
         self._timer_lbl.pack_forget()
         self._wave_canvas.pack_forget()
-        self._caption_lbl.pack_forget()
+        self._caption_wrap.pack_forget()
 
         if recording and self._captions_enabled:
-            # Live-caption mode: timer | caption text | label. No waveform.
+            # Live-caption mode: timer | waveform on top, caption bar beneath.
+            self._draw_bars_initial()  # fresh bars every session
             self._timer_var.set("00:00.0")
             self._rec_start = time.time()
-            self._caption_var.set("Listening…")
             self._timer_lbl.pack(side="left", before=self._status_label, padx=(0, 12))
-            self._caption_lbl.pack(side="left", before=self._status_label, padx=(0, 12))
+            self._wave_canvas.pack(side="left", before=self._status_label, padx=(0, 12))
             self._status_label.configure(text="")
-            # The waveform loop normally drives the timer; in caption mode it's
-            # off, so run a lightweight ticker instead.
-            self.root.after(100, self._tick_caption_timer)
+            self._reset_caption_widget("Listening…")
+            # anchor="w" + no fill so the bar sizes to its content and genuinely
+            # grows horizontally from narrow, rather than snapping to the row width.
+            self._caption_wrap.pack(side="top", anchor="w", pady=(10, 0))
+            # The waveform loop drives the timer and keeps _last_activity fresh.
+            self._start_waveform()
         elif recording:
             # Correct order: timer | waveform | label
             self._draw_bars_initial()  # fresh bars every session
@@ -838,7 +881,6 @@ class FloatingPopup:
         else:
             # Transcribing — just the label, no timer or waveform
             self._rec_start = None
-            self._caption_var.set("")
             self._status_label.configure(text=text)
 
         self._status_frame.pack()
@@ -848,19 +890,58 @@ class FloatingPopup:
         self._reposition(self._status_cx, self._status_cy)
         self._show_no_activate()
 
-    def _tick_caption_timer(self) -> None:
-        """Advance the recording timer in live-caption mode (no waveform loop)."""
-        if self._mode != "status" or not self._captions_enabled or self._rec_start is None:
+    def _reset_caption_widget(self, text: str = "") -> None:
+        """Reset the caption bar to a single short line (start of a recording)."""
+        self._caption_lines = 0
+        self._caption_scroll.pack_forget()
+        self._caption_text.configure(state="normal")
+        self._caption_text.delete("1.0", "end")
+        self._caption_text.insert("1.0", text)
+        self._caption_text.configure(
+            state="disabled", width=CAPTION_MIN_CHARS, height=1
+        )
+
+    def _update_caption_widget(self, text: str) -> None:
+        """Render live caption text into the bar: grow horizontally until the max
+        width, then grow vertically up to CAPTION_MAX_LINES, then scroll (tailing
+        the latest words). Runs on the UI thread via root.after()."""
+        if self._mode != "status" or not self._captions_enabled:
             return
         try:
-            elapsed = time.time() - self._rec_start
-            mins = int(elapsed) // 60
-            secs = elapsed % 60
-            self._timer_var.set(f"{mins:02d}:{secs:04.1f}")
-            self._last_activity = time.time()
+            self._caption_text.configure(state="normal")
+            self._caption_text.delete("1.0", "end")
+            self._caption_text.insert("1.0", text)
+
+            # Width: grow to fit the text on one line up to the max, then lock.
+            longest = max((len(line) for line in text.split("\n")), default=0)
+            width = min(CAPTION_MAX_CHARS, max(CAPTION_MIN_CHARS, longest + 2))
+            self._caption_text.configure(width=width)
+
+            # Height: measure wrapped display lines at this width.
+            self._caption_text.update_idletasks()
+            try:
+                lines = int(
+                    self._caption_text.count("1.0", "end-1c", "displaylines")[0]
+                )
+            except Exception:
+                lines = int(self._caption_text.index("end-1c").split(".")[0])
+            lines = max(1, lines)
+            shown = min(lines, CAPTION_MAX_LINES)
+            self._caption_text.configure(height=shown, state="disabled")
+
+            if lines > CAPTION_MAX_LINES:
+                self._caption_scroll.pack(side="right", fill="y")
+                self._caption_text.see("end")  # keep the latest words in view
+            else:
+                self._caption_scroll.pack_forget()
+
+            # Keep the pill bottom-anchored as it grows: reposition only when the
+            # visible line count changes (avoids per-tick geometry flicker).
+            if shown != self._caption_lines:
+                self._caption_lines = shown
+                self._reposition(self._status_cx, self._status_cy)
         except Exception:
             pass
-        self.root.after(100, self._tick_caption_timer)
 
     def _start_waveform(self) -> None:
         self._waveform_running = True

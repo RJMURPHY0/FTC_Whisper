@@ -171,6 +171,23 @@ class TrayApp:
         print(f"[Tray] {self.APP_NAME} is running in the system tray.")
         self._icon.run()
 
+    def notify(self, message: str, title: Optional[str] = None) -> bool:
+        """Show a native Windows notification from the FTC Whisper tray icon.
+
+        This is owned by the tray icon, so it's clearly attributed to FTC
+        Whisper and never floats over whatever app is in the foreground (unlike
+        the in-app corner toast). Returns True if shown, False if the tray isn't
+        ready or can't notify — the caller can then fall back to the toast."""
+        icon = self._icon
+        if icon is None or not getattr(icon, "HAS_NOTIFICATION", False):
+            return False
+        try:
+            icon.notify(message, title or self.APP_NAME)
+            return True
+        except Exception as e:
+            print(f"[Tray] notify failed (non-fatal): {e}")
+            return False
+
     def stop(self) -> None:
         if self._icon is not None:
             self._icon.stop()

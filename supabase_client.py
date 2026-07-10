@@ -58,15 +58,20 @@ class SupabaseLogger:
     # Public API — all fire-and-forget
     # ------------------------------------------------------------------
 
-    def log_transcription(self, text: str) -> None:
-        """Save a new transcription record."""
-        self._append_local(text)
+    def log_transcription(self, text: str, app_name: str = "",
+                          app_exe: str = "") -> None:
+        """Save a new transcription record (with the app it was injected into)."""
+        self._append_local(text, app_name=app_name, app_exe=app_exe)
         if not self._enabled:
             return
         payload = {
             "transcribed_text": text,
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }
+        if app_name:
+            payload["app_name"] = app_name
+        if app_exe:
+            payload["app_exe"] = app_exe
         if self._user_id and self._user_id != "local":
             payload["user_id"] = self._user_id
         self._run(payload)
@@ -121,19 +126,27 @@ class SupabaseLogger:
         error: list = [None]
 
         def _fetch() -> None:
-            try:
-                q = (
-                    self._get_client()
-                    .table(_TABLE)
-                    .select("transcribed_text, refined_text, created_at")
-                    .order("created_at", desc=True)
-                    .limit(limit)
-                )
-                if self._user_id and self._user_id != "local":
-                    q = q.eq("user_id", self._user_id)
-                result[0] = q.execute().data or []
-            except Exception as e:
-                error[0] = e
+            # Try with the app columns first; fall back to the legacy column
+            # set if the remote table doesn't have them yet.
+            for cols in (
+                "transcribed_text, refined_text, created_at, app_name, app_exe",
+                "transcribed_text, refined_text, created_at",
+            ):
+                try:
+                    q = (
+                        self._get_client()
+                        .table(_TABLE)
+                        .select(cols)
+                        .order("created_at", desc=True)
+                        .limit(limit)
+                    )
+                    if self._user_id and self._user_id != "local":
+                        q = q.eq("user_id", self._user_id)
+                    result[0] = q.execute().data or []
+                    error[0] = None
+                    return
+                except Exception as e:
+                    error[0] = e
 
         t = threading.Thread(target=_fetch, daemon=True)
         t.start()
@@ -145,7 +158,43 @@ class SupabaseLogger:
         if error[0]:
             print(f"[Supabase] Fetch history failed: {error[0]} — using local history")
             return self._fetch_local(limit)
-        return result[0] or self._fetch_local(limit)
+        if not result[0]:
+            return self._fetch_local(limit)
+        return self._enrich_from_local(result[0])
+
+    def _enrich_from_local(self, remote: list) -> list:
+        """Fill in app_name/app_exe from the local file for remote rows that
+        lack them (remote table without the columns, or rows logged before
+        app capture existed). Matched by text + close timestamp."""
+        if all(r.get("app_name") for r in remote):
+            return remote
+        local = self._fetch_local(200)
+        if not local:
+            return remote
+
+        def _ts(rec):
+            try:
+                return datetime.datetime.fromisoformat(
+                    (rec.get("created_at") or "").replace("Z", "+00:00"))
+            except Exception:
+                return None
+
+        for r in remote:
+            if r.get("app_name"):
+                continue
+            rt = _ts(r)
+            for l in local:
+                if not l.get("app_name"):
+                    continue
+                if l.get("transcribed_text") != r.get("transcribed_text"):
+                    continue
+                lt = _ts(l)
+                if rt and lt and abs((rt - lt).total_seconds()) > 10:
+                    continue
+                r["app_name"] = l.get("app_name", "")
+                r["app_exe"] = l.get("app_exe", "")
+                break
+        return remote
 
     def clear_history(self) -> bool:
         """Delete all transcription records for the current user AND the local
@@ -180,7 +229,8 @@ class SupabaseLogger:
             print(f"[LocalHistory] Clear failed: {e}")
             return False
 
-    def _append_local(self, text: str) -> None:
+    def _append_local(self, text: str, app_name: str = "",
+                      app_exe: str = "") -> None:
         try:
             path = _local_history_path()
             with _local_history_lock:
@@ -194,6 +244,8 @@ class SupabaseLogger:
                 entries.insert(0, {
                     "transcribed_text": text,
                     "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "app_name": app_name,
+                    "app_exe": app_exe,
                 })
                 entries = entries[:200]
                 with open(path, "w", encoding="utf-8") as f:
@@ -256,4 +308,15 @@ class SupabaseLogger:
             self._get_client().table(_TABLE).insert(payload).execute()
             print(f"[Supabase] Logged: {list(payload.keys())}")
         except Exception as e:
+            # Remote table may not have the app columns yet — retry without
+            # them rather than losing the whole record.
+            stripped = {k: v for k, v in payload.items()
+                        if k not in ("app_name", "app_exe")}
+            if stripped != payload:
+                try:
+                    self._get_client().table(_TABLE).insert(stripped).execute()
+                    print(f"[Supabase] Logged (no app cols): {list(stripped.keys())}")
+                    return
+                except Exception as e2:
+                    e = e2
             print(f"[Supabase] Log failed (non-fatal): {e}")

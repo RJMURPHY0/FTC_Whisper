@@ -419,20 +419,52 @@ class Recorder:
             self._monitor_peak = 0.0
 
     def get_input_devices(self) -> list[dict]:
-        """List available input audio devices."""
-        devices = sd.query_devices()
-        input_devices = []
-        for i, dev in enumerate(devices):
-            if dev["max_input_channels"] > 0:
-                input_devices.append(
-                    {
-                        "index": i,
-                        "name": dev["name"],
-                        "channels": dev["max_input_channels"],
-                        "sample_rate": dev["default_samplerate"],
-                    }
-                )
-        return input_devices
+        """List available input audio devices, one clean entry per mic.
+
+        Windows exposes each physical microphone under several host APIs (MME,
+        DirectSound, WASAPI, WDM-KS). MME truncates names to 31 characters, so
+        we prefer the non-MME host APIs which give full, readable names, then
+        deduplicate by name. Never raises — returns [] on failure so the UI can
+        fall back to the system default instead of crashing."""
+        try:
+            devices = sd.query_devices()
+        except Exception as e:
+            print(f"[Recorder] query_devices failed: {e}")
+            return []
+        try:
+            hostapis = sd.query_hostapis()
+        except Exception:
+            hostapis = []
+
+        def _api_name(idx):
+            if 0 <= idx < len(hostapis):
+                return str(hostapis[idx].get("name", "")).lower()
+            return ""
+
+        inputs = [(i, d) for i, d in enumerate(devices)
+                  if d["max_input_channels"] > 0]
+        # Prefer non-MME devices (full names); fall back to everything if that
+        # leaves us with nothing (some minimal systems only expose MME).
+        non_mme = [(i, d) for i, d in inputs if "mme" not in _api_name(d["hostapi"])]
+        pool = non_mme or inputs
+
+        seen: set = set()
+        result: list[dict] = []
+        for i, dev in pool:
+            name = str(dev["name"]).strip()
+            key = name.lower()
+            if not name or key in seen:
+                continue
+            seen.add(key)
+            result.append({
+                "index": i,
+                "name": name,
+                "channels": dev["max_input_channels"],
+                "sample_rate": dev["default_samplerate"],
+            })
+        print(f"[Recorder] Enumerated {len(result)} input device(s): "
+              f"{[d['name'] for d in result]}")
+        return result
 
     def get_live_levels(self) -> tuple[float, float]:
         """Return most recent (rms, peak) levels. While the Test Mic monitor is

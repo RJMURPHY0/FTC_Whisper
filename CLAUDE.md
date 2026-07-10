@@ -22,12 +22,19 @@ venv\Scripts\pyinstaller ftc_whisper.spec --noconfirm
 ```
 Output: `dist\FTC Whisper.exe`. Before building, bump `APP_VERSION` in `app.py` and both version tuples and string values in `version_info.txt`. After building, upload `dist\FTC Whisper.exe` as `FTC-Whisper.exe` to a GitHub release — the update checker (`updater.py`) fetches `/releases/latest` and looks for an asset with exactly that name.
 
-**Release a new version:**
+**Release a new version (CI — this is the signed path):**
 1. Bump `APP_VERSION` in `app.py` (e.g. `"1.0.7"`)
 2. Update all four version fields in `version_info.txt` to match
 3. Commit and push to `main`
-4. Build with PyInstaller
-5. Create a GitHub release tagged `vX.Y.Z` and upload `dist\FTC Whisper.exe` as `FTC-Whisper.exe`
+4. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`
+5. `.github/workflows/build-release.yml` builds, **code-signs via Azure Trusted
+   Signing**, and publishes `FTC-Whisper.exe` to the `vX.Y.Z` release automatically.
+
+**Do NOT build locally and upload by hand for public releases** — code signing
+only runs in CI (see `docs/CODE_SIGNING.md`), so a hand-built exe ships unsigned
+and gets flagged by SmartScreen/antivirus. The local PyInstaller command above is
+for development/testing only. Signing requires six repo secrets and a one-time
+Azure Trusted Signing setup — all documented in `docs/CODE_SIGNING.md`.
 
 The GitHub release tag must be strictly greater than all existing release tags, because `is_newer()` in `updater.py` does a tuple comparison. Check existing releases before picking a version number.
 

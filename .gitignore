@@ -34,5 +34,6 @@ memory/
 
 # Build logs + dream/memory backup dumps (local artefacts, not source)
 build_*.log
+build-*.log
 memory-backup-dream-*/
 backup-dream-*/

@@ -42,9 +42,62 @@ jobs:
       - name: Build executable
         run: pyinstaller --noconfirm --clean "ftc_whisper.spec"
 
+      # ── Code signing via Azure Trusted Signing ────────────────────────────
+      # Signs dist\FTC Whisper.exe in place with an Authenticode signature that
+      # SmartScreen and Defender trust immediately. Requires the six repo
+      # secrets listed in docs/CODE_SIGNING.md. If those secrets are absent
+      # (e.g. a fork) the step is skipped so the build still produces an
+      # unsigned exe rather than failing.
+      - name: Sign executable (Azure Trusted Signing)
+        if: ${{ env.AZURE_CLIENT_ID != '' }}
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        uses: azure/trusted-signing-action@v0.5.9
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
+          certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
+          files-folder: ${{ github.workspace }}\dist
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      # Copy preserves the embedded Authenticode signature, so the renamed
+      # release asset stays signed.
       - name: Rename release asset
         shell: pwsh
         run: Copy-Item "dist\FTC Whisper.exe" "dist\FTC-Whisper.exe" -Force
+
+      - name: Verify signature
+        if: ${{ env.AZURE_CLIENT_ID != '' }}
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature "dist\FTC-Whisper.exe"
+          Write-Host "Signature status: $($sig.Status)"
+          Write-Host "Signer: $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne 'Valid') { throw "Signature invalid: $($sig.Status)" }
+
+      # ── VirusTotal scan ───────────────────────────────────────────────────
+      # Uploads the release exe to VirusTotal and prints the analysis URL so you
+      # can see the AV detection rate on every build BEFORE users do. Gated on a
+      # free VT_API_KEY repo secret; skipped if absent. Purely informational —
+      # never fails the build.
+      - name: Scan with VirusTotal
+        if: ${{ env.VT_API_KEY != '' }}
+        continue-on-error: true
+        env:
+          VT_API_KEY: ${{ secrets.VT_API_KEY }}
+        uses: crazy-max/ghaction-virustotal@v4
+        with:
+          vt_api_key: ${{ secrets.VT_API_KEY }}
+          files: |
+            dist/FTC-Whisper.exe
 
       - name: Publish versioned release
         uses: softprops/action-gh-release@v2

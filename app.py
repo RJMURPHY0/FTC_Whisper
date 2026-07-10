@@ -532,6 +532,13 @@ class WhisperFlowApp:
                 print(f"[App] Recording started, target hwnd={self._recording_hwnd:#x}")
             except Exception:
                 self._recording_hwnd = 0
+            # Capture the target app identity NOW — browser tab titles change
+            # constantly, so this can't be resolved later at log time.
+            try:
+                from app_icons import capture_app_info
+                self._recording_app = capture_app_info(self._recording_hwnd)
+            except Exception:
+                self._recording_app = {"app_name": "", "app_exe": ""}
             # Capture mouse position now — user is hovering near the target text field
             try:
                 pt = ctypes.wintypes.POINT()
@@ -771,7 +778,14 @@ class WhisperFlowApp:
                 kb.send("enter")
 
             self.feedback.transcription_complete(transcribed_text)
-            threading.Thread(target=self.db.log_transcription, args=(transcribed_text,), daemon=True).start()
+            _app = getattr(self, "_recording_app", None) or {}
+            threading.Thread(
+                target=self.db.log_transcription,
+                args=(transcribed_text,),
+                kwargs={"app_name": _app.get("app_name", ""),
+                        "app_exe": _app.get("app_exe", "")},
+                daemon=True,
+            ).start()
         except Exception as e:
             print(f"[App] Finalize error (popup will still appear): {e}")
         finally:
@@ -922,6 +936,11 @@ class WhisperFlowApp:
             except Exception:
                 hwnd = self._recording_hwnd
             try:
+                from app_icons import capture_app_info
+                self._recording_app = capture_app_info(hwnd)
+            except Exception:
+                self._recording_app = {"app_name": "", "app_exe": ""}
+            try:
                 pt = ctypes.wintypes.POINT()
                 ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
                 cx, cy = pt.x, pt.y
@@ -938,8 +957,14 @@ class WhisperFlowApp:
                 cursor_x=cx,
                 cursor_y=cy,
             )
+            # Always feed mic levels to the popup waveform while recording — the
+            # waveform now animates in caption mode too (captions render in a bar
+            # beneath it, no longer replacing it).
+            if not self._mic_loop_running.is_set():
+                self._mic_loop_running.set()
+                threading.Thread(target=self._mic_level_loop, daemon=True).start()
             if _captions_on:
-                # Live-caption mode REPLACES the waveform bar. In Parakeet mode
+                # Live captions render beneath the waveform. In Parakeet mode
                 # captions are pushed by the StreamingSession worker; the whisper
                 # fallback runs its own caption loop.
                 if not self._use_parakeet() and not self._caption_loop_running.is_set():
@@ -948,11 +973,6 @@ class WhisperFlowApp:
                     self._caption_thread = threading.Thread(
                         target=self._caption_loop, daemon=True, name="caption-loop")
                     self._caption_thread.start()
-            else:
-                # Feed mic levels to the popup waveform while recording
-                if not self._mic_loop_running.is_set():
-                    self._mic_loop_running.set()
-                    threading.Thread(target=self._mic_level_loop, daemon=True).start()
         elif state == AppState.PROCESSING:
             # Stop captions immediately so no caption tick holds the fast model
             # while the final injection pass needs it.
