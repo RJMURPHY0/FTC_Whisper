@@ -521,47 +521,51 @@ class Recorder:
 
     def start_monitor(self, device_name: str = "") -> None:
         """Open a level-only stream for the Test Mic feature. Uses a dedicated
-        callback so it can never contaminate a recording's audio buffer."""
+        callback so it can never contaminate a recording's audio buffer.
+        Serialised under the lifecycle lock so the watchdog's PortAudio re-init
+        can never run while the monitor stream is being opened."""
         self.stop_monitor()
-        old_device = self.input_device
-        old_index = self._active_device_index
-        old_name = self._active_device_name
-        old_rate = self._active_sample_rate
-        self.input_device = device_name.strip()
-        # Force re-resolution: the cached index would silently ignore the
-        # explicitly requested device.
-        self._active_device_index = None
-        self._active_device_name = ""
-        try:
-            self._monitor_stream = self._open_best_input_stream(
-                callback=self._monitor_callback
-            )
-            self._monitor_stream.start()
-            self._monitor_active = True
-        except Exception:
+        with self._stream_lifecycle_lock:
+            old_device = self.input_device
+            old_index = self._active_device_index
+            old_name = self._active_device_name
+            old_rate = self._active_sample_rate
+            self.input_device = device_name.strip()
+            # Force re-resolution: the cached index would silently ignore the
+            # explicitly requested device.
+            self._active_device_index = None
+            self._active_device_name = ""
+            try:
+                self._monitor_stream = self._open_best_input_stream(
+                    callback=self._monitor_callback
+                )
+                self._monitor_stream.start()
+                self._monitor_active = True
+            except Exception:
+                self.input_device = old_device
+                self._active_device_index = old_index
+                self._active_device_name = old_name
+                self._active_sample_rate = old_rate
+                self._monitor_stream = None
+                raise
+            # Restore recording-device state — monitor must not pollute the cache
             self.input_device = old_device
             self._active_device_index = old_index
             self._active_device_name = old_name
             self._active_sample_rate = old_rate
-            self._monitor_stream = None
-            raise
-        # Restore recording-device state — monitor must not pollute the cache
-        self.input_device = old_device
-        self._active_device_index = old_index
-        self._active_device_name = old_name
-        self._active_sample_rate = old_rate
 
     def stop_monitor(self) -> None:
         """Close the mic-test monitor stream if open."""
-        self._monitor_active = False
-        stream = getattr(self, "_monitor_stream", None)
-        if stream is not None:
-            try:
-                stream.stop()
-                stream.close()
-            except Exception:
-                pass
-            self._monitor_stream = None
+        with self._stream_lifecycle_lock:
+            self._monitor_active = False
+            stream = getattr(self, "_monitor_stream", None)
+            if stream is not None:
+                try:
+                    stream.stop()
+                    stream.close()
+                except Exception:
+                    pass
+                self._monitor_stream = None
         with self._lock:
             self._monitor_rms = 0.0
             self._monitor_peak = 0.0
