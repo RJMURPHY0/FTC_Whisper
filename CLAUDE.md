@@ -122,6 +122,28 @@ tolerance guard in `context_fix()`. `max_tokens` scales with input length. The
 ### Update flow (fully automatic since v1.6.4)
 `updater.py` checks `https://api.github.com/repos/RJMURPHY0/FTC_Whisper/releases/latest` for an asset named `FTC-Whisper.exe` every 6 hours. When one is found (and `config.auto_update` is true, the default), `run_auto_update()` downloads to `%LOCALAPPDATA%\FTC Whisper\FTC-Whisper-new.exe` (3 attempts with backoff), verifies it (`verify_exe`: MZ header + ≥5 MB + Content-Length match), waits until the app is idle (`_safe_to_restart`: state IDLE and >120s since last dictation, 6 consecutive 5s polls), then `apply_update()` spawns a hidden PowerShell swap script and exits via `os._exit(0)`. The script waits for the PID to die, `Unblock-File`s the download, copies it over the installed exe with 30×2s retries, relaunches, and self-deletes. `apply_update` is guarded against double-invocation (manual button + auto worker can race). On the first launch of a new version, `_announce_update_if_any()` compares `%LOCALAPPDATA%\FTC Whisper\last-version.txt` and shows a transient "Updated to vX.Y.Z" toast (`show_toast` in `app_window.py`). The Settings banner remains as a manual "Update Now" override.
 
+### Warm-mic health (v1.6.13+)
+WASAPI/MME input streams die silently (callbacks stop, `stream.active` stays True)
+after device changes, sleep/resume, or audio-engine restarts. The Recorder tracks a
+**callback heartbeat** (`_last_callback_ts`): no callback for >1.2s = dead stream,
+regardless of `.active`. `start()` verifies fresh audio arrives within 0.45s or
+closes the warm stream, re-inits PortAudio (`sd._terminate()/_initialize()` —
+REQUIRED for PortAudio to see device-topology changes) and cold-opens; a
+`mic-watchdog` daemon recovers dead streams within ~5s and bounces the idle stream
+every ~60s to follow the Windows default mic. Stale pre-roll is never used to seed
+a recording. Never judge stream health by `.active` — only by heartbeat age. Never
+call `_refresh_portaudio()` with any stream open (monitor open/close is serialised
+under `_stream_lifecycle_lock` for exactly this reason).
+
+### Stale-copy handoff (v1.6.15+)
+Frozen builds compare their FileVersion resource against the canonical exe at
+`%LOCALAPPDATA%\FTC Whisper\FTC Whisper.exe` at launch
+(`_handoff_to_canonical_if_newer`, called BEFORE the single-instance mutex). If the
+canonical copy is strictly newer, the stale copy spawns it and exits — double-clicking
+an old download/shortcut always runs the auto-updated version.
+`_repair_desktop_shortcut` retargets an existing desktop `FTC Whisper.lnk` to the
+canonical path (repair-only, never creates).
+
 ### Auto-launch (boot)
 The **running app** owns auto-launch, not the installer. On every launch `main()` spawns `_ensure_startup_task()` (daemon thread) which:
 1. For frozen builds, calls `_ensure_installed_copy()` to keep a canonical exe at the **stable** path `%LOCALAPPDATA%\FTC Whisper\FTC Whisper.exe` (so the logon task never points at the volatile location the user double-clicked from, e.g. Downloads).
