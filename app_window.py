@@ -257,8 +257,17 @@ class RoundedButton(tk.Canvas):
         self._resize_and_draw()
 
     def _resize_and_draw(self):
-        w = self._font.measure(self._text) + 2 * self._padx
-        h = self._font.metrics("linespace") + 2 * self._pady
+        # Emoji/symbols (✉ 🎩 ✨ …) render taller than the font's nominal line
+        # height, so sizing from linespace alone clips them. Measure the ACTUAL
+        # rendered glyph box and use whichever is taller — nothing gets cut off,
+        # and text stays vertically centred.
+        probe = self.create_text(0, 0, text=self._text or " ",
+                                  font=self._font, anchor="nw")
+        bx1, by1, bx2, by2 = self.bbox(probe)
+        self.delete(probe)
+        line_h = self._font.metrics("linespace")
+        w = max(self._font.measure(self._text), bx2 - bx1) + 2 * self._padx
+        h = max(line_h, by2 - by1) + 2 * self._pady
         super().configure(width=w, height=h)
         self._draw(w, h)
 
