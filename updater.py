@@ -216,6 +216,22 @@ while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{
     Start-Sleep -Milliseconds 500
 }}
 Log "Old process exited."
+# Kill any OTHER instances still holding the installed exe open. A double-launch
+# leaves a second process whose loaded image locks $CurExe, so Copy-Item fails
+# every retry and the update silently never replaces the exe. Match by full path
+# first (precise), then by leaf name as a backstop.
+try {{
+    Get-Process -ErrorAction SilentlyContinue |
+        Where-Object {{ $_.Path -eq $CurExe }} |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+}} catch {{}}
+try {{
+    $leaf = [System.IO.Path]::GetFileNameWithoutExtension($CurExe)
+    Get-Process -Name $leaf -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+}} catch {{}}
+Start-Sleep -Milliseconds 800
+Log "Cleared any sibling instances holding the exe."
 # Remove Mark-of-the-Web so Defender releases its scan lock on the download
 Unblock-File -Path $NewExe -ErrorAction SilentlyContinue
 Log "Unblocked download. Brief settle before copy (retry loop handles any remaining scan lock)..."

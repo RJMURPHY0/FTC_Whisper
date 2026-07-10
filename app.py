@@ -45,7 +45,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.5"
+APP_VERSION = "1.6.6"
 
 
 class WhisperFlowApp:
@@ -1560,7 +1560,12 @@ def _ensure_single_instance() -> None:
             )
         except Exception:
             pass
-        sys.exit(0)
+        # os._exit, not sys.exit: a duplicate instance owns nothing and must die
+        # immediately. sys.exit only raises SystemExit, which a non-daemon thread
+        # or a wedged DLL-init (e.g. an OOM during model preload) can swallow,
+        # leaving a 1-thread zombie that keeps the installed exe's image locked —
+        # which then makes the auto-update swap's Copy-Item fail every retry.
+        os._exit(0)
 
     # We are the first instance — hold the mutex for the process lifetime.
     _SINGLETON_MUTEX = mutex
