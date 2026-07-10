@@ -433,10 +433,14 @@ class HotkeyManager:
                         self._kb_hooks.append(
                             kb.on_release_key(self._base_key, self._kb_combo_up)
                         )
+                        # Without this, every dictation leaks the literal base
+                        # key ("v" — with auto-repeat in hold mode) into the
+                        # focused document while recording.
+                        self._install_base_key_suppressor()
                         registered = True
                         print(
                             "[HotkeyManager] Win32 combo unavailable — using "
-                            "keyboard-hook fallback (no OS suppression)."
+                            "keyboard-hook fallback (base key suppressed)."
                         )
                     except Exception as e:
                         print(f"[HotkeyManager] Fallback registration failed: {e}")

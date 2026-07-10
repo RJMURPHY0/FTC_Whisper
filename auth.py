@@ -200,7 +200,17 @@ class AuthManager:
                     data = json.loads(_dpapi_decrypt(raw).decode())
                 except Exception:
                     # Fall back to plain JSON for sessions saved before the upgrade
-                    data = json.loads(raw.decode())
+                    try:
+                        data = json.loads(raw.decode())
+                    except Exception:
+                        # Neither decrypts nor parses — corrupt file or a
+                        # transient DPAPI/profile hiccup. Do NOT let this fall
+                        # into the auth-keyword heuristic below (the decode
+                        # error text contains "invalid", which used to delete
+                        # the session and silently sign the user out).
+                        print("[Auth] Session file unreadable (decrypt/parse "
+                              "failed) — keeping it; will retry next launch.")
+                        return
 
                 client = self._get_client()
                 at = data.get("access_token") or data.get("access_token", "")

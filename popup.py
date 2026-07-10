@@ -1108,10 +1108,9 @@ class FloatingPopup:
             result = self._current_result
             self._do_hide()
             threading.Thread(target=self._on_insert_result, args=(result,), daemon=True).start()
-        elif self._current_result and self._on_replace:
-            result = self._current_result
-            self._do_hide()
-            threading.Thread(target=self._on_replace, args=(result,), daemon=True).start()
+        # No fallback to _on_replace here: Replace UNDOES the original
+        # injection first, which is the opposite of this button's contract
+        # ("insert WITHOUT undoing anything").
 
     def _do_replace(self) -> None:
         """Undo original injection and insert AI result instead."""
@@ -1243,9 +1242,11 @@ class FloatingPopup:
         self._result_frame.pack_forget()
         text = self._original_text
 
+        token = self._session_token
+
         def _worker():
             result = self._ai_refiner.refine(text, mode)
-            self.root.after(0, self._show_ai_result, result)
+            self.root.after(0, self._show_ai_result, result, token)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1273,16 +1274,23 @@ class FloatingPopup:
             "Return only the rewritten text, nothing else."
         )
 
+        token = self._session_token
+
         def _worker():
             result = self._ai_refiner.refine(text, custom_prompt=custom_prompt)
-            self.root.after(0, self._show_ai_result, result)
+            self.root.after(0, self._show_ai_result, result, token)
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _show_ai_result(self, text: str) -> None:
+    def _show_ai_result(self, text: str, session: int = 0) -> None:
         self._ai_busy = False
         if self._mode is None:
             # Popup was closed while the worker was running; discard silently.
+            return
+        if session and session != self._session_token:
+            # Result belongs to an EARLIER dictation — a new popup session
+            # started while the worker ran. Displaying it would let "Replace"
+            # inject the old dictation's text over the new one.
             return
         self._current_result = text
         self._ai_status.configure(text="")

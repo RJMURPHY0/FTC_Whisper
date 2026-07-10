@@ -206,8 +206,10 @@ class Transcriber:
         # Remove only pure non-word fillers (sounds with no semantic meaning).
         # Do NOT strip words like "like", "so", "actually", "yeah" — the user
         # may have said them intentionally and removing them corrupts the text.
+        # "er" alone is a hesitation; "err" is a real verb ("to err is human"),
+        # so only the single-r form is stripped.
         fillers = (
-            r"\bum+\b", r"\buh+\b", r"\ber+\b", r"\bhmm+\b", r"\bmhm+\b",
+            r"\bum+\b", r"\buh+\b", r"\ber\b", r"\berm+\b", r"\bhmm+\b", r"\bmhm+\b",
         )
         for filler in fillers:
             text = re.sub(filler, "", text, flags=re.IGNORECASE)

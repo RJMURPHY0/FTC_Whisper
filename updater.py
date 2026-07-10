@@ -106,13 +106,18 @@ def get_latest_release() -> Optional[dict]:
 
         tag = data.get("tag_name", "")
         assets = data.get("assets", [])
-        url = next(
-            (a["browser_download_url"] for a in assets
-             if a.get("name") == _DOWNLOAD_FILENAME),
+        asset = next(
+            (a for a in assets if a.get("name") == _DOWNLOAD_FILENAME),
             None,
         )
-        if tag and url:
-            _cached_release = {"version": tag, "download_url": url}
+        if tag and asset:
+            _cached_release = {
+                "version": tag,
+                "download_url": asset["browser_download_url"],
+                # Exact asset size lets the download/verify path detect
+                # truncation even when a proxy strips Content-Length.
+                "size": int(asset.get("size") or 0),
+            }
             return _cached_release
     except Exception:
         pass
@@ -139,10 +144,16 @@ def download_update(
     url: str,
     dest_path: str,
     progress_cb: Callable[[int, int], None],
+    expected_bytes: int = 0,
 ) -> None:
     """
     Download *url* to *dest_path*, calling progress_cb(bytes_done, total_bytes)
     after each chunk. Raises on network/IO errors.
+
+    expected_bytes (the GitHub asset size) guards against truncation even when
+    a proxy re-chunks the response and strips Content-Length — without it a
+    mid-stream cut produces a partial file that still starts with 'MZ' and
+    passes the size floor, and installing it bricks the app.
     """
     req = urllib.request.Request(url, headers={"User-Agent": "FTC-Whisper-Updater/1.0"})
     with urllib.request.urlopen(req, timeout=60) as resp:
@@ -158,15 +169,25 @@ def download_update(
                 progress_cb(done, total)
     if total and done != total:
         raise IOError(f"Truncated download: got {done} of {total} bytes")
+    if expected_bytes and done != expected_bytes:
+        raise IOError(
+            f"Truncated download: got {done}, release asset is {expected_bytes} bytes"
+        )
 
 
-def verify_exe(path: str, min_bytes: int = _MIN_EXE_BYTES) -> None:
+def verify_exe(path: str, min_bytes: int = _MIN_EXE_BYTES,
+               expected_bytes: int = 0) -> None:
     """Sanity-check a downloaded update before it is allowed to replace the
     installed exe. Raises IOError on anything suspicious — installing a
     corrupt/HTML-error-page 'exe' bricks the install until manual reinstall."""
     size = os.path.getsize(path)
     if size < min_bytes:
         raise IOError(f"Downloaded file too small ({size} bytes) — not a release exe")
+    if expected_bytes and size != expected_bytes:
+        raise IOError(
+            f"Downloaded file is {size} bytes but the release asset is "
+            f"{expected_bytes} — truncated or tampered download"
+        )
     with open(path, "rb") as f:
         if f.read(2) != b"MZ":
             raise IOError("Downloaded file is not a Windows executable (no MZ header)")
@@ -364,6 +385,13 @@ def run_auto_update(
     dest = _fresh_download_path(os.path.join(_app_data_dir(), "FTC-Whisper-new.exe"))
     _emit(on_event, "download_start", None, f"v{version.lstrip('v')}")
 
+    # Exact asset size from the release check (when it's the same release):
+    # detects truncation even without a Content-Length header.
+    rel = cached_release() or {}
+    expected = 0
+    if str(rel.get("version", "")).lstrip("vV") == version.lstrip("vV"):
+        expected = int(rel.get("size") or 0)
+
     # Download with retries — transient network errors must not strand the
     # user on an old build until the next 6-hour check.
     last_exc = None
@@ -372,8 +400,8 @@ def run_auto_update(
             time.sleep(backoff)
         try:
             on_status(f"Downloading update v{version.lstrip('v')}…")
-            download_update(url, dest, lambda *_: None)
-            verify_exe(dest)
+            download_update(url, dest, lambda *_: None, expected_bytes=expected)
+            verify_exe(dest, expected_bytes=expected)
             last_exc = None
             break
         except Exception as exc:

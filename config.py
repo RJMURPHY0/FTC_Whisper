@@ -120,6 +120,8 @@ class Config:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                if not isinstance(data, dict):
+                    raise json.JSONDecodeError("config root is not an object", "", 0)
                 for key, value in data.items():
                     if hasattr(config, key) and not key.startswith("_"):
                         setattr(config, key, value)

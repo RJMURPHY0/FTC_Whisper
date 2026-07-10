@@ -65,6 +65,11 @@ _u32.SendInput.restype = ctypes.c_uint
 # clobber a newer paste's clipboard contents.
 _clip_lock = threading.Lock()
 _clip_gen = 0
+# The USER'S clipboard content while one or more restores are outstanding:
+# (text, timestamp). When pastes overlap inside the restore delay, the second
+# paste would otherwise capture OUR OWN injected text as "previous" and the
+# user's real clipboard would be lost. Carried forward instead.
+_orig_pending = None
 
 
 # ── Win32 constants ───────────────────────────────────────────────────────────
@@ -623,6 +628,19 @@ class Injector:
             finally:
                 _u32.CloseClipboard()
 
+        if bump:
+            global _orig_pending
+            with _clip_lock:
+                now = time.time()
+                if _orig_pending is not None and now - _orig_pending[1] < 10.0:
+                    # An earlier paste's restore hasn't fired yet — what's on
+                    # the clipboard is OUR injected text, not the user's. Carry
+                    # the true original forward to this generation's restore.
+                    previous = _orig_pending[0]
+                    _orig_pending = (previous, now)
+                else:
+                    _orig_pending = (previous, now) if previous else None
+
         # ── Write new content (with readback verification) ──
         encoded = (text + "\x00").encode("utf-16-le")
         expected_prefix = text[:50]
@@ -688,14 +706,18 @@ class Injector:
             return
 
         def _do():
+            global _orig_pending
             time.sleep(0.45)  # 0.45s: enough for slow Chrome tabs to process the paste
             with _clip_lock:
                 if _clip_gen != gen:
-                    return  # a newer paste superseded us — leave its content alone
+                    return  # a newer paste superseded us — it carries the original now
             try:
                 Injector._clipboard_set(original, bump=False)
             except Exception:
                 pass
+            finally:
+                with _clip_lock:
+                    _orig_pending = None
 
         threading.Thread(target=_do, daemon=True).start()
 

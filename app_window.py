@@ -675,9 +675,13 @@ class AppWindow:
                 self._root.bind_all("<MouseWheel>", lambda e: self._settings_cv.yview_scroll(
                     int(-1 * (e.delta / 40)), "units"))
             if hasattr(self, "_update_check_btn") and hasattr(self, "_do_update_check"):
-                self._update_check_btn.configure(
-                    text="Check for Updates", fg=C["accent"], cursor="hand2")
-                self._update_check_btn.bind("<Button-1>", self._do_update_check)
+                # Don't clobber an in-flight check — resetting the label here
+                # both swallowed the pending result and re-armed the button for
+                # overlapping checks.
+                if self._update_check_btn.cget("text") != "Checking...":
+                    self._update_check_btn.configure(
+                        text="Check for Updates", fg=C["accent"], cursor="hand2")
+                    self._update_check_btn.bind("<Button-1>", self._do_update_check)
         elif name == "hotkey":
             if self._root and hasattr(self, "_hk_cv"):
                 self._root.bind_all("<MouseWheel>", lambda e: self._hk_cv.yview_scroll(
@@ -1588,34 +1592,14 @@ class AppWindow:
                 for opt in options:
                     menu.add_command(label=opt, command=lambda v=opt: mic_var.set(v))
 
-                # Auto-pick the best real microphone when the user hasn't chosen
-                # one, and persist it so recording actually uses it. Prefer a
-                # dedicated external mic (headset / USB) over the built-in array,
-                # since that's usually the better dictation source; never pick a
-                # loopback/stereo-mix/speaker (_mic_rank >= 2).
-                def _mic_pref(name):
-                    n = name.lower()
-                    if any(x in n for x in ["headset", "yeti", "rode", "shure",
-                                             "jabra", "logi", "usb"]):
-                        return 0  # dedicated external mic
-                    if any(x in n for x in ["array", "microphone", "mic"]):
-                        return 1  # built-in / generic
-                    return 2
-                best, best_pref = None, 99
-                for d in unique_devs:
-                    if _mic_rank(d) >= 2:
-                        continue  # skip loopback / stereo-mix / speaker
-                    p = _mic_pref(d["name"])
-                    if p < best_pref:
-                        best, best_pref = d["name"], p
                 if current_mic and current_mic in options:
                     mic_var.set(current_mic)
-                elif best:
-                    mic_var.set(best)
-                    if self._on_settings_change:
-                        self._on_settings_change("input_device", best)
-                    print(f"[Settings] Auto-selected best mic: {best}")
                 else:
+                    # Empty config = "Default" (follow the Windows default mic).
+                    # The old code treated empty as "not chosen yet" and silently
+                    # persisted a specific device — which made "Default"
+                    # impossible to keep AND pinned the app to a mic that stops
+                    # being the right one the moment the user plugs in a headset.
                     mic_var.set("Default")
                 print(f"[Settings] Mic menu populated with {len(options)} option(s)")
             except Exception as e:
@@ -2012,29 +1996,35 @@ class AppWindow:
             self._update_check_btn.unbind("<Button-1>")
             self._update_status_lbl.configure(text="")
 
-            from updater import check_for_update
+            # Three honest outcomes: update / up-to-date / CHECK FAILED. The old
+            # flow only had a "found update" callback plus a blind 6s timer that
+            # showed "Up to date ✓" — so being offline reported "Up to date ✓"
+            # and a real pending update was silently missed.
+            def _check_worker():
+                from updater import get_latest_release, is_newer
+                info = get_latest_release()
 
-            def _done(version, url):
                 def _apply():
-                    self._update_status_lbl.configure(
-                        text=f"Update available: {version}", fg=C["accent"])
-                    _restore_check_btn()
-                    # show_update_banner creates tk widgets — it must run on the
-                    # UI thread, not the updater worker thread (crash/corruption).
-                    self.show_update_banner(version, url)
-                self._ui_after(0, _apply)
-
-            def _no_update_fallback():
-                import time; time.sleep(6)
-                def _apply():
-                    if self._update_check_btn.cget("text") == "Checking...":
+                    if info is None:
+                        self._update_status_lbl.configure(
+                            text="Check failed — no connection? Retrying works.",
+                            fg=C["subtext"])
+                        _restore_check_btn()
+                    elif is_newer(info["version"], self._version):
+                        self._update_status_lbl.configure(
+                            text=f"Update available: {info['version']}", fg=C["accent"])
+                        _restore_check_btn()
+                        # show_update_banner creates tk widgets — it must run on
+                        # the UI thread, not the updater worker thread.
+                        self.show_update_banner(info["version"], info["download_url"])
+                    else:
                         self._update_status_lbl.configure(
                             text="Up to date ✓", fg=C["success"])
                         _restore_check_btn()
                 self._ui_after(0, _apply)
 
-            check_for_update(self._version, _done)
-            threading.Thread(target=_no_update_fallback, daemon=True).start()
+            threading.Thread(target=_check_worker, daemon=True,
+                             name="manual-update-check").start()
 
         self._do_update_check = _check_now
         self._update_check_btn.bind("<Button-1>", _check_now)
@@ -2127,10 +2117,14 @@ class AppWindow:
             return
 
 
-        _updating = [False]
+        # Instance-level, not per-banner: re-opening the banner (a second
+        # "Check for Updates") must not mint a fresh guard while a download
+        # thread from the previous banner is still running.
+        if not hasattr(self, "_update_in_flight"):
+            self._update_in_flight = False
 
         def _set_downloading():
-            _updating[0] = True
+            self._update_in_flight = True
             for btn in _btns:
                 try:
                     btn.configure(text="Downloading…", bg=C["subtext"], cursor="")
@@ -2142,7 +2136,7 @@ class AppWindow:
 
         def _reset_btns():
             # Re-enable the button(s) after a failed attempt so the user can retry.
-            _updating[0] = False
+            self._update_in_flight = False
             for btn in _btns:
                 try:
                     if not btn.winfo_exists():
@@ -2155,7 +2149,7 @@ class AppWindow:
                     pass
 
         def _do_update(_e=None):
-            if _updating[0]:
+            if self._update_in_flight:
                 return
             from updater import run_auto_update, current_exe_path
             import threading
@@ -2165,6 +2159,9 @@ class AppWindow:
                 import webbrowser
                 webbrowser.open(download_url)
                 return
+            # Set synchronously — the after(0) UI update alone left a gap where
+            # a second click (from a re-opened banner) started a duplicate run.
+            self._update_in_flight = True
             self._root.after(0, _set_downloading)
 
             def _status(msg):

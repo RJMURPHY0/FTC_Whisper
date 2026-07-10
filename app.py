@@ -45,7 +45,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.14"
+APP_VERSION = "1.6.15"
 
 
 class WhisperFlowApp:
@@ -1695,6 +1695,70 @@ def _startup_target() -> str:
     return os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
 
 
+def _file_version_tuple(path: str) -> tuple:
+    """Read the FileVersion resource of a Windows exe. (0,0,0,0) on failure."""
+    try:
+        ver = ctypes.windll.version
+        size = ver.GetFileVersionInfoSizeW(path, None)
+        if not size:
+            return (0, 0, 0, 0)
+        buf = ctypes.create_string_buffer(size)
+        if not ver.GetFileVersionInfoW(path, 0, size, buf):
+            return (0, 0, 0, 0)
+        ptr = ctypes.c_void_p()
+        plen = ctypes.c_uint()
+        if not ver.VerQueryValueW(buf, "\\", ctypes.byref(ptr), ctypes.byref(plen)):
+            return (0, 0, 0, 0)
+
+        class _FIXEDFILEINFO(ctypes.Structure):
+            _fields_ = [
+                ("dwSignature", ctypes.c_uint32),
+                ("dwStrucVersion", ctypes.c_uint32),
+                ("dwFileVersionMS", ctypes.c_uint32),
+                ("dwFileVersionLS", ctypes.c_uint32),
+            ]
+
+        ffi = ctypes.cast(ptr, ctypes.POINTER(_FIXEDFILEINFO)).contents
+        ms, ls = ffi.dwFileVersionMS, ffi.dwFileVersionLS
+        return (ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF)
+    except Exception:
+        return (0, 0, 0, 0)
+
+
+def _handoff_to_canonical_if_newer() -> None:
+    """If this frozen exe is an OLD copy (Downloads, a stale shortcut target)
+    and the canonical installed exe is a newer version — because auto-update
+    refreshed it — launch the canonical exe and exit. Double-clicking any old
+    link therefore always ends up running the updated version."""
+    if not getattr(sys, "frozen", False):
+        return
+    current = os.path.abspath(sys.executable)
+    target = _stable_exe_path()
+    if os.path.normcase(current) == os.path.normcase(target):
+        return
+    if not os.path.exists(target):
+        return
+    cur_v = _file_version_tuple(current)
+    tgt_v = _file_version_tuple(target)
+    # Only defer to a strictly newer install: when we're same-or-newer the
+    # normal path runs (and _ensure_installed_copy refreshes the canonical
+    # copy from us). Strict comparison also makes handoff ping-pong impossible.
+    if tgt_v <= cur_v or tgt_v == (0, 0, 0, 0):
+        return
+    try:
+        import subprocess
+        subprocess.Popen(
+            [target] + sys.argv[1:],
+            cwd=os.path.dirname(target),
+            close_fds=True,
+        )
+        print(f"[App] This copy is v{'.'.join(map(str, cur_v))}; handing off to "
+              f"installed v{'.'.join(map(str, tgt_v))} at {target}.")
+        os._exit(0)
+    except Exception as e:
+        print(f"[App] Handoff to installed version failed ({e}) — continuing.")
+
+
 def _ensure_startup_task() -> None:
     """
     Register FTC Whisper as a Task Scheduler logon task pointing at the STABLE
@@ -1792,6 +1856,37 @@ def _ensure_startup_task() -> None:
     except Exception as e:
         print(f"[App] Task Scheduler registration failed ({e}), falling back to registry")
         _ensure_startup_registry_fallback()
+
+    _repair_desktop_shortcut(target)
+
+
+def _repair_desktop_shortcut(target: str) -> None:
+    """If a 'FTC Whisper' desktop shortcut exists but points anywhere other
+    than the canonical installed exe (an old Downloads copy, a moved file),
+    retarget it — so the user's original link always opens the version that
+    auto-update maintains. Never creates a shortcut that isn't there."""
+    if not getattr(sys, "frozen", False):
+        return
+    import subprocess
+    t = target.replace("'", "''")
+    ps = (
+        "$sh = New-Object -ComObject WScript.Shell; "
+        "$p = Join-Path $sh.SpecialFolders('Desktop') 'FTC Whisper.lnk'; "
+        "if (Test-Path $p) { $lnk = $sh.CreateShortcut($p); "
+        f"if ($lnk.TargetPath -ne '{t}') {{ $lnk.TargetPath = '{t}'; "
+        f"$lnk.WorkingDirectory = '{os.path.dirname(target).replace(chr(39), chr(39)*2)}'; "
+        "$lnk.Arguments = ''; $lnk.Save(); Write-Output 'retargeted' } }"
+    )
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+            capture_output=True, text=True, timeout=20,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        if "retargeted" in (r.stdout or ""):
+            print(f"[App] Desktop shortcut retargeted to {target}")
+    except Exception as e:
+        print(f"[App] Desktop shortcut repair skipped ({e})")
 
 
 def _reconcile_legacy_launchers(task_ok: bool) -> None:
@@ -1953,6 +2048,9 @@ def main() -> None:
 
 def _main() -> None:
     if sys.platform == "win32":
+        # BEFORE the mutex: an old copy that defers to the installed version
+        # must not be holding the single-instance mutex when the new exe starts.
+        _handoff_to_canonical_if_newer()
         _ensure_single_instance()
         # Run in background — schtasks can be slow on first launch and there's
         # no reason to block the UI thread waiting for a Task Scheduler write.
