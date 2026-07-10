@@ -118,9 +118,13 @@ class StreamingSession:
                 return
 
         if self._captions and self._on_caption:
+            # Use the SAME context as finalize() so the live caption tracks the
+            # text that will actually be injected — a context-free hypothesis
+            # reads noticeably rougher than the final pass. Display-only: this
+            # never feeds the commit path or the injected result.
             hyp = self._engine.transcribe(
                 audio, rate,
-                context_words="",
+                context_words=self._context_with_committed(),
                 hotwords_str=self._hotwords,
                 blocking=False,   # skip the tick if the engine is busy
                 finalize_text=False,

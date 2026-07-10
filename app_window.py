@@ -1485,15 +1485,8 @@ class AppWindow:
                                    font=("Segoe UI", 9))
         mic_menu.pack(fill="x", pady=(4, 0))
 
-        mic_name_lbl = tk.Label(mic_card, text="Scanning microphones…",
-                                fg=C["subtext"], bg=C["surface"],
-                                font=("Segoe UI", 8), anchor="w")
-        mic_name_lbl.pack(fill="x")
-
-        def _refresh_mic_label(*_):
-            val = mic_var.get()
-            mic_name_lbl.configure(text=val if val and val != "Default" else "Using system default")
-        mic_var.trace_add("write", _refresh_mic_label)
+        # The OptionMenu button itself shows the selected device — no separate
+        # label below it (that duplicated the same text into two blocks).
 
         def _populate_mic_menu(devs):
             try:
@@ -1539,7 +1532,6 @@ class AppWindow:
                 else:
                     mic_var.set("Default")
                 print(f"[Settings] Mic menu populated with {len(options)} option(s)")
-                _refresh_mic_label()
             except Exception as e:
                 import traceback
                 print(f"[Settings] _populate_mic_menu FAILED: {e}")
