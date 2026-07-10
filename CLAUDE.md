@@ -70,6 +70,15 @@ recorder and transcribes only the remaining tail — stop-latency stays constant
 only (a whisper re-pass would usually be a downgrade). Live captions are pushed from
 the same worker (`on_caption`) — no separate caption thread in this mode.
 
+**Live-caption bar (v1.6.16+)**: the stream sends the FULL transcript-so-far (all
+committed chunks + stable hypothesis) and the popup keeps all of it. The bar grows
+to `CAPTION_MAX_LINES` then scrolls; `_update_caption_widget` calls `see("end")` on
+EVERY tick (not just once full) so the words being spoken are never clipped below
+the visible area. Mouse-wheel over the bar scrolls back through the transcript and
+pauses auto-tailing for `CAPTION_SCROLL_HOLDOFF` seconds (resumes instantly when
+wheeled back to the bottom). Don't reintroduce a trailing-word-window truncation in
+`update_caption` — that's what made scrollback impossible.
+
 **Whisper path**: fast pass (`base.en`, beam=1) on the full clip → inject; a silence
 energy-gate runs before the synchronous accurate fallback; background `_upgrade()`
 runs the user model + `context_fix`. The whisper caption loop paces on
@@ -154,6 +163,14 @@ The **running app** owns auto-launch, not the installer. On every launch `main()
 
 ### Auth and Supabase
 `AuthManager` in `auth.py` handles Supabase email auth. Session tokens are encrypted on disk using Windows DPAPI — only readable by the same Windows user. `SupabaseLogger` in `supabase_client.py` does all DB writes fire-and-forget. Both are optional; the app works fully offline without them.
+
+**Session restore is asynchronous (v1.6.16+)**: `_main()` must NEVER call
+`auth.try_restore_session()` synchronously — `set_session()` refreshes the
+usually-expired access token over the network and used to block the first paint for
+seconds (or the full network timeout at boot). AppWindow's
+`_session_restore_retry_loop` is the startup restore path: first attempt fires
+immediately, then retries every 10s for ~5 min; success promotes to the dashboard
+via `_promote_restored_session`.
 
 ### Warm mic and monitoring
 By default (`config.warm_mic`) the Recorder keeps a persistent input stream open,

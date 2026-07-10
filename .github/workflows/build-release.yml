@@ -21,6 +21,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          # Restores the pip download cache between runs — the heavy wheels
+          # (ctranslate2, onnxruntime, numpy…) stop re-downloading on every
+          # release build, cutting several minutes off CI.
+          cache: "pip"
 
       - name: Install dependencies
         run: |

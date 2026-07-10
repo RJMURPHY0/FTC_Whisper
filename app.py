@@ -45,7 +45,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.15"
+APP_VERSION = "1.6.16"
 
 
 class WhisperFlowApp:
@@ -2075,8 +2075,11 @@ def _main() -> None:
 
     if not auth_enabled:
         auth.sign_in_offline()  # No Supabase configured — skip login
-    else:
-        auth.try_restore_session()  # Restore saved session so user stays logged in
+    # else: a saved session is restored ASYNCHRONOUSLY by AppWindow's
+    # session-restore loop (first attempt fires immediately). set_session()
+    # refreshes the usually-expired access token over the network — doing it
+    # here blocked the first paint for seconds (or the full network timeout
+    # when launched at boot before Wi-Fi is up).
 
     app = WhisperFlowApp(auth, config)
     app.run()

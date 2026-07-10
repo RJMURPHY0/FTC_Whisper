@@ -2277,12 +2277,15 @@ class AppWindow:
 
     def _session_restore_retry_loop(self) -> None:
         import time
-        # Retry for ~5 min: long enough to cover a slow Wi-Fi reconnect after a
-        # cold boot, but bounded so we don't spin forever. Stops early if the
-        # session becomes valid, gets cleared (definitive auth failure), or the
-        # user signs in manually in the meantime.
-        for _ in range(30):
-            time.sleep(10)
+        # This loop IS the startup session restore (main() no longer blocks on
+        # it — the network token refresh used to delay first paint by seconds).
+        # First attempt fires immediately; retries continue for ~5 min to cover
+        # a slow Wi-Fi reconnect after a cold boot, but bounded so we don't spin
+        # forever. Stops early if the session becomes valid, gets cleared
+        # (definitive auth failure), or the user signs in manually meanwhile.
+        for attempt in range(30):
+            if attempt:
+                time.sleep(10)
             if self._auth.is_authenticated:
                 return
             if not self._auth.has_saved_session():

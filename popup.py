@@ -72,9 +72,12 @@ CANVAS_H = BAR_MAX_H + 6
 # Live-caption bar (shown beneath the waveform when captions are on).
 # The bar grows horizontally with the text until it hits CAPTION_MAX_CHARS,
 # then wraps and grows vertically up to CAPTION_MAX_LINES, then scrolls.
+# The full transcript-so-far stays in the widget — the view tails the newest
+# words, and the user can wheel-scroll back through everything said.
 CAPTION_MIN_CHARS = 16
-CAPTION_MAX_CHARS = 52
-CAPTION_MAX_LINES = 5
+CAPTION_MAX_CHARS = 60
+CAPTION_MAX_LINES = 8
+CAPTION_SCROLL_HOLDOFF = 4.0  # secs after a manual scroll before auto-tail resumes
 
 # How long the post-transcription icon badge stays before auto-dismissing, so it
 # never lingers on screen indefinitely.
@@ -212,15 +215,14 @@ class FloatingPopup:
 
     def update_caption(self, text: str) -> None:
         """Called from the caption loop (background thread) with live partial text.
-        Keeps a trailing window of words — enough to fill ~5 lines and scroll a
-        little beyond, so the bar tails the latest speech without growing forever."""
+        The full transcript-so-far is kept in the bar: the view tails the newest
+        words, and the user can scroll back through everything said. (Text size
+        is trivial even for long dictations — no need to truncate.)"""
         if not text:
             return
-        words = text.split()
-        tail = " ".join(words[-40:])
         self._last_activity = time.time()
         if self.root:
-            self.root.after(0, lambda: self._update_caption_widget(tail))
+            self.root.after(0, lambda: self._update_caption_widget(text))
 
     def hide(self) -> None:
         if self.root:
@@ -487,6 +489,17 @@ class FloatingPopup:
         self._caption_text.configure(yscrollcommand=self._caption_scroll.set)
         self._caption_text.pack(side="left", fill="both", expand=True)
         self._caption_lines = 0  # last rendered visible-line count (reposition debounce)
+        # Manual scrollback: Windows routes wheel input to the hovered window
+        # even though the popup never activates (WS_EX_NOACTIVATE), so a wheel
+        # binding is enough. A manual scroll pauses auto-tailing briefly so the
+        # view doesn't snap back to the end while the user is reading.
+        self._caption_user_scroll_ts = 0.0
+        self._caption_text.bind("<MouseWheel>", self._on_caption_wheel)
+        self._caption_scroll.bind(
+            "<ButtonPress-1>",
+            lambda _e: setattr(self, "_caption_user_scroll_ts", time.time()),
+            add="+",
+        )
 
         # Recording start time (for timer)
         self._rec_start: Optional[float] = None
@@ -865,6 +878,7 @@ class FloatingPopup:
     def _reset_caption_widget(self, text: str = "") -> None:
         """Reset the caption bar to a single short line (start of a recording)."""
         self._caption_lines = 0
+        self._caption_user_scroll_ts = 0.0
         self._caption_scroll.pack_forget()
         self._caption_text.configure(state="normal")
         self._caption_text.delete("1.0", "end")
@@ -901,11 +915,18 @@ class FloatingPopup:
             shown = min(lines, CAPTION_MAX_LINES)
             self._caption_text.configure(height=shown, state="disabled")
 
-            if lines > CAPTION_MAX_LINES:
+            if lines > shown:
                 self._caption_scroll.pack(side="right", fill="y")
-                self._caption_text.see("end")  # keep the latest words in view
             else:
                 self._caption_scroll.pack_forget()
+
+            # ALWAYS tail the newest words (not just once the bar is full):
+            # if the height measurement ever lags a tick, the words being
+            # spoken right now would otherwise sit clipped below the visible
+            # area — the "text disappears at the end of the first line" bug.
+            # Suspended briefly after a manual scroll so read-back doesn't snap.
+            if time.time() - self._caption_user_scroll_ts > CAPTION_SCROLL_HOLDOFF:
+                self._caption_text.see("end")
 
             # Keep the pill bottom-anchored as it grows: reposition only when the
             # visible line count changes (avoids per-tick geometry flicker).
@@ -914,6 +935,21 @@ class FloatingPopup:
                 self._reposition(self._status_cx, self._status_cy)
         except Exception:
             pass
+
+    def _on_caption_wheel(self, event) -> str:
+        """Wheel over the caption bar — scroll back through the transcript."""
+        try:
+            step = -(int(event.delta) // 120) * 2 or (-2 if event.delta > 0 else 2)
+            self._caption_text.yview_scroll(step, "units")
+            # Scrolling back pauses auto-tailing; returning to the bottom
+            # (or wheeling past it) resumes it immediately.
+            if self._caption_text.yview()[1] >= 0.999:
+                self._caption_user_scroll_ts = 0.0
+            else:
+                self._caption_user_scroll_ts = time.time()
+        except Exception:
+            pass
+        return "break"
 
     def _start_waveform(self) -> None:
         self._waveform_running = True

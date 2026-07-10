@@ -164,8 +164,11 @@ class StreamingSession:
             else:
                 shown_hyp = ""  # engine busy or silence — keep the last caption
             if shown_hyp or self._committed_texts:
+                # Full transcript-so-far, not a trailing window: the popup tails
+                # the newest words itself and lets the user scroll back through
+                # everything said. Strings this size are trivial to rejoin.
                 shown = " ".join(
-                    self._committed_texts[-2:] + ([shown_hyp] if shown_hyp else [])
+                    self._committed_texts + ([shown_hyp] if shown_hyp else [])
                 )
                 self._on_caption(shown)
 
