@@ -229,6 +229,11 @@ class FloatingPopup:
         if self.root is not None:
             return
         self.root = tk.Toplevel(main_root)
+        # Hide immediately and park far off-screen BEFORE anything else, so the
+        # freshly-created dark Toplevel can never flash as a little black box at
+        # the top-left (0,0) for a frame before it's positioned/withdrawn.
+        self.root.withdraw()
+        self.root.geometry("+-4000+-4000")
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", 0.97)
@@ -1348,3 +1353,6 @@ class FloatingPopup:
             x = left + (right - left - w) // 2
             y = bottom - h - 60   # 60 px above the taskbar
         self.root.geometry(f"+{x}+{y}")
+        # Flush the position to the window BEFORE the caller deiconifies it, so it
+        # never maps at the old/0,0 spot for a frame (top-left black-box flash).
+        self.root.update_idletasks()

@@ -13,8 +13,9 @@ C = {
     "bg": "#0d0d0d",
     "surface": "#1a1a1a",
     "input_bg": "#141414",
-    "field_bg": "#ffffff",    # login email/password bars — white for clarity
-    "field_text": "#1a1a1a",  # dark text on the white bars
+    "field_bg": "#e8e9ee",     # login email/password bars — soft light grey (easier on the eyes than white)
+    "field_border": "#c7cad3", # subtle field outline; turns accent on focus
+    "field_text": "#1a1a1a",   # dark text on the light bars
     "text": "#ffffff",
     "subtext": "#777777",
     "accent": "#f39200",
@@ -26,6 +27,61 @@ C = {
 
 WINDOW_W = 400
 WINDOW_H = 560
+
+
+def _round_rect(canvas, x1, y1, x2, y2, r, **kw):
+    """Draw a rounded rectangle (smoothed polygon) on a tk.Canvas."""
+    r = max(0, min(r, (x2 - x1) // 2, (y2 - y1) // 2))
+    pts = [
+        x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+        x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+        x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
+    ]
+    return canvas.create_polygon(pts, smooth=True, **kw)
+
+
+class _RoundedButton(tk.Canvas):
+    """A full-width rounded button drawn on a Canvas, with hover + a .set() API
+    so callers can restyle it (text/colour/cursor) like a Label."""
+
+    def __init__(self, parent, text, command, *, bg, fg, hover=None,
+                 font=("Segoe UI", 12, "bold"), height=46, radius=12):
+        super().__init__(parent, height=height, bg=C["surface"],
+                         highlightthickness=0, bd=0)
+        self._text, self._bg, self._fg = text, bg, fg
+        self._hover = hover or bg
+        self._font, self._radius, self._cmd = font, radius, command
+        self._cur = bg
+        self.configure(cursor="hand2")
+        self.bind("<Configure>", lambda _e: self._draw())
+        self.bind("<Button-1>", lambda _e: self._cmd() if self._cmd else None)
+        self.bind("<Enter>", lambda _e: self._paint(self._hover))
+        self.bind("<Leave>", lambda _e: self._paint(self._bg))
+
+    def _paint(self, c):
+        self._cur = c
+        self._draw()
+
+    def _draw(self):
+        w, h = self.winfo_width(), self.winfo_height()
+        if w <= 1 or h <= 1:
+            return
+        self.delete("all")
+        _round_rect(self, 1, 1, w - 1, h - 1, self._radius, fill=self._cur, outline="")
+        self.create_text(w // 2, h // 2, text=self._text, fill=self._fg, font=self._font)
+
+    def set(self, text=None, bg=None, fg=None, hover=None, cursor=None):
+        if text is not None:
+            self._text = text
+        if bg is not None:
+            self._bg = self._cur = bg
+        if fg is not None:
+            self._fg = fg
+        if hover is not None:
+            self._hover = hover
+        if cursor is not None:
+            self.configure(cursor=cursor)
+        self._draw()
 
 
 class LoginWindow:
@@ -165,19 +221,15 @@ class LoginWindow:
 
         # Email
         self._field_label(self._card, "Email")
-        self._email_entry = self._entry(self._card, self._email_var)
-        self._email_entry.pack(fill="x", pady=(4, 12))
+        email_wrap, self._email_entry, _ = self._rounded_field(self._card, self._email_var)
+        email_wrap.pack(fill="x", pady=(5, 14))
 
         # Password
         self._field_label(self._card, "Password")
-        pass_row = tk.Frame(self._card, bg=C["field_bg"])
-        pass_row.pack(fill="x", pady=(4, 12))
-        self._pass_entry = self._entry(pass_row, self._password_var, show="•")
-        self._pass_entry.pack(side="left", fill="x", expand=True)
+        pass_wrap, self._pass_entry, self._pass_eye = self._rounded_field(
+            self._card, self._password_var, show="•", with_eye=True)
+        pass_wrap.pack(fill="x", pady=(5, 14))
         self._pass_visible = False
-        self._pass_eye = tk.Label(pass_row, text="👁", bg=C["field_bg"], fg=C["subtext"],
-                                  font=("Segoe UI", 11), cursor="hand2", padx=4)
-        self._pass_eye.pack(side="left")
         self._pass_eye.bind("<Button-1>", lambda _e: self._toggle_pass())
 
         # Confirm password section — kept in a frame so _switch can reliably
@@ -188,13 +240,9 @@ class LoginWindow:
             fg=C["subtext"], bg=C["surface"],
             font=("Segoe UI", 10), anchor="w",
         ).pack(fill="x")
-        confirm_row = tk.Frame(self._confirm_section, bg=C["field_bg"])
-        confirm_row.pack(fill="x", pady=(4, 12))
-        self._confirm_entry = self._entry(confirm_row, self._confirm_var, show="•")
-        self._confirm_entry.pack(side="left", fill="x", expand=True)
-        self._confirm_eye = tk.Label(confirm_row, text="👁", bg=C["field_bg"], fg=C["subtext"],
-                                     font=("Segoe UI", 11), cursor="hand2", padx=4)
-        self._confirm_eye.pack(side="left")
+        confirm_wrap, self._confirm_entry, self._confirm_eye = self._rounded_field(
+            self._confirm_section, self._confirm_var, show="•", with_eye=True)
+        confirm_wrap.pack(fill="x", pady=(5, 12))
         self._confirm_eye.bind("<Button-1>", lambda _e: self._toggle_confirm())
 
         # Status message — hidden until needed
@@ -213,25 +261,12 @@ class LoginWindow:
         self._status_lbl.pack(fill="x")
         # Don't pack _status_frame yet — only shown when there's a message
 
-        # Submit button
-        self._submit_btn = tk.Label(
-            self._card,
-            text="Sign In",
-            fg=C["bg"],
-            bg=C["accent"],
-            font=("Segoe UI", 12, "bold"),
-            padx=16,
-            pady=10,
-            cursor="hand2",
+        # Submit button (rounded)
+        self._submit_btn = _RoundedButton(
+            self._card, "Sign In", self._submit,
+            bg=C["accent"], fg=C["bg"], hover=C["accent_hover"], height=46,
         )
-        self._submit_btn.pack(fill="x", pady=(4, 0))
-        self._submit_btn.bind("<Button-1>", lambda _e: self._submit())
-        self._submit_btn.bind(
-            "<Enter>", lambda _e: self._submit_btn.configure(bg=C["accent_hover"])
-        )
-        self._submit_btn.bind(
-            "<Leave>", lambda _e: self._submit_btn.configure(bg=C["accent"])
-        )
+        self._submit_btn.pack(fill="x", pady=(6, 0))
 
         # Forgot password link (login mode only)
         self._forgot_link = tk.Label(
@@ -266,16 +301,12 @@ class LoginWindow:
             side="left", fill="x", expand=True,
         )
 
-        # Google sign-in button
-        self._google_btn = tk.Label(
-            self._card, text="Continue with Google",
-            fg=C["text"], bg=C["input_bg"],
-            font=("Segoe UI", 11), padx=16, pady=9,
-            cursor="hand2",
+        # Google sign-in button (rounded)
+        self._google_btn = _RoundedButton(
+            self._card, "Continue with Google", self._sign_in_google,
+            bg=C["input_bg"], fg=C["text"], hover=C["divider"],
+            font=("Segoe UI", 11), height=44,
         )
-        self._google_btn.bind("<Button-1>", lambda _e: self._sign_in_google())
-        self._google_btn.bind("<Enter>", lambda _e: self._google_btn.configure(bg=C["divider"]))
-        self._google_btn.bind("<Leave>", lambda _e: self._google_btn.configure(bg=C["input_bg"]))
 
         # Divider + Google button always visible — packed once here
         self._divider_frame.pack(fill="x", pady=(12, 0))
@@ -312,18 +343,52 @@ class LoginWindow:
         lbl.pack(fill="x")
         return lbl
 
-    def _entry(self, parent, var, show="") -> tk.Entry:
-        return tk.Entry(
-            parent,
-            textvariable=var,
-            show=show,
-            bg=C["field_bg"],
-            fg=C["field_text"],
-            insertbackground=C["field_text"],
-            relief="flat",
-            font=("Segoe UI", 11),
-            bd=0,
+    def _rounded_field(self, parent, var, show="", with_eye=False):
+        """A rounded, light-grey input field. Returns (canvas, entry, eye|None).
+        The rounded shape is drawn on a Canvas; the Entry (and optional eye toggle)
+        sit inside it, inset so only the rounded outline shows."""
+        H, R, PAD = 44, 12, 14
+        wrap = tk.Canvas(parent, height=H, bg=C["surface"], highlightthickness=0, bd=0)
+        inner = tk.Frame(wrap, bg=C["field_bg"])
+        entry = tk.Entry(
+            inner, textvariable=var, show=show,
+            bg=C["field_bg"], fg=C["field_text"],
+            insertbackground=C["accent"], relief="flat", bd=0,
+            highlightthickness=0, font=("Segoe UI", 12),
         )
+        entry.pack(side="left", fill="x", expand=True, ipady=1)
+        eye = None
+        if with_eye:
+            eye = tk.Label(inner, text="👁", bg=C["field_bg"], fg=C["subtext"],
+                           font=("Segoe UI", 12), cursor="hand2", padx=2)
+            eye.pack(side="right")
+        win = wrap.create_window(PAD, H // 2, window=inner, anchor="w")
+
+        state = {"focus": False}
+
+        def _draw(_e=None):
+            w = wrap.winfo_width()
+            if w <= 1:
+                return
+            wrap.delete("bg")
+            outline = C["accent"] if state["focus"] else C["field_border"]
+            width = 2 if state["focus"] else 1
+            _round_rect(wrap, 2, 3, w - 2, H - 3, R,
+                        fill=C["field_bg"], outline=outline, width=width, tags="bg")
+            wrap.tag_lower("bg")
+            wrap.itemconfigure(win, width=max(1, w - PAD * 2))
+
+        wrap.bind("<Configure>", _draw)
+
+        def _focus(v):
+            state["focus"] = v
+            _draw()
+
+        entry.bind("<FocusIn>", lambda _e: _focus(True))
+        entry.bind("<FocusOut>", lambda _e: _focus(False))
+        # Clicking anywhere on the field focuses the entry
+        wrap.bind("<Button-1>", lambda _e: entry.focus_set())
+        return wrap, entry, eye
 
     # ------------------------------------------------------------------
     # Mode switching
@@ -337,7 +402,7 @@ class LoginWindow:
             self._login_tab.configure(fg=C["accent"], bg=C["surface"])
             self._signup_tab.configure(fg=C["subtext"], bg=C["surface"])
             self._confirm_section.pack_forget()
-            self._submit_btn.configure(text="Sign In")
+            self._submit_btn.set(text="Sign In")
             self._forgot_link.pack(anchor="center", pady=(8, 0))
             if self._pending_confirm_email:
                 self._resend_link.pack(anchor="center", pady=(4, 0))
@@ -345,7 +410,7 @@ class LoginWindow:
             self._login_tab.configure(fg=C["subtext"], bg=C["surface"])
             self._signup_tab.configure(fg=C["accent"], bg=C["surface"])
             self._confirm_section.pack(fill="x", before=self._submit_btn)
-            self._submit_btn.configure(text="Create Account")
+            self._submit_btn.set(text="Create Account")
         if clear_status:
             self._status_var.set("")
             self._status_frame.pack_forget()
@@ -374,7 +439,7 @@ class LoginWindow:
 
         self._submitting = True
         self._set_status("Please wait…", error=False)
-        self._submit_btn.configure(bg=C["divider"], cursor="")
+        self._submit_btn.set(bg=C["divider"], hover=C["divider"], cursor="")
 
         def _run():
             if self._mode == "login":
@@ -393,16 +458,14 @@ class LoginWindow:
         if ok and self._auth.is_authenticated:
             self._pending_confirm_email = None
             name = self._auth.user_email or "you"
-            self._submit_btn.configure(
+            self._submit_btn.set(
                 text=f"✓  Welcome back, {name}!",
-                bg=C["success"],
-                fg=C["bg"],
-                cursor="",
+                bg=C["success"], fg=C["bg"], hover=C["success"], cursor="",
             )
             self._root.after(1200, self._finish)
             return
 
-        self._submit_btn.configure(bg=C["accent"], cursor="hand2")
+        self._submit_btn.set(bg=C["accent"], hover=C["accent_hover"], cursor="hand2")
 
         if ok and self._mode == "signup":
             email = self._email_entry.get().strip()
@@ -422,14 +485,12 @@ class LoginWindow:
             self._resend_link.pack_forget()
             self._resend_link.pack(anchor="center", pady=(4, 0))
 
-        self._submit_btn.configure(
+        self._submit_btn.set(
             text=f"✕  {msg}",
-            bg=C["error"],
-            fg=C["text"],
-            cursor="hand2",
+            bg=C["error"], fg=C["text"], hover=C["error"], cursor="hand2",
         )
-        self._root.after(3000, lambda: self._submit_btn.configure(
-            text="Sign In", bg=C["accent"], fg=C["bg"], cursor="hand2"
+        self._root.after(3000, lambda: self._submit_btn.set(
+            text="Sign In", bg=C["accent"], fg=C["bg"], hover=C["accent_hover"], cursor="hand2"
         ))
 
     def _toggle_pass(self) -> None:
