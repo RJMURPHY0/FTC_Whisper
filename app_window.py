@@ -8,6 +8,7 @@ Dark theme with rounded-corner cards via Canvas.
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from datetime import datetime
 from typing import Callable, Optional
 import ctypes
@@ -222,6 +223,74 @@ def _rr(canvas, x1, y1, x2, y2, r, **kw):
         x1,   y2-r, x1,   y1+r, x1,   y1,
     )
     return canvas.create_polygon(pts, smooth=True, **kw)
+
+
+class RoundedButton(tk.Canvas):
+    """A flat button with slightly rounded corners.
+
+    tk's Label/Button are square-cornered, so buttons are drawn on a Canvas
+    instead. Deliberately a near-drop-in for the old tk.Label buttons: the
+    same call sites keep working because .configure(text=/bg=/fg=/cursor=) and
+    .bind('<Button-1>'/'<Enter>'/'<Leave>') behave as before — `bg` maps to the
+    rounded fill and triggers a redraw. Auto-sizes to its text.
+    """
+
+    def __init__(self, parent, text="", command=None, *,
+                 fill=None, fg=None, font=("Segoe UI", 9),
+                 radius=8, padx=12, pady=6, **kw):
+        parent_bg = kw.pop("bg", None) or parent.cget("bg")
+        super().__init__(parent, bg=parent_bg, highlightthickness=0, bd=0,
+                         cursor=kw.pop("cursor", "hand2"), **kw)
+        fam = font[0]
+        size = font[1] if len(font) > 1 else 9
+        weight = "bold" if (len(font) > 2 and font[2] == "bold") else "normal"
+        self._font = tkfont.Font(family=fam, size=size, weight=weight)
+        self._text = text
+        self._fill = fill if fill is not None else C["surface_hover"]
+        self._fg = fg if fg is not None else C["text"]
+        self._radius = radius
+        self._padx = padx
+        self._pady = pady
+        self._command = command
+        if command is not None:
+            self.bind("<Button-1>", lambda _e: self._command())
+        self._resize_and_draw()
+
+    def _resize_and_draw(self):
+        w = self._font.measure(self._text) + 2 * self._padx
+        h = self._font.metrics("linespace") + 2 * self._pady
+        super().configure(width=w, height=h)
+        self._draw(w, h)
+
+    def _draw(self, w=None, h=None):
+        if w is None:
+            w = int(self["width"])
+        if h is None:
+            h = int(self["height"])
+        self.delete("all")
+        _rr(self, 1, 1, w - 1, h - 1, self._radius, fill=self._fill, outline="")
+        self.create_text(w // 2, h // 2, text=self._text,
+                         fill=self._fg, font=self._font)
+
+    # Intercept the Label-style options the old call sites pass so a plain
+    # .configure(bg=…, fg=…, text=…) keeps working (bg == the rounded fill).
+    def configure(self, cnf=None, **kw):
+        resize = redraw = False
+        if "text" in kw:
+            self._text = kw.pop("text"); resize = True
+        for k in ("bg", "background"):
+            if k in kw:
+                self._fill = kw.pop(k); redraw = True
+        for k in ("fg", "foreground"):
+            if k in kw:
+                self._fg = kw.pop(k); redraw = True
+        if cnf or kw:
+            super().configure(cnf, **kw)
+        if resize:
+            self._resize_and_draw()
+        elif redraw:
+            self._draw()
+    config = configure
 
 
 class AppWindow:
@@ -1578,16 +1647,16 @@ class AppWindow:
         btn_row = tk.Frame(mic_card, bg=C["surface"])
         btn_row.pack(fill="x", pady=(8, 0))
 
-        test_btn = tk.Label(btn_row, text="Test Mic",
-                            fg=C["text"], bg=C["surface_hover"],
-                            font=("Segoe UI", 9), padx=10, pady=6, cursor="hand2")
+        test_btn = RoundedButton(btn_row, text="Test Mic",
+                                 fg=C["text"], fill=C["surface_hover"],
+                                 font=("Segoe UI", 9), padx=14, pady=6)
         test_btn.pack(side="left", padx=(0, 6))
         test_btn.bind("<Enter>", lambda _e: test_btn.configure(bg=C["accent"], fg=C["bg"]))
         test_btn.bind("<Leave>", lambda _e: test_btn.configure(bg=C["surface_hover"], fg=C["text"]))
 
-        scan_btn = tk.Label(btn_row, text="Find Best Mic",
-                            fg=C["text"], bg=C["surface_hover"],
-                            font=("Segoe UI", 9), padx=10, pady=6, cursor="hand2")
+        scan_btn = RoundedButton(btn_row, text="Find Best Mic",
+                                 fg=C["text"], fill=C["surface_hover"],
+                                 font=("Segoe UI", 9), padx=14, pady=6)
         scan_btn.pack(side="left")
 
         test_status = tk.Label(mic_card, text="", fg=C["subtext"], bg=C["surface"],
@@ -2144,12 +2213,12 @@ class AppWindow:
                 font=("Segoe UI", 10, "bold"), anchor="w",
             ).pack(side="left")
 
-            banner_btn = tk.Label(
+            banner_btn = RoundedButton(
                 top_row,
                 text="Update Now",
-                fg=C["bg"], bg=C["accent"],
-                font=("Segoe UI", 9, "bold"), cursor="hand2",
-                padx=10, pady=3,
+                fg=C["bg"], fill=C["accent"],
+                font=("Segoe UI", 9, "bold"),
+                padx=14, pady=5,
             )
             banner_btn.pack(side="right")
             banner_btn.bind("<Button-1>", _do_update)
@@ -2162,12 +2231,12 @@ class AppWindow:
             for w in self._ver_update_row.winfo_children():
                 w.destroy()
 
-            ver_btn = tk.Label(
+            ver_btn = RoundedButton(
                 self._ver_update_row,
                 text="Update Now",
-                fg=C["bg"], bg=C["accent"],
-                font=("Segoe UI", 9, "bold"), cursor="hand2",
-                padx=10, pady=4,
+                fg=C["bg"], fill=C["accent"],
+                font=("Segoe UI", 9, "bold"),
+                padx=14, pady=5,
             )
             ver_btn.pack(side="right")
             ver_btn.bind("<Button-1>", _do_update)
