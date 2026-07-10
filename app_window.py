@@ -834,10 +834,10 @@ class AppWindow:
             btn_row, "Change Shortcut", self._toggle_hotkey_recording)
         self._record_btn.pack(side="left", padx=(0, 8))
 
-        self._save_btn = tk.Label(
+        self._save_btn = RoundedButton(
             btn_row, text="Save",
-            fg=C["subtext"], bg=C["border"],
-            font=("Segoe UI", 10, "bold"), padx=14, pady=8,
+            fg=C["subtext"], fill=C["border"],
+            font=("Segoe UI", 10, "bold"), padx=16, pady=8,
         )
         self._save_btn.pack(side="left")
 
@@ -915,10 +915,10 @@ class AppWindow:
             btn_row2, "Change Shortcut", self._toggle_refine_hotkey_recording)
         self._refine_record_btn.pack(side="left", padx=(0, 8))
 
-        self._refine_save_btn = tk.Label(
+        self._refine_save_btn = RoundedButton(
             btn_row2, text="Save",
-            fg=C["subtext"], bg=C["border"],
-            font=("Segoe UI", 10, "bold"), padx=14, pady=8,
+            fg=C["subtext"], fill=C["border"],
+            font=("Segoe UI", 10, "bold"), padx=16, pady=8,
         )
         self._refine_save_btn.pack(side="left")
 
@@ -1491,15 +1491,15 @@ class AppWindow:
                  font=("Segoe UI", 10)).pack(anchor="w")
         btn_row = tk.Frame(frame, bg=C["surface"])
         btn_row.pack(anchor="w", pady=(8, 0))
-        yes = tk.Label(btn_row, text=" Yes, delete all ", fg=C["bg"], bg=C["error"],
-                       font=("Segoe UI", 9, "bold"), cursor="hand2")
+        yes = RoundedButton(btn_row, text="Yes, delete all", fg=C["bg"], fill=C["error"],
+                            font=("Segoe UI", 9, "bold"), padx=14, pady=6,
+                            command=lambda: threading.Thread(
+                                target=self._clear_history, daemon=True).start())
         yes.pack(side="left", padx=(0, 8))
-        yes.bind("<Button-1>",
-                 lambda _e: threading.Thread(target=self._clear_history, daemon=True).start())
-        no = tk.Label(btn_row, text=" Cancel ", fg=C["subtext"], bg=C["surface_hover"],
-                      font=("Segoe UI", 9), cursor="hand2")
+        no = RoundedButton(btn_row, text="Cancel", fg=C["subtext"], fill=C["surface_hover"],
+                           font=("Segoe UI", 9), padx=14, pady=6,
+                           command=lambda: self._load_history())
         no.pack(side="left")
-        no.bind("<Button-1>", lambda _e: self._load_history())
 
     def _clear_history(self) -> None:
         if self._db:
@@ -2401,15 +2401,14 @@ class AppWindow:
 
     # ── Widget helpers ────────────────────────────────────────────────────────
 
-    def _surface_btn(self, parent, text, cmd) -> tk.Label:
-        btn = tk.Label(
-            parent, text=text,
-            fg=C["text"], bg=C["surface_hover"],
-            font=("Segoe UI", 10), padx=12, pady=8, cursor="hand2",
+    def _surface_btn(self, parent, text, cmd) -> RoundedButton:
+        btn = RoundedButton(
+            parent, text=text, command=cmd,
+            fg=C["text"], fill=C["surface_hover"],
+            font=("Segoe UI", 10), padx=16, pady=8,
         )
-        btn.bind("<Button-1>", lambda _e: cmd())
-        btn.bind("<Enter>",    lambda _e: btn.configure(bg=C["accent"], fg=C["bg"]))
-        btn.bind("<Leave>",    lambda _e: btn.configure(bg=C["surface_hover"], fg=C["text"]))
+        btn.bind("<Enter>", lambda _e: btn.configure(bg=C["accent"], fg=C["bg"]))
+        btn.bind("<Leave>", lambda _e: btn.configure(bg=C["surface_hover"], fg=C["text"]))
         return btn
 
     def _ghost_btn(self, parent, text, cmd) -> tk.Label:
