@@ -1661,51 +1661,6 @@ class AppWindow:
         vocab_entry.bind("<FocusOut>", _save_vocab)
         vocab_entry.bind("<Return>", _save_vocab)
 
-        # ── AI / API Keys ─────────────────────────────────────────────────────
-        ai_card = self._card(parent, margin=(0, 8))
-
-        # Anthropic API Key
-        tk.Label(ai_card, text="Anthropic API Key",
-                 fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
-        tk.Label(ai_card,
-                 text="Optional — enables AI text refinement via Claude (claude.ai)",
-                 fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 8), anchor="w", wraplength=360).pack(fill="x")
-        ant_key_var = tk.StringVar(value=(cfg.anthropic_api_key or "") if cfg else "")
-        ant_entry = tk.Entry(ai_card, textvariable=ant_key_var, show="*",
-                             bg=C["input_bg"], fg=C["text"], insertbackground=C["text"],
-                             relief="flat", font=("Segoe UI", 9), bd=6)
-        ant_entry.pack(fill="x", pady=(4, 12))
-
-        def _save_ant_key(_e=None):
-            if self._on_settings_change:
-                self._on_settings_change("anthropic_api_key", ant_key_var.get().strip())
-        ant_entry.bind("<FocusOut>", _save_ant_key)
-        ant_entry.bind("<Return>", _save_ant_key)
-
-        tk.Frame(ai_card, bg=C["border"], height=1).pack(fill="x", pady=(0, 8))
-
-        # OpenRouter API Key
-        tk.Label(ai_card, text="OpenRouter API Key",
-                 fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
-        tk.Label(ai_card,
-                 text="Optional — use OpenRouter for smarter context correction (openrouter.ai)",
-                 fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 8), anchor="w", wraplength=360).pack(fill="x")
-        or_key_var = tk.StringVar(value=(cfg.openrouter_api_key or "") if cfg else "")
-        or_entry = tk.Entry(ai_card, textvariable=or_key_var, show="*",
-                            bg=C["input_bg"], fg=C["text"], insertbackground=C["text"],
-                            relief="flat", font=("Segoe UI", 9), bd=6)
-        or_entry.pack(fill="x", pady=(4, 8))
-
-        def _save_or_key(_e=None):
-            if self._on_settings_change:
-                self._on_settings_change("openrouter_api_key", or_key_var.get().strip())
-        or_entry.bind("<FocusOut>", _save_or_key)
-        or_entry.bind("<Return>", _save_or_key)
-
         # ── Sound feedback ────────────────────────────────────────────────────
         sound_card = self._card(parent, margin=(0, 4))
         sound_row = tk.Frame(sound_card, bg=C["surface"])
