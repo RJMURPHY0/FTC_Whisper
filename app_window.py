@@ -1380,9 +1380,17 @@ class AppWindow:
 
         def _toggle(_e=None):
             if expanded[0]:
+                # Collapse: drop the full-text detail and bring the one-line
+                # preview back (above the app name, where it started).
                 detail.pack_forget()
-                prev_lbl.configure(text=preview)
+                if app_lbl is not None:
+                    prev_lbl.pack(fill="x", before=app_lbl)
+                else:
+                    prev_lbl.pack(fill="x")
             else:
+                # Expand: hide the truncated preview so the full text below is
+                # not shown twice — one block of text per state.
+                prev_lbl.pack_forget()
                 detail.pack(fill="x", after=header)
             expanded[0] = not expanded[0]
 
