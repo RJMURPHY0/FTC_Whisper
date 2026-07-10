@@ -2054,33 +2054,66 @@ class AppWindow:
                 except Exception:
                     pass
 
+        def _reset_btns():
+            # Re-enable the button(s) after a failed attempt so the user can retry.
+            _updating[0] = False
+            for btn in _btns:
+                try:
+                    if not btn.winfo_exists():
+                        continue
+                    btn.configure(text="Update Now", bg=C["accent"], cursor="hand2")
+                    btn.bind("<Button-1>", _do_update)
+                    btn.bind("<Enter>", lambda _e, b=btn: b.configure(bg=C["accent_hover"]))
+                    btn.bind("<Leave>", lambda _e, b=btn: b.configure(bg=C["accent"]))
+                except Exception:
+                    pass
+
         def _do_update(_e=None):
             if _updating[0]:
                 return
-            from updater import download_update, apply_update, current_exe_path, verify_exe
-            import tempfile, os, threading
+            from updater import run_auto_update, current_exe_path
+            import threading
             exe_path = current_exe_path()
-            if exe_path:
-                self._root.after(0, _set_downloading)
-                def _worker():
-                    tmp = os.path.join(tempfile.gettempdir(), "FTC-Whisper-update.exe")
-                    try:
-                        download_update(download_url, tmp, lambda *_: None)
-                        verify_exe(tmp)
-                        apply_update(tmp, exe_path)
-                    except Exception as exc:
-                        from error_reporter import report_error
-                        report_error(
-                            f"Update download/apply failed: {exc}",
-                            context={"version": version, "url": download_url},
-                            user_email=getattr(self._auth, "user_email", None),
-                        )
-                        import webbrowser
-                        webbrowser.open(download_url)
-                threading.Thread(target=_worker, daemon=True, name="in-app-update").start()
-            else:
+            if not exe_path:
+                # Running from source — no frozen exe to swap; open the release page.
                 import webbrowser
                 webbrowser.open(download_url)
+                return
+            self._root.after(0, _set_downloading)
+
+            def _status(msg):
+                self._ui_after(0, lambda m=msg: [
+                    b.configure(text=(m or "Downloading…"))
+                    for b in _btns if b.winfo_exists()
+                ])
+
+            def _worker():
+                # Drive the exact same proven flow as the automatic updater
+                # (reliable LOCALAPPDATA download + retries + verified swap script)
+                # instead of a separate hand-rolled download. is_idle=True +
+                # idle_samples=1 makes it apply immediately, since the user asked
+                # to update NOW rather than waiting for the next idle window.
+                run_auto_update(
+                    version, download_url, exe_path,
+                    is_idle=lambda: True,
+                    on_status=_status,
+                    poll_interval=0.0,
+                    idle_samples=1,
+                )
+                # run_auto_update only returns when the download failed after all
+                # retries (on success apply_update replaces the exe and exits the
+                # process). Report it, fall back to the browser, and let them retry.
+                from error_reporter import report_error
+                report_error(
+                    f"Manual 'Update Now' failed to download v{version}",
+                    context={"version": version, "url": download_url},
+                    user_email=getattr(self._auth, "user_email", None),
+                )
+                import webbrowser
+                webbrowser.open(download_url)
+                self._ui_after(0, _reset_btns)
+
+            threading.Thread(target=_worker, daemon=True, name="in-app-update").start()
 
         _btns = []
 
