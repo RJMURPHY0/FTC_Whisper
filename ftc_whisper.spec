@@ -127,6 +127,10 @@ exe = EXE(
     runtime_tmpdir=None,
     console=False,          # no black console window
     disable_windowed_traceback=False,
-    icon=os.path.join(APP_DIR, 'logo.ico'),
+    # Embedded exe icon = the black "FTC whisper" wordmark tile — this is what
+    # Explorer and the taskbar pin show. The RUNNING window keeps the swirl
+    # (set at runtime via iconbitmap(logo.ico)); logo.png (in-app header) also
+    # stays the swirl. So: swirl in-app + title bar, wordmark on the exe/pin.
+    icon=os.path.join(APP_DIR, 'exe_icon.ico'),
     version=os.path.join(APP_DIR, 'version_info.txt'),
 )
