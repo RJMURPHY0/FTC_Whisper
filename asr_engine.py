@@ -181,6 +181,12 @@ class ParakeetTranscriber:
         if audio.ndim > 1:
             audio = audio.flatten()
         audio = audio.astype(np.float32, copy=False)
+        # Silence floor: digital zeros / dead-mic hum must never reach the
+        # model — on ultra-short constant input the int8 transducer can emit a
+        # confident hallucinated word ("Yeah.") instead of nothing. Real
+        # speech, even whisper-quiet, peaks well above this.
+        if float(np.max(np.abs(audio))) < 0.001:
+            return ""
         if sample_rate and sample_rate != _MODEL_SAMPLE_RATE:
             audio = self._resample(audio, sample_rate, _MODEL_SAMPLE_RATE)
 

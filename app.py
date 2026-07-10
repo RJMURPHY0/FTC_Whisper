@@ -45,7 +45,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.13"
+APP_VERSION = "1.6.14"
 
 
 class WhisperFlowApp:
@@ -642,7 +642,7 @@ class WhisperFlowApp:
                     import numpy as _np
                     _peak = (float(_np.max(_np.abs(tail_audio)))
                              if tail_audio is not None and len(tail_audio) else 0.0)
-                    if _peak < 0.0025:
+                    if _peak < 0.004:
                         print(f"[App] Discarding near-silence result '{text}' "
                               f"(peak={_peak:.4f}) — mic delivered no speech.")
                         text = ""

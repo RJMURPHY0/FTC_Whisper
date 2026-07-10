@@ -32,6 +32,7 @@ class StreamingSession:
     MIN_HEAD = 2.0             # never commit a boundary earlier than this
     SILENCE_WIN = 0.1          # RMS window for silence search
     SILENCE_RUN = 3            # consecutive quiet windows (=300ms) that count as a pause
+    CAPTION_TAIL_TRIM = 0.25   # drop the trailing partial word from the caption window
 
     def __init__(
         self,
@@ -51,6 +52,7 @@ class StreamingSession:
 
         self._committed_texts: list[str] = []
         self._committed_sample = 0     # absolute sample position of the commit frontier
+        self._prev_hyp_words: list[str] = []  # last caption hypothesis (for agreement)
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._finalized = False
@@ -115,6 +117,9 @@ class StreamingSession:
                     # a noisy environment can't make the window grow unbounded.
                     self._committed_sample += boundary
                     self._recorder.drop_audio_before(self._committed_sample)
+                    # The caption window's start just moved — the previous
+                    # hypothesis no longer aligns with it.
+                    self._prev_hyp_words = []
                 return
 
         if self._captions and self._on_caption:
@@ -122,15 +127,46 @@ class StreamingSession:
             # text that will actually be injected — a context-free hypothesis
             # reads noticeably rougher than the final pass. Display-only: this
             # never feeds the commit path or the injected result.
+            #
+            # Two guards keep the caption from showing words the user never
+            # said (the final pass was always right; the LIVE text wasn't):
+            #  1. Trim the trailing ~0.25s — that's the half-spoken word the
+            #     model would otherwise have to guess at.
+            #  2. LocalAgreement: only display the word-prefix that two
+            #     consecutive hypotheses agree on. A guess that changes on the
+            #     next tick never reaches the screen.
+            trim = int(self.CAPTION_TAIL_TRIM * rate)
+            cap_audio = audio[:-trim] if len(audio) > trim + int(rate * 0.6) else audio
             hyp = self._engine.transcribe(
-                audio, rate,
+                cap_audio, rate,
                 context_words=self._context_with_committed(),
                 hotwords_str=self._hotwords,
                 blocking=False,   # skip the tick if the engine is busy
                 finalize_text=False,
             ).strip()
-            if hyp or self._committed_texts:
-                shown = " ".join(self._committed_texts[-2:] + ([hyp] if hyp else []))
+            if hyp:
+                words = hyp.split()
+                if self._prev_hyp_words:
+                    n = 0
+                    for a, b in zip(self._prev_hyp_words, words):
+                        # Punctuation/caps on a word often settle one tick
+                        # later than the word itself — compare bare words.
+                        if a.strip(".,!?;:").lower() != b.strip(".,!?;:").lower():
+                            break
+                        n += 1
+                    stable = words[:n]
+                else:
+                    # First hypothesis: nothing to agree with yet — withhold
+                    # only the in-flight final word instead of showing nothing.
+                    stable = words[:-1]
+                self._prev_hyp_words = words
+                shown_hyp = " ".join(stable)
+            else:
+                shown_hyp = ""  # engine busy or silence — keep the last caption
+            if shown_hyp or self._committed_texts:
+                shown = " ".join(
+                    self._committed_texts[-2:] + ([shown_hyp] if shown_hyp else [])
+                )
                 self._on_caption(shown)
 
     def _find_commit_point(
