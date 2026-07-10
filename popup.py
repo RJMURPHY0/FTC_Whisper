@@ -621,6 +621,7 @@ class FloatingPopup:
     # ── Refinement frame ───────────────────────────────────────────────────────
 
     def _build_refinement_frame(self) -> None:
+        from app_window import RoundedButton
         f = tk.Frame(self.root, bg=CP["bg"], padx=16, pady=14)
         self._refine_frame = f
 
@@ -640,18 +641,12 @@ class FloatingPopup:
         self._inserted_badge.pack(side="left", padx=(0, 6))
 
         # Insert button — manual fallback if auto-inject missed
-        insert_btn = tk.Label(
-            top,
-            text="  ↓ Insert  ",
-            fg=CP["text"],
-            bg=CP["btn_bg"],
-            font=("Segoe UI", 9, "bold"),
-            padx=6,
-            pady=3,
-            cursor="hand2",
+        insert_btn = RoundedButton(
+            top, text="↓ Insert", command=self._do_insert,
+            fg=CP["text"], fill=CP["btn_bg"],
+            font=("Segoe UI", 9, "bold"), padx=10, pady=4,
         )
         insert_btn.pack(side="left", padx=(0, 10))
-        insert_btn.bind("<Button-1>", lambda _e: self._do_insert())
         insert_btn.bind("<Enter>", lambda _e: insert_btn.configure(bg=CP["accent"], fg=CP["bg"]))
         insert_btn.bind("<Leave>", lambda _e: insert_btn.configure(bg=CP["btn_bg"], fg=CP["text"]))
 
@@ -725,18 +720,12 @@ class FloatingPopup:
         self._mic_btn.bind("<Enter>", lambda _e: self._mic_btn.configure(fg=CP["text"]) if not self._mic_recording else None)
         self._mic_btn.bind("<Leave>", lambda _e: self._mic_btn.configure(fg=CP["subtext"]) if not self._mic_recording else None)
 
-        ask_btn = tk.Label(
-            ask_row,
-            text="  ✦ Ask  ",
-            fg=CP["bg"],
-            bg=CP["accent"],
-            font=("Segoe UI", 10, "bold"),
-            padx=8,
-            pady=5,
-            cursor="hand2",
+        ask_btn = RoundedButton(
+            ask_row, text="✦ Ask", command=self._run_ai_custom,
+            fg=CP["bg"], fill=CP["accent"],
+            font=("Segoe UI", 10, "bold"), padx=12, pady=6,
         )
         ask_btn.pack(side="left")
-        ask_btn.bind("<Button-1>", lambda _e: self._run_ai_custom())
         ask_btn.bind("<Enter>", lambda _e: ask_btn.configure(bg=CP["accent_hover"]))
         ask_btn.bind("<Leave>", lambda _e: ask_btn.configure(bg=CP["accent"]))
 
@@ -788,50 +777,33 @@ class FloatingPopup:
         btn_row = tk.Frame(self._result_frame, bg=CP["bg"])
         btn_row.pack(fill="x", pady=(8, 0))
 
-        replace = tk.Label(
-            btn_row,
-            text="  ↩  Replace & Close  ",
-            fg=CP["bg"],
-            bg=CP["accent"],
-            font=("Segoe UI", 10, "bold"),
-            padx=10,
-            pady=6,
-            cursor="hand2",
+        replace = RoundedButton(
+            btn_row, text="↩  Replace & Close", command=self._do_replace,
+            fg=CP["bg"], fill=CP["accent"],
+            font=("Segoe UI", 10, "bold"), padx=12, pady=6,
         )
         replace.pack(side="left")
-        replace.bind("<Button-1>", lambda _e: self._do_replace())
         replace.bind("<Enter>", lambda _e: replace.configure(bg=CP["accent_hover"]))
         replace.bind("<Leave>", lambda _e: replace.configure(bg=CP["accent"]))
 
-        insert_result_btn = tk.Label(
-            btn_row,
-            text="  ↓ Insert Result  ",
-            fg=CP["text"],
-            bg=CP["btn_bg"],
-            font=("Segoe UI", 10, "bold"),
-            padx=10,
-            pady=6,
-            cursor="hand2",
+        insert_result_btn = RoundedButton(
+            btn_row, text="↓ Insert Result", command=self._do_insert_result,
+            fg=CP["text"], fill=CP["btn_bg"],
+            font=("Segoe UI", 10, "bold"), padx=12, pady=6,
         )
         insert_result_btn.pack(side="left", padx=(8, 0))
-        insert_result_btn.bind("<Button-1>", lambda _e: self._do_insert_result())
         insert_result_btn.bind("<Enter>", lambda _e: insert_result_btn.configure(bg=CP["accent"], fg=CP["bg"]))
         insert_result_btn.bind("<Leave>", lambda _e: insert_result_btn.configure(bg=CP["btn_bg"], fg=CP["text"]))
 
         self.root.bind("<Escape>", lambda _e: self._do_hide())
 
-    def _btn(self, parent: tk.Frame, text: str, command: Callable) -> tk.Label:
-        b = tk.Label(
-            parent,
-            text=text,
-            fg=CP["subtext"],
-            bg=CP["btn_bg"],
-            font=("Segoe UI", 10),
-            padx=8,
-            pady=5,
-            cursor="hand2",
+    def _btn(self, parent: tk.Frame, text: str, command: Callable) -> "RoundedButton":
+        from app_window import RoundedButton
+        b = RoundedButton(
+            parent, text=text, command=command,
+            fg=CP["subtext"], fill=CP["btn_bg"],
+            font=("Segoe UI", 10), padx=11, pady=5,
         )
-        b.bind("<Button-1>", lambda _e: command())
         b.bind("<Enter>", lambda _e: b.configure(fg=CP["accent"], bg=CP["btn_hover"]))
         b.bind("<Leave>", lambda _e: b.configure(fg=CP["subtext"], bg=CP["btn_bg"]))
         return b
