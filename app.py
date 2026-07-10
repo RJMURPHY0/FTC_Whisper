@@ -45,7 +45,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.7"
+APP_VERSION = "1.6.8"
 
 
 class WhisperFlowApp:
@@ -413,12 +413,23 @@ class WhisperFlowApp:
             write_last_run_version(APP_VERSION)
             if prev and is_newer(APP_VERSION, prev):
                 print(f"[App] Updated {prev} → {APP_VERSION}")
-                self.app_window._ui_after(
-                    1500,
-                    lambda: self.app_window.show_toast(
-                        f"FTC Whisper updated to v{APP_VERSION} ✓", 6000
-                    ),
-                )
+
+                def _announce():
+                    # Prefer a native tray notification: FTC Whisper runs hidden
+                    # in the tray, so the bottom-right corner toast would float
+                    # over whatever app is in front (e.g. FTC Contacts) and look
+                    # like it belongs to that app. A tray notification is owned by
+                    # the FTC Whisper icon — clearly attributed to FTC Whisper and
+                    # never overlaying another window. Fall back to the toast only
+                    # if the tray can't notify (icon not ready / no support).
+                    if not self.tray.notify(
+                        f"Updated to v{APP_VERSION} ✓", "FTC Whisper"
+                    ):
+                        self.app_window.show_toast(
+                            f"FTC Whisper updated to v{APP_VERSION} ✓", 6000
+                        )
+
+                self.app_window._ui_after(1500, _announce)
         except Exception as e:
             print(f"[App] Update announce failed (non-fatal): {e}")
 

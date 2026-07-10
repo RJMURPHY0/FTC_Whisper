@@ -97,6 +97,14 @@ class LoginWindow:
             y = (sh - WINDOW_H) // 2
 
         self._root.title("FTC Whisper")
+        # Window / taskbar icon — FTC swirl (logo.ico)
+        try:
+            from logo_cache import get_icon_path
+            _ico = get_icon_path()
+            if _ico:
+                self._root.iconbitmap(default=_ico)
+        except Exception:
+            pass
         self._root.configure(bg=C["bg"])
         self._root.resizable(False, False)
         self._root.protocol("WM_DELETE_WINDOW", self._handle_close)

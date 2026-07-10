@@ -73,8 +73,9 @@ except Exception as _e:
     raise SystemExit(f"[spec] Could not sanitize config.json: {_e}")
 
 datas += [
-    (os.path.join(APP_DIR, 'logo.png'),    '.'),
-    (os.path.join(APP_DIR, 'logo.ico'),    '.'),
+    (os.path.join(APP_DIR, 'logo.png'),     '.'),
+    (os.path.join(APP_DIR, 'logo.ico'),     '.'),
+    (os.path.join(APP_DIR, 'app_icon.png'), '.'),
     (_build_cfg, '.'),
 ]
 

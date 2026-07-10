@@ -31,6 +31,13 @@ def _load_pil():
     return _pil_image
 
 
+def get_icon_path():
+    """Absolute path to logo.ico (the window/taskbar icon), or None if missing.
+    Works both frozen (sys._MEIPASS) and from source."""
+    path = os.path.join(_BASE_DIR, "logo.ico")
+    return path if os.path.exists(path) else None
+
+
 def get_logo_photo(master, bg_color: str, max_w: int = 180, max_h: int = 60):
     """
     Return a PhotoImage of the logo sized to fit (max_w, max_h).

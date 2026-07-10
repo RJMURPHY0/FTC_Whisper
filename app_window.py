@@ -77,6 +77,86 @@ def show_toast(root: tk.Misc, message: str, duration_ms: int = 5000) -> None:
     toast.bind("<Button-1>", lambda _e: toast.destroy())
 
 
+# ── Modern scrollbar ──────────────────────────────────────────────────────────
+
+class ModernScrollbar(tk.Canvas):
+    """Thin, rounded, light-grey scrollbar that syncs with a Canvas/Text yview.
+
+    Replaces tk.Scrollbar (which renders as a chunky white/native box on
+    Windows) with a clean grey thumb like the FTC Contacts scrollbars —
+    clearly visible, comfortable width, no arrow buttons or native chrome.
+    Drop-in: pass the scrolled widget's ``yview`` as ``command`` and set the
+    widget's ``yscrollcommand`` to this scrollbar's ``set``."""
+
+    WIDTH = 12
+    THUMB = "#4a4a4a"        # light grey, clearly visible on the near-black bg
+    THUMB_HOVER = "#5f5f5f"
+
+    def __init__(self, parent, command, track=None, **kw):
+        super().__init__(parent, width=self.WIDTH, bg=track or C["bg"],
+                         highlightthickness=0, bd=0, takefocus=0, **kw)
+        self._command = command      # the scrolled widget's yview
+        self._first = 0.0
+        self._last = 1.0
+        self._hover = False
+        self._drag_dy = 0
+        self.bind("<Configure>", lambda _e: self._redraw())
+        self.bind("<Enter>", lambda _e: self._set_hover(True))
+        self.bind("<Leave>", lambda _e: self._set_hover(False))
+        self.bind("<Button-1>", self._on_press)
+        self.bind("<B1-Motion>", self._on_drag)
+
+    def set(self, first, last):
+        # Called by the scrolled widget via yscrollcommand.
+        self._first, self._last = float(first), float(last)
+        self._redraw()
+
+    def _set_hover(self, v):
+        self._hover = v
+        self._redraw()
+
+    def _thumb_bounds(self):
+        h = self.winfo_height()
+        return self._first * h, self._last * h
+
+    def _redraw(self):
+        self.delete("all")
+        # Fully visible content → no thumb (nothing to scroll)
+        if self._first <= 0.0 and self._last >= 1.0:
+            return
+        w = self.winfo_width()
+        pad = 2
+        y0, y1 = self._thumb_bounds()
+        y0 += pad
+        y1 -= pad
+        if y1 - y0 < 16:                       # keep a grabbable minimum
+            y1 = y0 + 16
+        r = (w - 2 * pad) / 2
+        color = self.THUMB_HOVER if self._hover else self.THUMB
+        self._round_rect(pad, y0, w - pad, y1, r, fill=color)
+
+    def _round_rect(self, x0, y0, x1, y1, r, **kw):
+        r = max(0, min(r, (y1 - y0) / 2))
+        self.create_oval(x0, y0, x1, y0 + 2 * r, outline="", **kw)
+        self.create_oval(x0, y1 - 2 * r, x1, y1, outline="", **kw)
+        self.create_rectangle(x0, y0 + r, x1, y1 - r, outline="", **kw)
+
+    def _on_press(self, e):
+        y0, y1 = self._thumb_bounds()
+        if y0 <= e.y <= y1:
+            self._drag_dy = e.y - y0            # grab offset within the thumb
+        else:
+            # Click on the track → center the thumb on the cursor and jump
+            h = max(self.winfo_height(), 1)
+            span = y1 - y0
+            self._command("moveto", max(0.0, min(1.0, (e.y - span / 2) / h)))
+            self._drag_dy = span / 2
+
+    def _on_drag(self, e):
+        h = max(self.winfo_height(), 1)
+        self._command("moveto", max(0.0, min(1.0, (e.y - self._drag_dy) / h)))
+
+
 # ── Pill toggle widget ────────────────────────────────────────────────────────
 
 class TogglePill(tk.Frame):
@@ -193,9 +273,27 @@ class AppWindow:
     # ── Public API ────────────────────────────────────────────────────────────
 
     def run(self) -> None:
+        # Tell Windows this is its own app (not python.exe) so the taskbar uses
+        # OUR icon, not the interpreter's, when running from source.
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("FTC.Whisper")
+        except Exception:
+            pass
+
         self._root = tk.Tk()
         self._root.withdraw()  # hide before Windows has a chance to render the default blank window
         self._root.title("FTC Whisper")
+        # Window / taskbar icon — the FTC swirl (logo.ico). Setting it at runtime is
+        # what actually changes the visible title-bar + taskbar icon; the exe's
+        # embedded icon alone doesn't update a running window.
+        try:
+            from logo_cache import get_icon_path
+            _ico = get_icon_path()
+            if _ico:
+                self._root.iconbitmap(default=_ico)
+        except Exception:
+            pass
         self._root.configure(bg=C["bg"])
         self._root.resizable(False, False)
         self._root.protocol("WM_DELETE_WINDOW", self._hide)
@@ -252,6 +350,9 @@ class AppWindow:
         except Exception:
             pass
         self._root.deiconify()
+        # Re-apply after the window is mapped — DWM caption attributes set while
+        # the window was withdrawn don't always stick, leaving a white title bar.
+        self._apply_dark_titlebar()
 
         self._root.mainloop()
         # Destroy after mainloop exits (quit() was called on sign-out)
@@ -308,16 +409,41 @@ class AppWindow:
 
     # ── Windows dark title bar ────────────────────────────────────────────────
 
+    # Title-bar colours (Windows 11). Caption is a grey that matches the app's
+    # card surface instead of the default white; text stays white.
+    _TITLEBAR_GREY = "#1a1a1a"
+
+    @staticmethod
+    def _colorref(hex_color: str) -> int:
+        """#RRGGBB → Win32 COLORREF (0x00BBGGRR)."""
+        h = hex_color.lstrip("#")
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        return (b << 16) | (g << 8) | r
+
     def _apply_dark_titlebar(self) -> None:
         try:
             DWMWA_USE_IMMERSIVE_DARK_MODE = 20
-            hwnd = ctypes.windll.user32.GetParent(self._root.winfo_id())
+            DWMWA_CAPTION_COLOR = 35   # Windows 11 build 22000+
+            DWMWA_TEXT_COLOR = 36
+            u32 = ctypes.windll.user32
+            # FindWindowW by title returns the real top-level HWND; winfo_id()
+            # can be a child HWND that DWM caption attributes don't apply to.
+            hwnd = u32.FindWindowW(None, "FTC Whisper")
             if not hwnd:
-                hwnd = self._root.winfo_id()
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
-                ctypes.byref(ctypes.c_int(1)), ctypes.sizeof(ctypes.c_int),
-            )
+                hwnd = u32.GetParent(self._root.winfo_id()) or self._root.winfo_id()
+            dwm = ctypes.windll.dwmapi
+
+            def _set(attr, value):
+                dwm.DwmSetWindowAttribute(
+                    hwnd, attr,
+                    ctypes.byref(ctypes.c_int(value)), ctypes.sizeof(ctypes.c_int),
+                )
+
+            _set(DWMWA_USE_IMMERSIVE_DARK_MODE, 1)
+            # Explicit grey caption + white text (falls through harmlessly on
+            # Windows 10, which doesn't support these two attributes).
+            _set(DWMWA_CAPTION_COLOR, self._colorref(self._TITLEBAR_GREY))
+            _set(DWMWA_TEXT_COLOR, self._colorref("#ffffff"))
         except Exception:
             pass
 
@@ -586,15 +712,10 @@ class AppWindow:
 
     def _build_hotkey_tab(self, parent: tk.Frame) -> None:
         # Scrollable container
-        _hk_sb = tk.Scrollbar(parent, orient="vertical",
-                               troughcolor=C["bg"], bg="#3a3a3a",
-                               activebackground="#505050",
-                               relief="flat", borderwidth=0,
-                               elementborderwidth=0, width=10)
-        self._hk_cv = tk.Canvas(parent, bg=C["bg"], highlightthickness=0,
-                                bd=0, yscrollcommand=_hk_sb.set)
+        self._hk_cv = tk.Canvas(parent, bg=C["bg"], highlightthickness=0, bd=0)
         _hk_cv = self._hk_cv
-        _hk_sb.config(command=_hk_cv.yview)
+        _hk_sb = ModernScrollbar(parent, command=_hk_cv.yview)
+        _hk_cv.configure(yscrollcommand=_hk_sb.set)
         _hk_sb.pack(side="right", fill="y")
         _hk_cv.pack(side="left", fill="both", expand=True)
         _hk_inner = tk.Frame(_hk_cv, bg=C["bg"])
@@ -923,9 +1044,15 @@ class AppWindow:
         self._ghost_btn(top, "↻ Refresh", self._load_history).pack(side="right")
         self._ghost_btn(top, "✕ Clear",   self._confirm_clear_history).pack(side="right", padx=(0, 8))
 
-        # Rounded card background canvas
-        card_cv = tk.Canvas(parent, bg=C["bg"], highlightthickness=0, bd=0)
-        card_cv.pack(fill="both", expand=True, padx=20, pady=(0, 8))
+        # Middle row: the rounded card sits on the left and an external
+        # scrollbar sits on the far right, OUTSIDE the card border (matching the
+        # Settings/Hotkey tabs, where the scrollbar is on the window background).
+        mid = tk.Frame(parent, bg=C["bg"])
+        mid.pack(fill="both", expand=True, padx=20, pady=(0, 8))
+
+        # Rounded card background canvas — packed after the scrollbar (below) so
+        # the scrollbar reserves the right edge first, then the card fills the rest.
+        card_cv = tk.Canvas(mid, bg=C["bg"], highlightthickness=0, bd=0)
 
         def _redraw_card(_e=None):
             card_cv.update_idletasks()
@@ -950,18 +1077,18 @@ class AppWindow:
 
         card_cv.bind("<Configure>", _sync_card)
 
-        # Scrollable canvas + scrollbar inside card_inner
-        self._hist_sb = tk.Scrollbar(card_inner, orient="vertical",
-                                     troughcolor=C["bg"], bg="#3a3a3a",
-                                     activebackground="#505050",
-                                     relief="flat", borderwidth=0,
-                                     elementborderwidth=0, width=10)
+        # Scrollable list canvas — fills the whole card (no scrollbar inside now)
         self._hist_cv = tk.Canvas(card_inner, bg=C["surface"],
-                                  highlightthickness=0, bd=0,
-                                  yscrollcommand=self._hist_sb.set)
-        self._hist_sb.config(command=self._hist_cv.yview)
+                                  highlightthickness=0, bd=0)
+        self._hist_cv.pack(fill="both", expand=True)
+
+        # External scrollbar on the window background, to the RIGHT of the card.
+        # Packed (side=right) before the card is packed (side=left, expand) so it
+        # claims the right edge; the card then fills the remaining width.
+        self._hist_sb = ModernScrollbar(mid, command=self._hist_cv.yview)
+        self._hist_cv.configure(yscrollcommand=self._hist_sb.set)
         self._hist_sb.pack(side="right", fill="y")
-        self._hist_cv.pack(side="left", fill="both", expand=True)
+        card_cv.pack(side="left", fill="both", expand=True, padx=(0, 6))
 
         # Inner frame that holds one Frame per history row
         self._hist_items = tk.Frame(self._hist_cv, bg=C["surface"])
@@ -1115,14 +1242,9 @@ class AppWindow:
 
     def _build_settings_tab(self, parent: tk.Frame) -> None:
         # Scrollable container
-        self._settings_sb = tk.Scrollbar(parent, orient="vertical",
-                                         troughcolor=C["bg"], bg="#3a3a3a",
-                                         activebackground="#505050",
-                                         relief="flat", borderwidth=0,
-                                         elementborderwidth=0, width=10)
-        self._settings_cv = tk.Canvas(parent, bg=C["bg"], highlightthickness=0,
-                                      bd=0, yscrollcommand=self._settings_sb.set)
-        self._settings_sb.config(command=self._settings_cv.yview)
+        self._settings_cv = tk.Canvas(parent, bg=C["bg"], highlightthickness=0, bd=0)
+        self._settings_sb = ModernScrollbar(parent, command=self._settings_cv.yview)
+        self._settings_cv.configure(yscrollcommand=self._settings_sb.set)
         self._settings_sb.pack(side="right", fill="y")
         self._settings_cv.pack(side="left", fill="both", expand=True)
 
@@ -1183,33 +1305,83 @@ class AppWindow:
         mic_var.trace_add("write", _refresh_mic_label)
 
         def _populate_mic_menu(devs):
-            seen_names: set = set()
-            for d in devs:
-                if d["name"] not in seen_names:
-                    seen_names.add(d["name"])
-                    unique_devs.append(d)
-            unique_devs.sort(key=_mic_rank)
-            options = ["Default"] + [d["name"] for d in unique_devs]
-            menu = mic_menu["menu"]
-            menu.delete(0, "end")
-            for opt in options:
-                menu.add_command(label=opt, command=lambda v=opt: mic_var.set(v))
-            if current_mic and current_mic in options:
-                mic_var.set(current_mic)
-            else:
-                mic_var.set("Default")
-            _refresh_mic_label()
+            try:
+                seen_names: set = set()
+                for d in devs:
+                    if d["name"] not in seen_names:
+                        seen_names.add(d["name"])
+                        unique_devs.append(d)
+                unique_devs.sort(key=_mic_rank)
+                options = ["Default"] + [d["name"] for d in unique_devs]
+                menu = mic_menu["menu"]
+                menu.delete(0, "end")
+                for opt in options:
+                    menu.add_command(label=opt, command=lambda v=opt: mic_var.set(v))
 
-        # Enumerate devices on a daemon thread — avoids 200-500ms block on
-        # machines with many audio/Bluetooth devices. Menu shows "Scanning…"
-        # until the list arrives via after().
-        def _async_populate():
+                # Auto-pick the best real microphone when the user hasn't chosen
+                # one, and persist it so recording actually uses it. Prefer a
+                # dedicated external mic (headset / USB) over the built-in array,
+                # since that's usually the better dictation source; never pick a
+                # loopback/stereo-mix/speaker (_mic_rank >= 2).
+                def _mic_pref(name):
+                    n = name.lower()
+                    if any(x in n for x in ["headset", "yeti", "rode", "shure",
+                                             "jabra", "logi", "usb"]):
+                        return 0  # dedicated external mic
+                    if any(x in n for x in ["array", "microphone", "mic"]):
+                        return 1  # built-in / generic
+                    return 2
+                best, best_pref = None, 99
+                for d in unique_devs:
+                    if _mic_rank(d) >= 2:
+                        continue  # skip loopback / stereo-mix / speaker
+                    p = _mic_pref(d["name"])
+                    if p < best_pref:
+                        best, best_pref = d["name"], p
+                if current_mic and current_mic in options:
+                    mic_var.set(current_mic)
+                elif best:
+                    mic_var.set(best)
+                    if self._on_settings_change:
+                        self._on_settings_change("input_device", best)
+                    print(f"[Settings] Auto-selected best mic: {best}")
+                else:
+                    mic_var.set("Default")
+                print(f"[Settings] Mic menu populated with {len(options)} option(s)")
+                _refresh_mic_label()
+            except Exception as e:
+                import traceback
+                print(f"[Settings] _populate_mic_menu FAILED: {e}")
+                traceback.print_exc()
+
+        # Enumerate on a daemon thread (avoids a 200-500ms block on machines with
+        # many audio/Bluetooth devices), but hand the result back via a MAIN-THREAD
+        # poller. Calling .after() directly from the worker races the mainloop
+        # startup and raises "main thread is not in main loop", which silently
+        # dropped the update — the menu stayed stuck on "Default". Scheduling the
+        # poller from the main thread here is always safe.
+        _mic_devs: list = []
+        _mic_done = [False]
+
+        def _enumerate_worker():
             try:
                 devs = self._get_input_devices() if self._get_input_devices else []
-            except Exception:
+            except Exception as e:
+                print(f"[Settings] Mic enumeration failed: {e}")
                 devs = []
-            self._ui_after(0, lambda: _populate_mic_menu(devs))
-        threading.Thread(target=_async_populate, daemon=True, name="mic-enum").start()
+            _mic_devs.extend(devs)
+            _mic_done[0] = True
+
+        def _poll_mic(attempt=0):
+            if _mic_done[0]:
+                if not _mic_devs:
+                    print("[Settings] No input devices found — dropdown shows Default only")
+                _populate_mic_menu(list(_mic_devs))
+            elif attempt < 100:                 # up to ~10s of polling
+                self._root.after(100, lambda: _poll_mic(attempt + 1))
+
+        threading.Thread(target=_enumerate_worker, daemon=True, name="mic-enum").start()
+        self._root.after(150, _poll_mic)
 
         # ── Mic test button + level meter ─────────────────────────────────────
         btn_row = tk.Frame(mic_card, bg=C["surface"])
@@ -1419,222 +1591,6 @@ class AppWindow:
 
         scan_btn.bind("<Button-1>", lambda _e: _start_scan())
 
-        # ── Whisper model ─────────────────────────────────────────────────────
-        model_card = self._card(parent, margin=(0, 0))
-        tk.Label(model_card, text="Transcription Model",
-                 fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
-        tk.Label(model_card, text="Larger = more accurate, slower to load",
-                 fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 8), anchor="w").pack(fill="x")
-
-        model_options = ["tiny.en", "base.en", "small.en", "medium.en",
-                         "tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]
-        current_model = (cfg.whisper_model if cfg else "base.en") or "base.en"
-        model_var = tk.StringVar(value=current_model)
-
-        model_menu = tk.OptionMenu(model_card, model_var, *model_options)
-        model_menu.configure(bg=C["surface_hover"], fg=C["text"], relief="flat",
-                             font=("Segoe UI", 9), anchor="w", highlightthickness=0,
-                             activebackground=C["accent"], activeforeground=C["bg"])
-        model_menu["menu"].configure(bg=C["surface"], fg=C["text"],
-                                     activebackground=C["accent"], activeforeground=C["bg"],
-                                     font=("Segoe UI", 9))
-        model_menu.pack(fill="x", pady=(4, 0))
-
-        # ── Model benchmark ───────────────────────────────────────────────────
-        bench_btn_row = tk.Frame(model_card, bg=C["surface"])
-        bench_btn_row.pack(fill="x", pady=(8, 0))
-
-        bench_btn = tk.Label(bench_btn_row, text="Benchmark Models",
-                             fg=C["text"], bg=C["surface_hover"],
-                             font=("Segoe UI", 9), padx=10, pady=6, cursor="hand2")
-        bench_btn.pack(side="left")
-        bench_btn.bind("<Enter>", lambda _e: bench_btn.configure(bg=C["accent"], fg=C["bg"]) if not bench_active[0] else None)
-        bench_btn.bind("<Leave>", lambda _e: bench_btn.configure(bg=C["surface_hover"], fg=C["text"]) if not bench_active[0] else None)
-
-        bench_status = tk.Label(model_card, text="", fg=C["subtext"], bg=C["surface"],
-                                font=("Segoe UI", 8), anchor="w", wraplength=340)
-
-        bench_results_frame = tk.Frame(model_card, bg=C["surface"])
-        bench_active = [False]
-
-        def _show_results(results):
-            bench_active[0] = False
-            bench_btn.configure(text="Benchmark Models", fg=C["text"],
-                                bg=C["surface_hover"], cursor="hand2")
-            bench_btn.bind("<Button-1>", lambda _e: _start_benchmark())
-            bench_status.configure(text="")
-            bench_status.pack_forget()
-
-            for w in bench_results_frame.winfo_children():
-                w.destroy()
-
-            # Determine recommended model: largest that ran in <5s
-            fast = [(n, t) for n, t, _tx, _e in results if t is not None and t < 5.0]
-            slow = [(n, t) for n, t, _tx, _e in results if t is not None and t >= 5.0]
-            if fast:
-                recommended = fast[-1][0]
-            elif slow:
-                recommended = min(slow, key=lambda x: x[1])[0]
-            else:
-                recommended = None
-
-            tk.Frame(bench_results_frame, bg=C["border"], height=1).pack(fill="x", pady=(0, 4))
-
-            for name, elapsed, _text, err in results:
-                row = tk.Frame(bench_results_frame, bg=C["surface"])
-                row.pack(fill="x", pady=1)
-                is_rec = (name == recommended)
-                fg_name = C["accent"] if is_rec else C["text"]
-                font_name = ("Segoe UI", 8, "bold") if is_rec else ("Segoe UI", 8)
-                tk.Label(row, text=name, fg=fg_name, bg=C["surface"],
-                         font=font_name, width=17, anchor="w").pack(side="left")
-                if elapsed is not None:
-                    col = C["success"] if elapsed < 5 else (C["accent"] if elapsed < 15 else C["error"])
-                    tk.Label(row, text=f"{elapsed:.1f}s", fg=col, bg=C["surface"],
-                             font=("Segoe UI", 8), width=6, anchor="w").pack(side="left")
-                else:
-                    tk.Label(row, text="skipped", fg=C["subtext"], bg=C["surface"],
-                             font=("Segoe UI", 8), width=6, anchor="w").pack(side="left")
-                if is_rec:
-                    tk.Label(row, text="← Best", fg=C["success"], bg=C["surface"],
-                             font=("Segoe UI", 8, "bold")).pack(side="left")
-
-            if recommended:
-                tk.Frame(bench_results_frame, bg=C["border"], height=1).pack(fill="x", pady=(4, 4))
-                use_row = tk.Frame(bench_results_frame, bg=C["surface"])
-                use_row.pack(fill="x")
-                tk.Label(use_row, text=f"Recommended: {recommended}",
-                         fg=C["success"], bg=C["surface"],
-                         font=("Segoe UI", 8)).pack(side="left")
-                use_btn = tk.Label(use_row, text="Use this",
-                                   fg=C["bg"], bg=C["accent"],
-                                   font=("Segoe UI", 8, "bold"), padx=8, pady=3, cursor="hand2")
-                use_btn.pack(side="right")
-                use_btn.bind("<Button-1>", lambda _e: model_var.set(recommended))
-                use_btn.bind("<Enter>", lambda _e: use_btn.configure(bg=C["accent_hover"]))
-                use_btn.bind("<Leave>", lambda _e: use_btn.configure(bg=C["accent"]))
-
-            bench_results_frame.pack(fill="x", pady=(4, 0))
-
-        def _run_tests(audio):
-            import gc
-            from faster_whisper import WhisperModel as _WM
-            device = getattr(self._transcriber, "_device", "cpu")
-            compute = getattr(self._transcriber, "_compute_type", "int8")
-            threads = getattr(self._transcriber, "_cpu_threads", 4)
-
-            models_to_test = ["tiny.en", "base.en", "small.en", "medium.en", "large-v3-turbo"]
-            results = []
-
-            for i, model_name in enumerate(models_to_test):
-                msg = f"Testing {model_name} ({i + 1}/{len(models_to_test)})…"
-                self._ui_after(0, lambda m=msg: bench_status.configure(text=m, fg=C["subtext"]))
-                try:
-                    import time as _t
-                    t0 = _t.time()
-                    wm = _WM(model_name, device=device, compute_type=compute,
-                             cpu_threads=threads, num_workers=1)
-                    if audio is not None and len(audio) > 0:
-                        is_en = model_name.endswith(".en")
-                        segs, _ = wm.transcribe(
-                            audio,
-                            language=None if is_en else "en",
-                            beam_size=1, vad_filter=True,
-                        )
-                        text = "".join(s.text for s in segs).strip()
-                    else:
-                        text = ""
-                    elapsed = _t.time() - t0
-                    del wm
-                    gc.collect()
-                    results.append((model_name, elapsed, text, None))
-                except Exception as e:
-                    results.append((model_name, None, "", str(e)))
-
-                last_elapsed = results[-1][1]
-                if last_elapsed is not None and last_elapsed > 15.0:
-                    for rem in models_to_test[i + 1:]:
-                        results.append((rem, None, "", "skipped — previous too slow"))
-                    break
-
-            self._ui_after(0, lambda: _show_results(results))
-
-        def _start_benchmark():
-            if bench_active[0]:
-                return
-            if not self._recorder:
-                return
-            if self._recorder.is_recording:
-                bench_status.configure(text="Stop recording first", fg=C["error"])
-                bench_status.pack(fill="x", pady=(4, 0))
-                return
-
-            for w in bench_results_frame.winfo_children():
-                w.destroy()
-            bench_results_frame.pack_forget()
-
-            bench_active[0] = True
-            bench_btn.configure(text="Recording…", fg=C["subtext"],
-                                bg=C["surface"], cursor="")
-            bench_btn.unbind("<Button-1>")
-            bench_status.pack(fill="x", pady=(4, 0))
-
-            selected_mic = mic_var.get()
-            device_name = "" if selected_mic == "Default" else selected_mic
-            dev_index = None
-            if device_name:
-                try:
-                    for d in self._recorder.get_input_devices():
-                        if d["name"] == device_name:
-                            dev_index = d["index"]
-                            break
-                except Exception:
-                    pass
-
-            chunks = []
-            try:
-                import sounddevice as _sd
-                stream = _sd.InputStream(
-                    samplerate=16000, channels=1, dtype="float32",
-                    callback=lambda indata, *_: chunks.append(indata.copy()),
-                    blocksize=1024, device=dev_index,
-                )
-                stream.start()
-            except Exception as e:
-                bench_active[0] = False
-                bench_btn.configure(text="Benchmark Models", fg=C["text"],
-                                    bg=C["surface_hover"], cursor="hand2")
-                bench_btn.bind("<Button-1>", lambda _e: _start_benchmark())
-                bench_status.configure(text=f"Could not open mic: {e}", fg=C["error"])
-                return
-
-            countdown = [5]
-            bench_status.configure(
-                text=f"Speak naturally — recording {countdown[0]}s…", fg=C["accent"])
-
-            def _tick():
-                countdown[0] -= 1
-                if countdown[0] > 0:
-                    bench_status.configure(
-                        text=f"Speak naturally — recording {countdown[0]}s…", fg=C["accent"])
-                    self._root.after(1000, _tick)
-                else:
-                    stream.stop()
-                    stream.close()
-                    import numpy as _np
-                    audio = _np.concatenate(chunks, axis=0).flatten() if chunks else None
-                    bench_btn.configure(text="Testing…")
-                    bench_status.configure(
-                        text="Testing models — this may take a few minutes…",
-                        fg=C["subtext"])
-                    threading.Thread(target=_run_tests, args=(audio,), daemon=True).start()
-
-            self._root.after(1000, _tick)
-
-        bench_btn.bind("<Button-1>", lambda _e: _start_benchmark())
-
 
         # ── Custom Vocabulary ─────────────────────────────────────────────────
         vocab_card = self._card(parent, margin=(0, 8))
@@ -1644,7 +1600,8 @@ class AppWindow:
         tk.Label(vocab_card,
                  text="Comma-separated names, acronyms, or terms to boost (e.g. FTC, Salesforce, CRM)",
                  fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 8), anchor="w", wraplength=360).pack(fill="x")
+                 font=("Segoe UI", 8), anchor="w", justify="left",
+                 wraplength=320).pack(fill="x")
         current_vocab = (cfg.custom_vocabulary if cfg else "") or ""
         vocab_var = tk.StringVar(value=current_vocab)
         vocab_entry = tk.Entry(vocab_card, textvariable=vocab_var,
@@ -1688,7 +1645,8 @@ class AppWindow:
                  font=("Segoe UI", 9), anchor="w").pack(anchor="w")
         tk.Label(label_col, text="Beeps when recording starts, stops, and transcription finishes",
                  fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 8), anchor="w").pack(anchor="w")
+                 font=("Segoe UI", 8), anchor="w", justify="left",
+                 wraplength=260).pack(anchor="w")
 
         # ── Live captions ─────────────────────────────────────────────────────
         cap_card = self._card(parent, margin=(0, 4))
@@ -1716,7 +1674,8 @@ class AppWindow:
                  font=("Segoe UI", 9), anchor="w").pack(anchor="w")
         tk.Label(caps_col, text="Show the words you're saying in real time (replaces the waveform bar while recording)",
                  fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 8), anchor="w", justify="left").pack(anchor="w")
+                 font=("Segoe UI", 8), anchor="w", justify="left",
+                 wraplength=260).pack(anchor="w")
 
         # ── Behaviour toggles (auto_punctuate, trailing_space, auto_enter) ─────
         def _toggle_card(key: str, title: str, subtext: str, default: bool):
@@ -1733,7 +1692,8 @@ class AppWindow:
             tk.Label(col, text=title, fg=C["text"], bg=C["surface"],
                      font=("Segoe UI", 9), anchor="w").pack(anchor="w")
             tk.Label(col, text=subtext, fg=C["subtext"], bg=C["surface"],
-                     font=("Segoe UI", 8), anchor="w", justify="left").pack(anchor="w")
+                     font=("Segoe UI", 8), anchor="w", justify="left",
+                     wraplength=260).pack(anchor="w")
 
         _toggle_card("auto_punctuate", "Auto Punctuation",
                      "Add a trailing period when speech ends without ending punctuation", True)
@@ -1746,54 +1706,6 @@ class AppWindow:
                      "first word is never clipped (mic indicator stays on; audio is "
                      "only kept for 1.5s and never stored)", True)
 
-        # ── Injection method ──────────────────────────────────────────────────
-        inj_card = self._card(parent, margin=(0, 4))
-        inj_row = tk.Frame(inj_card, bg=C["surface"]); inj_row.pack(fill="x")
-        cur_inj = (getattr(cfg, "inject_method", "clipboard") if cfg else "clipboard") or "clipboard"
-        _INJ_OPTS = {"Clipboard (Ctrl+V)": "clipboard", "Keystrokes": "keystrokes", "Auto": "auto"}
-        _INJ_REV = {v: k for k, v in _INJ_OPTS.items()}
-        inj_var = tk.StringVar(value=_INJ_REV.get(cur_inj, "Clipboard (Ctrl+V)"))
-        def _on_inj_change(*_a):
-            if self._on_settings_change:
-                self._on_settings_change("inject_method", _INJ_OPTS.get(inj_var.get(), "clipboard"))
-        inj_var.trace_add("write", _on_inj_change)
-        inj_col = tk.Frame(inj_row, bg=C["surface"]); inj_col.pack(side="left", fill="x", expand=True)
-        tk.Label(inj_col, text="Injection Method", fg=C["text"], bg=C["surface"],
-                 font=("Segoe UI", 9), anchor="w").pack(anchor="w")
-        tk.Label(inj_col, text="How text is placed into the focused app (falls back automatically if the first fails)",
-                 fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 8), anchor="w", justify="left").pack(anchor="w")
-        tk.OptionMenu(inj_row, inj_var, *_INJ_OPTS.keys()).pack(side="right")
-
-        # ── Numeric limits (toggle_timeout, max_recording_duration) ───────────
-        def _numeric_card(key: str, title: str, subtext: str, default: int):
-            card = self._card(parent, margin=(0, 4))
-            row = tk.Frame(card, bg=C["surface"]); row.pack(fill="x")
-            cur = int(getattr(cfg, key, default) if cfg else default)
-            var = tk.StringVar(value=str(cur))
-            def _commit(_e=None, _k=key, _v=var):
-                raw = (_v.get() or "").strip()
-                try:
-                    n = max(0, int(raw or 0))
-                except ValueError:
-                    n = 0
-                _v.set(str(n))
-                if self._on_settings_change:
-                    self._on_settings_change(_k, n)
-            col = tk.Frame(row, bg=C["surface"]); col.pack(side="left", fill="x", expand=True)
-            tk.Label(col, text=title, fg=C["text"], bg=C["surface"],
-                     font=("Segoe UI", 9), anchor="w").pack(anchor="w")
-            tk.Label(col, text=subtext, fg=C["subtext"], bg=C["surface"],
-                     font=("Segoe UI", 8), anchor="w", justify="left").pack(anchor="w")
-            e = tk.Entry(row, textvariable=var, width=6, justify="center",
-                         bg=C["input_bg"], fg=C["text"], insertbackground=C["text"],
-                         relief="flat", highlightthickness=1, highlightbackground=C["divider"])
-            e.pack(side="right")
-            e.bind("<FocusOut>", _commit); e.bind("<Return>", _commit)
-
-        _numeric_card("toggle_timeout", "Toggle Auto-Stop (seconds)",
-                      "Auto-stop a toggle-mode recording after this many seconds (0 = never)", 0)
-        _numeric_card("max_recording_duration", "Max Recording (seconds)",
-                      "Hard cap on any recording length in seconds (0 = unlimited)", 0)
 
         # ── Version / update card ─────────────────────────────────────────────
         ver_card = self._card(parent, margin=(0, 4))
@@ -1905,18 +1817,13 @@ class AppWindow:
         self._settings_status.pack(side="left")
 
         def _save(_e=None):
-            new_model = model_var.get()
-            old_model = (self._config.whisper_model if self._config else "") or ""
             if self._on_settings_change:
                 mic_val = mic_var.get()
                 self._on_settings_change("input_device",
                                          "" if mic_val == "Default" else mic_val)
-                self._on_settings_change("whisper_model", new_model)
                 self._on_settings_change("custom_vocabulary", vocab_var.get().strip())
                 self._on_settings_change("sound_feedback", sound_var.get())
-            model_changed = new_model != old_model
-            msg = "Saved ✓ — model loading in background…" if model_changed else "Saved ✓"
-            self._settings_status.configure(text=msg, fg=C["success"])
+            self._settings_status.configure(text="Saved ✓", fg=C["success"])
             if self._root:
                 self._root.after(4000, lambda: self._settings_status.configure(text=""))
 

@@ -39,25 +39,38 @@ def setup_config() -> None:
 
 
 def create_icon() -> str:
-    """Convert logo.png → logo.ico with black background and correct aspect ratio."""
-    logo_png = os.path.join(APP_DIR, "logo.png")
-    if not os.path.exists(logo_png):
-        print("  [WARN] logo.png not found — shortcut will use default icon.")
+    """Build logo.ico (the FTC swirl) as a square app icon: the logo on a dark
+    rounded tile so it's visible on any taskbar. Source: app_icon.png (the square
+    FTC logo), falling back to logo.png."""
+    src_png = os.path.join(APP_DIR, "app_icon.png")
+    if not os.path.exists(src_png):
+        src_png = os.path.join(APP_DIR, "logo.png")
+    if not os.path.exists(src_png):
+        print("  [WARN] app_icon.png / logo.png not found — shortcut will use default icon.")
         return ""
     try:
-        from PIL import Image
-        src = Image.open(logo_png).convert("RGBA")
+        from PIL import Image, ImageDraw
+        src = Image.open(src_png).convert("RGBA")
+        # Trim transparent margins so the logo fills the tile
+        bbox = src.split()[3].getbbox()
+        if bbox:
+            src = src.crop(bbox)
 
+        BG = (26, 26, 26, 255)  # app dark background (#1a1a1a)
         frames = []
-        for size in (256, 64, 32, 16):
-            # Fit logo inside the square preserving aspect ratio (no stretching)
-            thumb = src.copy()
-            thumb.thumbnail((size, size), Image.LANCZOS)
-            # Composite onto a solid black square (no transparent bleed-through)
-            canvas = Image.new("RGB", (size, size), (0, 0, 0))
-            offset = ((size - thumb.width) // 2, (size - thumb.height) // 2)
-            canvas.paste(thumb, offset, mask=thumb.split()[3])
-            frames.append(canvas)
+        for size in (256, 64, 48, 32, 16):
+            tile = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            radius = int(size * 0.20) if size >= 48 else 0  # rounded on big sizes, crisp square when tiny
+            mask = Image.new("L", (size, size), 0)
+            ImageDraw.Draw(mask).rounded_rectangle([0, 0, size - 1, size - 1], radius=radius, fill=255)
+            tile.paste(Image.new("RGBA", (size, size), BG), (0, 0), mask)
+            pad = int(size * 0.12)
+            inner = max(1, size - pad * 2)
+            swirl = src.copy()
+            swirl.thumbnail((inner, inner), Image.LANCZOS)
+            off = ((size - swirl.width) // 2, (size - swirl.height) // 2)
+            tile.paste(swirl, off, swirl)
+            frames.append(tile)
 
         frames[0].save(
             LOGO_ICO, format="ICO",
