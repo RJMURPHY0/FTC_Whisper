@@ -232,9 +232,21 @@ class ParakeetTranscriber:
             pos += split
         return " ".join(p.strip() for p in parts if p.strip())
 
+    # An utterance that is NOTHING but hesitation fillers ("Mm-hmm.", "Hmm,
+    # hmm.", "Uh-huh?") is never intentional dictation — it's what the model
+    # hallucinates from breath/room noise or a fraction of a second of audio.
+    # Suppress it entirely rather than injecting it into the user's document.
+    _FILLER_ONLY = re.compile(
+        r"^(?:[\s,.!?\-]|(?:m+-?h+m+|h+m+|m+m+|u+h+(?:-?h+u+h*)?|u+m+|mhm+)\b)+$",
+        re.IGNORECASE,
+    )
+
     def _post_process(self, text: str, hotwords_str: str = "") -> str:
         text = (text or "").strip()
         if not text:
+            return ""
+        if self._FILLER_ONLY.match(text):
+            print(f"[ParakeetEngine] Filler-only result suppressed: '{text}'")
             return ""
 
         # Pure non-word fillers only — never strip real words. Swallow one

@@ -19,6 +19,7 @@ session can ask for ranges (get_audio_range) and release committed audio
 """
 
 import threading
+import time
 import numpy as np
 import sounddevice as sd
 from collections import deque
@@ -26,6 +27,18 @@ from typing import Optional
 
 _PREROLL_KEEP_SECONDS = 1.5   # ring buffer length while idle
 _PREROLL_SEED_SECONDS = 0.35  # how much pre-hotkey audio to prepend to a recording
+
+# A healthy input stream delivers a callback every blocksize/rate seconds
+# (~21-64ms). If none arrived for this long the stream is considered dead —
+# WASAPI/MME streams silently stop calling back after a device removal,
+# default-device switch, audio-engine restart, or sleep/resume, while
+# stream.active happily stays True.
+_HEARTBEAT_STALE_SECONDS = 1.2
+# How long start() waits for the first fresh callback before abandoning the
+# warm stream and cold-opening a new one.
+_START_VERIFY_SECONDS = 0.45
+_WATCHDOG_INTERVAL = 5.0      # idle heartbeat check cadence
+_DEVICE_REFRESH_TICKS = 12    # full PortAudio refresh every N watchdog ticks (~60s)
 
 
 class Recorder:
@@ -73,6 +86,12 @@ class Recorder:
         self._monitor_rms: float = 0.0
         self._monitor_peak: float = 0.0
         self._monitor_active = False
+        # Heartbeat of the recording/warm stream: monotonic time of the last
+        # audio callback. Seeded on stream open so a just-opened stream counts
+        # as healthy before its first callback arrives.
+        self._last_callback_ts: float = 0.0
+        self._watchdog_started = False
+        self._watchdog_lock = threading.Lock()
 
     @property
     def is_recording(self) -> bool:
@@ -111,6 +130,7 @@ class Recorder:
         data = indata.copy()
         n = data.shape[0]
         with self._lock:
+            self._last_callback_ts = time.monotonic()
             self._last_rms = rms
             self._last_peak = peak
             if self._recording:
@@ -143,6 +163,7 @@ class Recorder:
         self._warm_enabled = bool(enabled)
         if enabled:
             self._ensure_warm_stream()
+            self._start_watchdog()
         else:
             self._close_stream_if_idle()
 
@@ -150,27 +171,80 @@ class Recorder:
         """Re-open the warm stream (after an input-device change)."""
         if not self._warm_enabled:
             return
+        if self.is_recording:
+            # Can't swap streams mid-recording — stop() sees this flag,
+            # closes the old-device stream and reopens on the new device.
+            self._warm_restart_pending = True
+            return
+        # force_fresh re-inits PortAudio so a device plugged in after launch
+        # is actually visible to the enumeration.
+        self._ensure_warm_stream(force_fresh=True)
+
+    def _heartbeat_age(self) -> float:
+        """Seconds since the last audio callback (inf if none ever fired)."""
+        with self._lock:
+            ts = self._last_callback_ts
+        return (time.monotonic() - ts) if ts > 0 else float("inf")
+
+    def _stream_looks_alive(self) -> bool:
+        """True when the current stream both claims to be active AND has
+        delivered a callback recently. A stream whose device vanished (or died
+        across sleep/resume) keeps active=True but never calls back again."""
+        stream = self._stream
+        if stream is None:
+            return False
+        try:
+            if not stream.active:
+                return False
+        except Exception:
+            return False
+        return self._heartbeat_age() < _HEARTBEAT_STALE_SECONDS
+
+    def _refresh_portaudio(self) -> None:
+        """Re-initialise PortAudio so the device list reflects reality.
+        PortAudio snapshots the device topology at init — devices added,
+        removed, or made default afterwards are invisible (and stale indices
+        can 'successfully' reopen a dead endpoint) until a re-init. Must only
+        be called with ALL of our streams closed."""
+        if self._monitor_active:
+            return
+        try:
+            sd._terminate()
+            time.sleep(0.05)
+            sd._initialize()
+            print("[Recorder] PortAudio device list refreshed.")
+        except Exception as e:
+            print(f"[Recorder] PortAudio refresh failed (continuing): {e}")
+        # Cached index is meaningless across a re-init.
+        self._active_device_index = None
+        self._active_device_name = ""
+
+    def _ensure_warm_stream(self, force_fresh: bool = False) -> bool:
+        """Open (or verify) the persistent stream. Returns success.
+
+        force_fresh=True closes any existing stream and re-initialises
+        PortAudio first — used by the watchdog to recover dead streams and to
+        follow Windows default-device changes."""
         with self._stream_lifecycle_lock:
             if self._recording:
-                # Can't swap streams mid-recording — stop() sees this flag,
-                # closes the old-device stream and reopens on the new device.
-                self._warm_restart_pending = True
-                return
-            self._close_stream_locked()
-        self._ensure_warm_stream()
-
-    def _ensure_warm_stream(self) -> bool:
-        """Open the persistent stream if not already running. Returns success."""
-        with self._stream_lifecycle_lock:
-            if self._stream is not None:
-                try:
-                    if self._stream.active:
-                        return True
-                except Exception:
-                    pass
+                # Never touch the stream under an active recording.
+                return self._stream is not None
+            if self._stream is not None and not force_fresh:
+                if self._stream_looks_alive():
+                    return True
+                print(f"[Recorder] Warm stream is stale (no audio callback for "
+                      f"{self._heartbeat_age():.1f}s) — reopening.")
+                force_fresh = True
+            if force_fresh and self._stream is not None:
                 self._close_stream_locked()
+            if force_fresh:
+                self._refresh_portaudio()
             try:
                 self._stream = self._open_best_input_stream()
+                with self._lock:
+                    self._last_callback_ts = time.monotonic()
+                    self._preroll.clear()
+                    self._preroll_samples = 0
                 self._stream.start()
                 self._warm_stream_is_open = True
                 where = self._active_device_name or "default input"
@@ -181,6 +255,39 @@ class Recorder:
                 self._warm_stream_is_open = False
                 print(f"[Recorder] Warm stream unavailable ({e}) — cold-open per recording.")
                 return False
+
+    def _start_watchdog(self) -> None:
+        """Idle-time keeper of the warm stream: recovers dead streams within
+        ~5s and does a full PortAudio refresh every ~60s so the stream follows
+        Windows default-device changes instead of clinging to a gone device."""
+        with self._watchdog_lock:
+            if self._watchdog_started:
+                return
+            self._watchdog_started = True
+        threading.Thread(
+            target=self._watchdog_loop, daemon=True, name="mic-watchdog"
+        ).start()
+
+    def _watchdog_loop(self) -> None:
+        tick = 0
+        while True:
+            time.sleep(_WATCHDOG_INTERVAL)
+            tick += 1
+            if not self._warm_enabled:
+                continue
+            if self.is_recording or self._monitor_active:
+                continue
+            try:
+                if not self._stream_looks_alive():
+                    print("[Recorder] Watchdog: warm stream dead — recovering.")
+                    self._ensure_warm_stream(force_fresh=True)
+                elif tick % _DEVICE_REFRESH_TICKS == 0:
+                    # Periodic refresh: PortAudio can't see default-device
+                    # changes without a re-init, so bounce the idle stream to
+                    # pick up whatever Windows now routes as the default mic.
+                    self._ensure_warm_stream(force_fresh=True)
+            except Exception as e:
+                print(f"[Recorder] Watchdog error (non-fatal): {e}")
 
     def _close_stream_locked(self) -> None:
         stream = self._stream
@@ -217,33 +324,74 @@ class Recorder:
         warm_ready = self._warm_enabled and self._ensure_warm_stream()
 
         if warm_ready:
+            preroll_fresh = self._heartbeat_age() < _HEARTBEAT_STALE_SECONDS
             with self._lock:
                 self._chunks = []
                 self._chunks_samples = 0
                 self._chunks_offset = 0
                 # Seed with the last ~0.35s of pre-roll so speech that started
-                # slightly before the hotkey (or during it) is captured.
-                seed_max = int(self.active_sample_rate * _PREROLL_SEED_SECONDS)
-                seeded = 0
-                seed_chunks: list[np.ndarray] = []
-                for chunk in reversed(self._preroll):
-                    seed_chunks.append(chunk)
-                    seeded += chunk.shape[0]
-                    if seeded >= seed_max:
-                        break
-                for chunk in reversed(seed_chunks):
-                    self._chunks.append(chunk)
-                    self._chunks_samples += chunk.shape[0]
+                # slightly before the hotkey (or during it) is captured — but
+                # ONLY if the stream is demonstrably live. A stale pre-roll is
+                # old room noise: transcribing it alone is how a dead mic used
+                # to inject hallucinated fillers ("Mm-hmm.") instead of speech.
+                if preroll_fresh:
+                    seed_max = int(self.active_sample_rate * _PREROLL_SEED_SECONDS)
+                    seeded = 0
+                    seed_chunks: list[np.ndarray] = []
+                    for chunk in reversed(self._preroll):
+                        seed_chunks.append(chunk)
+                        seeded += chunk.shape[0]
+                        if seeded >= seed_max:
+                            break
+                    for chunk in reversed(seed_chunks):
+                        self._chunks.append(chunk)
+                        self._chunks_samples += chunk.shape[0]
+                seed_samples = self._chunks_samples
                 self._preroll.clear()
                 self._preroll_samples = 0
                 self._last_rms = 0.0
                 self._last_peak = 0.0
                 self._recording = True
-            print(
-                f"[Recorder] Recording started instantly (warm, "
-                f"{self._active_device_name or 'default input'}, {self.active_sample_rate} Hz)."
-            )
-            return
+            # Trust but verify: the stream passed the liveness check, yet a
+            # device can die at any moment. If no fresh callback lands shortly,
+            # abandon the warm stream and cold-open a new one so a recording
+            # can never proceed on a silent mic.
+            deadline = time.monotonic() + _START_VERIFY_SECONDS
+            verified = False
+            while time.monotonic() < deadline:
+                with self._lock:
+                    if self._chunks_samples > seed_samples:
+                        verified = True
+                        break
+                time.sleep(0.015)
+            if verified:
+                print(
+                    f"[Recorder] Recording started instantly (warm, "
+                    f"{self._active_device_name or 'default input'}, {self.active_sample_rate} Hz)."
+                )
+                return
+            print("[Recorder] Warm stream produced no audio after start — "
+                  "falling back to a fresh cold stream.")
+            with self._stream_lifecycle_lock:
+                self._close_stream_locked()
+                self._refresh_portaudio()
+                try:
+                    self._stream = self._open_best_input_stream()
+                    with self._lock:
+                        self._last_callback_ts = time.monotonic()
+                    self._stream.start()
+                    self._warm_stream_is_open = True
+                    print(f"[Recorder] Recording started (recovered, "
+                          f"{self._active_device_name or 'default input'}, "
+                          f"{self.active_sample_rate} Hz).")
+                    return
+                except Exception as e:
+                    with self._lock:
+                        self._recording = False
+                    self._stream = None
+                    self._warm_stream_is_open = False
+                    print(f"[Recorder] Failed to start recording: {e}")
+                    raise
 
         # Cold path — open the stream now (legacy behaviour)
         with self._lock:
