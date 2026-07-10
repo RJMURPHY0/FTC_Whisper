@@ -2173,6 +2173,12 @@ class AppWindow:
                     for b in _btns if b.winfo_exists()
                 ])
 
+            def _log_event(stage, ok, detail):
+                if self._db:
+                    self._db.log_update_event(
+                        stage, from_version=self._version or "",
+                        to_version=version, ok=ok, detail=detail)
+
             def _worker():
                 # Drive the exact same proven flow as the automatic updater
                 # (reliable LOCALAPPDATA download + retries + verified swap script)
@@ -2185,10 +2191,13 @@ class AppWindow:
                     on_status=_status,
                     poll_interval=0.0,
                     idle_samples=1,
+                    on_event=_log_event,
                 )
                 # run_auto_update only returns when the download failed after all
                 # retries (on success apply_update replaces the exe and exits the
-                # process). Report it, fall back to the browser, and let them retry.
+                # process). Fall back to opening the release page in the browser —
+                # a genuine last resort so the user is never fully stuck.
+                _log_event("manual_fallback_browser", False, "in-place download failed")
                 from error_reporter import report_error
                 report_error(
                     f"Manual 'Update Now' failed to download v{version}",

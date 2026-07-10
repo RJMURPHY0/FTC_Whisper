@@ -90,6 +90,39 @@ class SupabaseLogger:
             payload["user_id"] = self._user_id
         self._run(payload)
 
+    def log_update_event(self, stage: str, from_version: str = "",
+                         to_version: str = "", ok=None, detail: str = "") -> None:
+        """Fire-and-forget: record an auto-update outcome to the update_events
+        table so update success/failure can be monitored across the whole fleet
+        (which devices update vs. get stuck). Best-effort — a missing table, RLS
+        block, or outage is swallowed and never affects the update itself.
+
+        stage ∈ {"download_start","download_ok","download_fail","swap_started",
+                 "manual_fallback_browser","announced"}.
+        """
+        if not self._enabled:
+            return
+        payload = {
+            "stage": stage,
+            "from_version": from_version,
+            "to_version": to_version,
+            "ok": ok,
+            "detail": (detail or "")[:500],
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        if self._user_id and self._user_id != "local":
+            payload["user_id"] = self._user_id
+
+        def _insert():
+            try:
+                self._get_client().table("update_events").insert(payload).execute()
+                print(f"[Supabase] update_event: {stage} ok={ok}")
+            except Exception as e:
+                print(f"[Supabase] update_event log failed (non-fatal): {e}")
+
+        threading.Thread(target=_insert, daemon=True,
+                         name="supabase-update-log").start()
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------

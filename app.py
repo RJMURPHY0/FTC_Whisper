@@ -45,7 +45,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.11"
+APP_VERSION = "1.6.12"
 
 
 class WhisperFlowApp:
@@ -375,12 +375,21 @@ class WhisperFlowApp:
             return
         self._auto_update_versions.add(version)
 
+        def _log_event(stage, ok, detail):
+            try:
+                self.db.log_update_event(
+                    stage, from_version=APP_VERSION, to_version=version,
+                    ok=ok, detail=detail)
+            except Exception:
+                pass
+
         def _worker():
             try:
                 run_auto_update(
                     version, url, exe_path,
                     is_idle=self._safe_to_restart,
                     on_status=self.app_window.set_update_status,
+                    on_event=_log_event,
                 )
                 # run_auto_update only returns on download failure — allow the
                 # next 6-hour check to retry this version from scratch.

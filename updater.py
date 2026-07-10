@@ -296,6 +296,44 @@ def current_exe_path() -> Optional[str]:
     return None
 
 
+def _fresh_download_path(preferred: str) -> str:
+    """Return a writable path for the update download.
+
+    A stale or LOCKED leftover at the fixed path is the single most common way
+    an install gets stranded on an old build: every download fails to (over)write
+    it, so run_auto_update gives up and the manual button falls back to the
+    browser — every time. Clear the leftover; if it can't be removed (AV hold or
+    a zombie process keeping the handle), download to a fresh sibling name so the
+    update still proceeds instead of failing forever.
+    """
+    try:
+        if os.path.exists(preferred):
+            os.remove(preferred)
+        return preferred
+    except OSError:
+        pass
+    base, ext = os.path.splitext(preferred)
+    for i in range(1, 20):
+        alt = f"{base}-{i}{ext}"
+        try:
+            if os.path.exists(alt):
+                os.remove(alt)
+            return alt
+        except OSError:
+            continue
+    return preferred  # give up — download_update will surface the real error
+
+
+def _emit(on_event, stage: str, ok, detail: str = "") -> None:
+    """Best-effort telemetry hook — never let a logging failure affect updates."""
+    if on_event is None:
+        return
+    try:
+        on_event(stage, ok, detail)
+    except Exception:
+        pass
+
+
 def run_auto_update(
     version: str,
     url: str,
@@ -305,6 +343,7 @@ def run_auto_update(
     apply_fn: Callable[[str, str], None] = None,
     poll_interval: float = 5.0,
     idle_samples: int = 6,
+    on_event: Optional[Callable[[str, object, str], None]] = None,
 ) -> None:
     """
     Fully automatic update: download → verify → wait for the app to be idle →
@@ -316,8 +355,14 @@ def run_auto_update(
 
     apply_fn is injectable for tests; the default (apply_update) exits the
     process and never returns.
+
+    on_event(stage, ok, detail) is an optional fire-and-forget telemetry hook —
+    called at "download_start" / "download_ok" / "download_fail" / "swap_started"
+    so update outcomes can be tracked across the fleet.
     """
-    dest = os.path.join(_app_data_dir(), "FTC-Whisper-new.exe")
+    # Never let a stale/locked leftover at the fixed path block the download.
+    dest = _fresh_download_path(os.path.join(_app_data_dir(), "FTC-Whisper-new.exe"))
+    _emit(on_event, "download_start", None, f"v{version.lstrip('v')}")
 
     # Download with retries — transient network errors must not strand the
     # user on an old build until the next 6-hour check.
@@ -336,12 +381,14 @@ def run_auto_update(
             print(f"[Updater] Download attempt {attempt} failed: {exc}")
     if last_exc is not None:
         on_status("")  # clear status — next 6-hour check retries from scratch
+        _emit(on_event, "download_fail", False, str(last_exc)[:300])
         try:
             os.remove(dest)
         except OSError:
             pass
         return
 
+    _emit(on_event, "download_ok", True, f"{os.path.getsize(dest)} bytes")
     on_status("Update downloaded — installing when idle…")
     consecutive = 0
     while consecutive < idle_samples:
@@ -349,4 +396,5 @@ def run_auto_update(
         consecutive = consecutive + 1 if is_idle() else 0
 
     on_status(f"Installing v{version.lstrip('v')} — restarting…")
+    _emit(on_event, "swap_started", True, f"v{version.lstrip('v')}")
     (apply_fn or apply_update)(dest, current_exe)
