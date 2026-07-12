@@ -25,7 +25,7 @@ import numpy as np
 
 
 class StreamingSession:
-    TICK_INTERVAL = 0.5        # seconds between worker checks
+    TICK_INTERVAL = 0.3        # seconds between worker checks
     COMMIT_AFTER = 10.0        # start looking for a boundary once uncommitted > this
     FORCE_COMMIT_AT = 18.0     # commit at the quietest point even without clear silence
     KEEP_TAIL = 1.2            # never commit audio closer than this to "now"
@@ -33,7 +33,9 @@ class StreamingSession:
     SILENCE_WIN = 0.1          # RMS window for silence search
     SILENCE_RUN = 3            # consecutive quiet windows (=300ms) that count as a pause
     CAPTION_TAIL_TRIM = 0.25   # drop the trailing partial word from the caption window
-    LOCK_LAG = 2               # keep the freshest N agreed words un-injected (churn buffer)
+    LOCK_LAG = 1               # keep the freshest N agreed words un-injected (churn buffer)
+    PAUSE_FLUSH_QUIET = 0.55   # trailing silence (s) that counts as "speaker paused"
+    PAUSE_FLUSH_RMS = 0.006    # quiet floor for the pause flush (matches the commit floor)
 
     def __init__(
         self,
@@ -157,23 +159,27 @@ class StreamingSession:
                 blocking=False,   # skip the tick if the engine is busy
                 finalize_text=False,
             ).strip()
+            if not hyp:
+                # Engine busy (skipped tick) or nothing spoken since the commit
+                # frontier. Leave the caption showing its last text — updating
+                # it with committed-only would visibly shrink then regrow.
+                return
             stable: list[str] = []
-            if hyp:
-                words = hyp.split()
-                if self._prev_hyp_words:
-                    n = 0
-                    for a, b in zip(self._prev_hyp_words, words):
-                        # Punctuation/caps on a word often settle one tick
-                        # later than the word itself — compare bare words.
-                        if a.strip(".,!?;:").lower() != b.strip(".,!?;:").lower():
-                            break
-                        n += 1
-                    stable = words[:n]
-                else:
-                    # First hypothesis: nothing to agree with yet — withhold
-                    # only the in-flight final word instead of showing nothing.
-                    stable = words[:-1]
-                self._prev_hyp_words = words
+            words = hyp.split()
+            if self._prev_hyp_words:
+                n = 0
+                for a, b in zip(self._prev_hyp_words, words):
+                    # Punctuation/caps on a word often settle one tick
+                    # later than the word itself — compare bare words.
+                    if a.strip(".,!?;:").lower() != b.strip(".,!?;:").lower():
+                        break
+                    n += 1
+                stable = words[:n]
+            else:
+                # First hypothesis: nothing to agree with yet — withhold
+                # only the in-flight final word instead of showing nothing.
+                stable = words[:-1]
+            self._prev_hyp_words = words
             # ── Captions ──
             if want_captions:
                 shown_hyp = " ".join(stable)
@@ -188,12 +194,29 @@ class StreamingSession:
             # ── Live injection (append-only) ──
             if want_inject:
                 committed_words = " ".join(self._committed_texts).split()
-                locked_hyp = stable[:-self.LOCK_LAG] if len(stable) > self.LOCK_LAG else []
+                if stable and self._tail_is_quiet(audio, rate):
+                    # Speaker paused: no upcoming words will push the tail past
+                    # LOCK_LAG, so the withheld words would sit untyped until
+                    # the next commit or hotkey release. The pause itself is
+                    # the stability signal — flush the whole agreed hypothesis.
+                    locked_hyp = stable
+                else:
+                    locked_hyp = stable[:-self.LOCK_LAG] if len(stable) > self.LOCK_LAG else []
                 self._emit_locked(committed_words + locked_hyp)
 
     @staticmethod
     def _norm_word(w: str) -> str:
         return w.strip(".,!?;:\"'").lower()
+
+    def _tail_is_quiet(self, audio: np.ndarray, rate: int) -> bool:
+        """True when the trailing PAUSE_FLUSH_QUIET seconds of the uncommitted
+        window are silence — the speaker has paused. Uses an absolute floor, so
+        a noisy room simply never flushes early (fail-safe: behaves as before)."""
+        n = int(self.PAUSE_FLUSH_QUIET * rate)
+        if n <= 0 or len(audio) < n:
+            return False
+        tail = audio[-n:].astype(np.float64)
+        return float(np.sqrt(np.mean(tail * tail))) < self.PAUSE_FLUSH_RMS
 
     def _emit_locked(self, locked: list[str]) -> None:
         """Append-only live injection. `locked` is the confident word list so far
