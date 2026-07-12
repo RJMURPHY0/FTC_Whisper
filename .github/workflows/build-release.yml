@@ -21,16 +21,18 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          # Restores the pip download cache between runs — the heavy wheels
-          # (ctranslate2, onnxruntime, numpy…) stop re-downloading on every
-          # release build, cutting several minutes off CI.
-          cache: "pip"
+
+      # uv installs the heavy wheels (ctranslate2, onnxruntime, numpy…) in
+      # parallel and keeps them in a cross-run cache — dependency install drops
+      # from minutes to seconds on warm builds.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: "requirements.txt"
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
+        run: uv pip install --system -r requirements.txt pyinstaller
 
       - name: Prepare build-time config (no secrets)
         shell: pwsh

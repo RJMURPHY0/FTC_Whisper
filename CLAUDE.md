@@ -70,6 +70,24 @@ recorder and transcribes only the remaining tail — stop-latency stays constant
 only (a whisper re-pass would usually be a downgrade). Live captions are pushed from
 the same worker (`on_caption`) — no separate caption thread in this mode.
 
+**Live Typing (`live_inject`, Beta)**: opt-in Settings toggle; Parakeet mode only.
+The stream worker emits confident words into the target app AS the user speaks
+(`_emit_locked` → `Injector.inject_stream` — append-only, modifier-safe transports:
+WM_CHAR for native apps / VK_PACKET for browsers, never clipboard). Confidence =
+LocalAgreement (two consecutive hypotheses agree) minus `LOCK_LAG` (1) freshest
+words as a churn buffer. **Pause flush**: when the trailing `PAUSE_FLUSH_QUIET`
+(0.55s) of audio is silent, the whole agreed hypothesis is emitted — without this,
+withheld words sit untyped through every pause until the next commit or release.
+The flush floor is absolute (`PAUSE_FLUSH_RMS`), so a noisy room simply never
+flushes early (fail-safe). At hotkey-release `_reconcile_live` (app.py) converges
+the streamed text to the final text — the ONLY place backspaces are sent, and only
+when the target field provably kept focus; an emit failure or focus change freezes
+the stream (`stream_frozen`) and the reconcile appends instead of deleting. A tick
+whose hypothesis comes back empty (engine busy on a commit transcribe) returns
+early — never emit or shrink the caption on a busy tick. `TICK_INTERVAL` is 0.3s;
+effective cadence is compute-bound on the hypothesis transcribe of the uncommitted
+window, which is why the window must stay bounded by the commit logic.
+
 **Live-caption bar (v1.6.16+)**: the stream sends the FULL transcript-so-far (all
 committed chunks + stable hypothesis) and the popup keeps all of it. The bar grows
 to `CAPTION_MAX_LINES` then scrolls; `_update_caption_widget` calls `see("end")` on
