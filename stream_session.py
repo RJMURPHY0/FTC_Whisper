@@ -33,6 +33,7 @@ class StreamingSession:
     SILENCE_WIN = 0.1          # RMS window for silence search
     SILENCE_RUN = 3            # consecutive quiet windows (=300ms) that count as a pause
     CAPTION_TAIL_TRIM = 0.25   # drop the trailing partial word from the caption window
+    LOCK_LAG = 2               # keep the freshest N agreed words un-injected (churn buffer)
 
     def __init__(
         self,
@@ -42,6 +43,8 @@ class StreamingSession:
         hotwords: str = "",
         on_caption: Optional[Callable[[str], None]] = None,
         captions_enabled: bool = False,
+        on_inject: Optional[Callable[[str], bool]] = None,
+        live_inject: bool = False,
     ):
         self._recorder = recorder
         self._engine = engine
@@ -49,6 +52,14 @@ class StreamingSession:
         self._hotwords = hotwords
         self._on_caption = on_caption
         self._captions = captions_enabled
+        # Live-injection: emit locked words into the target app AS the user speaks.
+        # on_inject returns True only if the chunk actually landed; append-only —
+        # never a backspace here (the app's finalize reconcile owns correction).
+        self._on_inject = on_inject
+        self._live_inject = live_inject
+        self._injected_words: list[str] = []   # words handed to on_inject (that landed)
+        self._injected_text = ""               # exact string sent — drives finalize reconcile
+        self._stream_frozen = False            # an emit failed / focus lost — stop emitting
 
         self._committed_texts: list[str] = []
         self._committed_sample = 0     # absolute sample position of the commit frontier
@@ -122,19 +133,21 @@ class StreamingSession:
                     self._prev_hyp_words = []
                 return
 
-        if self._captions and self._on_caption:
-            # Use the SAME context as finalize() so the live caption tracks the
+        # The stable-hypothesis pass feeds BOTH live captions and live injection.
+        # Run it whenever either consumer is active.
+        want_captions = bool(self._captions and self._on_caption)
+        want_inject = bool(self._live_inject and self._on_inject and not self._stream_frozen)
+        if want_captions or want_inject:
+            # Use the SAME context as finalize() so the live hypothesis tracks the
             # text that will actually be injected — a context-free hypothesis
-            # reads noticeably rougher than the final pass. Display-only: this
-            # never feeds the commit path or the injected result.
+            # reads noticeably rougher than the final pass. Display-only for
+            # captions; for injection only the LOCK_LAG-lagged prefix is emitted.
             #
-            # Two guards keep the caption from showing words the user never
-            # said (the final pass was always right; the LIVE text wasn't):
+            # Two guards keep us from surfacing words the user never said:
             #  1. Trim the trailing ~0.25s — that's the half-spoken word the
             #     model would otherwise have to guess at.
-            #  2. LocalAgreement: only display the word-prefix that two
-            #     consecutive hypotheses agree on. A guess that changes on the
-            #     next tick never reaches the screen.
+            #  2. LocalAgreement: only the word-prefix that two consecutive
+            #     hypotheses agree on. A guess that changes next tick is withheld.
             trim = int(self.CAPTION_TAIL_TRIM * rate)
             cap_audio = audio[:-trim] if len(audio) > trim + int(rate * 0.6) else audio
             hyp = self._engine.transcribe(
@@ -144,6 +157,7 @@ class StreamingSession:
                 blocking=False,   # skip the tick if the engine is busy
                 finalize_text=False,
             ).strip()
+            stable: list[str] = []
             if hyp:
                 words = hyp.split()
                 if self._prev_hyp_words:
@@ -160,17 +174,63 @@ class StreamingSession:
                     # only the in-flight final word instead of showing nothing.
                     stable = words[:-1]
                 self._prev_hyp_words = words
+            # ── Captions ──
+            if want_captions:
                 shown_hyp = " ".join(stable)
-            else:
-                shown_hyp = ""  # engine busy or silence — keep the last caption
-            if shown_hyp or self._committed_texts:
-                # Full transcript-so-far, not a trailing window: the popup tails
-                # the newest words itself and lets the user scroll back through
-                # everything said. Strings this size are trivial to rejoin.
-                shown = " ".join(
-                    self._committed_texts + ([shown_hyp] if shown_hyp else [])
-                )
-                self._on_caption(shown)
+                if shown_hyp or self._committed_texts:
+                    # Full transcript-so-far, not a trailing window: the popup tails
+                    # the newest words itself and lets the user scroll back through
+                    # everything said. Strings this size are trivial to rejoin.
+                    shown = " ".join(
+                        self._committed_texts + ([shown_hyp] if shown_hyp else [])
+                    )
+                    self._on_caption(shown)
+            # ── Live injection (append-only) ──
+            if want_inject:
+                committed_words = " ".join(self._committed_texts).split()
+                locked_hyp = stable[:-self.LOCK_LAG] if len(stable) > self.LOCK_LAG else []
+                self._emit_locked(committed_words + locked_hyp)
+
+    @staticmethod
+    def _norm_word(w: str) -> str:
+        return w.strip(".,!?;:\"'").lower()
+
+    def _emit_locked(self, locked: list[str]) -> None:
+        """Append-only live injection. `locked` is the confident word list so far
+        (committed words + lagged agreed hypothesis). Emit whatever extends what we
+        already typed, but ONLY if the already-typed prefix still agrees (ignoring
+        case/punctuation churn at commit boundaries). Never retracts — genuine
+        divergence just holds until the app's finalize reconcile fixes it."""
+        # Once finalize has begun (stop_event set) it owns the document — a
+        # straggler tick must NOT inject after the reconcile has started, or it
+        # would append past the corrected text and desync the char count.
+        if self._stop_event.is_set() or self._finalized:
+            return
+        n_have = len(self._injected_words)
+        if n_have > len(locked):
+            return  # locked shrank this tick — wait for it to regrow
+        # Verify our already-emitted prefix still matches (loose compare).
+        for a, b in zip(self._injected_words, locked):
+            if self._norm_word(a) != self._norm_word(b):
+                return  # divergence — hold; finalize reconcile corrects it
+        new_words = locked[n_have:]
+        if not new_words:
+            return
+        chunk = (" " if self._injected_text else "") + " ".join(new_words)
+        ok = False
+        try:
+            ok = bool(self._on_inject(chunk))
+        except Exception as e:
+            print(f"[Stream] live-inject emit error: {e}")
+            ok = False
+        if ok:
+            self._injected_words.extend(new_words)
+            self._injected_text += chunk
+        else:
+            # Emit failed (or focus left the target). Stop emitting so we can't
+            # leave a gap in the document; the finalize reconcile appends the rest.
+            self._stream_frozen = True
+            print("[Stream] live-inject frozen (emit failed / focus lost)")
 
     def _find_commit_point(
         self, audio: np.ndarray, rate: int, uncommitted_secs: float
@@ -274,3 +334,15 @@ class StreamingSession:
     @property
     def committed_text(self) -> str:
         return " ".join(self._committed_texts)
+
+    @property
+    def injected_text(self) -> str:
+        """The exact string live-injected into the target while speaking (drives
+        the finalize reconcile). Empty if live-inject was off or nothing landed."""
+        return self._injected_text
+
+    @property
+    def stream_frozen(self) -> bool:
+        """True if live-injection stopped early (an emit failed / focus was lost) —
+        the caller must NOT backspace-reconcile; append the remainder instead."""
+        return self._stream_frozen

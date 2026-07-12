@@ -70,11 +70,13 @@ CANVAS_W = NUM_BARS * (BAR_W + BAR_GAP) - BAR_GAP
 CANVAS_H = BAR_MAX_H + 6
 
 # Live-caption bar (shown beneath the waveform when captions are on).
-# The bar grows horizontally with the text until it hits CAPTION_MAX_CHARS,
-# then wraps and grows vertically up to CAPTION_MAX_LINES, then scrolls.
+# The bar is a FIXED-WIDTH paragraph block (CAPTION_MAX_CHARS wide) from the very
+# first word: text wraps and grows vertically up to CAPTION_MAX_LINES, then
+# scrolls. Fixed width means the bar never widens or slides sideways as you speak
+# — it reads as a stable left-aligned paragraph the whole time.
 # The full transcript-so-far stays in the widget — the view tails the newest
 # words, and the user can wheel-scroll back through everything said.
-CAPTION_MIN_CHARS = 16
+CAPTION_MIN_CHARS = 16   # legacy floor (bar now renders at CAPTION_MAX_CHARS)
 CAPTION_MAX_CHARS = 60
 CAPTION_MAX_LINES = 8
 CAPTION_SCROLL_HOLDOFF = 4.0  # secs after a manual scroll before auto-tail resumes
@@ -465,7 +467,7 @@ class FloatingPopup:
             relief="flat",
             bd=0,
             highlightthickness=0,
-            width=CAPTION_MIN_CHARS,
+            width=CAPTION_MAX_CHARS,   # fixed paragraph width from the first word
             height=1,
             padx=10,
             pady=6,
@@ -876,7 +878,8 @@ class FloatingPopup:
         self._show_no_activate()
 
     def _reset_caption_widget(self, text: str = "") -> None:
-        """Reset the caption bar to a single short line (start of a recording)."""
+        """Reset the caption bar to a single-line-tall paragraph block (start of a
+        recording). Width stays fixed at CAPTION_MAX_CHARS — only height resets."""
         self._caption_lines = 0
         self._caption_user_scroll_ts = 0.0
         self._caption_scroll.pack_forget()
@@ -884,13 +887,13 @@ class FloatingPopup:
         self._caption_text.delete("1.0", "end")
         self._caption_text.insert("1.0", text)
         self._caption_text.configure(
-            state="disabled", width=CAPTION_MIN_CHARS, height=1
+            state="disabled", width=CAPTION_MAX_CHARS, height=1
         )
 
     def _update_caption_widget(self, text: str) -> None:
-        """Render live caption text into the bar: grow horizontally until the max
-        width, then grow vertically up to CAPTION_MAX_LINES, then scroll (tailing
-        the latest words). Runs on the UI thread via root.after()."""
+        """Render live caption text into the bar: fixed paragraph width, growing
+        vertically up to CAPTION_MAX_LINES, then scroll (tailing the latest words).
+        Runs on the UI thread via root.after()."""
         if self._mode != "status" or not self._captions_enabled:
             return
         try:
@@ -898,10 +901,9 @@ class FloatingPopup:
             self._caption_text.delete("1.0", "end")
             self._caption_text.insert("1.0", text)
 
-            # Width: grow to fit the text on one line up to the max, then lock.
-            longest = max((len(line) for line in text.split("\n")), default=0)
-            width = min(CAPTION_MAX_CHARS, max(CAPTION_MIN_CHARS, longest + 2))
-            self._caption_text.configure(width=width)
+            # Fixed paragraph width from the first word — the bar never widens or
+            # slides sideways as text arrives; it just wraps and grows downward.
+            self._caption_text.configure(width=CAPTION_MAX_CHARS)
 
             # Height: measure wrapped display lines at this width.
             self._caption_text.update_idletasks()

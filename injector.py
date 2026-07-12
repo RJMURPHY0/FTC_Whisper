@@ -466,6 +466,73 @@ class Injector:
             return False
         return self._inject(text, release_mods=False)
 
+    def inject_stream(self, text: str) -> bool:
+        """
+        Append-only live-injection of a small chunk while the user is still speaking.
+
+        Goes STRAIGHT to the direct path (WM_CHAR for native apps, VK_PACKET for
+        browsers) and NEVER through the clipboard: a per-word Ctrl+V + clipboard
+        backup/restore would thrash the clipboard, release modifiers, and race the
+        restore thread on every word. WM_CHAR/VK_PACKET carry no modifier state, so
+        this is safe while the hotkey (e.g. Alt+V) is still physically held.
+
+        No internal lock — the single StreamingSession worker thread is the only
+        caller, and it serialises its own emits. Never releases modifiers.
+
+        Returns True only if the whole chunk landed. The caller MUST advance its
+        char-count bookkeeping only when this returns True (a partial/failed emit
+        that still counted would desync the finalize reconcile).
+        """
+        if not text:
+            return False
+        return self._direct_inject(text)
+
+    def delete_stream(self, n: int) -> bool:
+        """
+        Delete *n* characters via the SAME transport inject_stream uses for the
+        current window, so deletions and re-typed text can never interleave out
+        of order:
+          - Native apps: WM_CHAR 0x08 posted to the focused child — the same
+            thread message queue the streamed text went through.
+          - Browsers: SendInput VK_BACK — same system input queue as VK_PACKET.
+        Mixing transports (SendInput backspaces + PostMessage text) lets trailing
+        backspaces arrive AFTER the corrected tail and eat it — the exact
+        truncation bug the live-inject e2e test caught.
+        """
+        if n <= 0:
+            return True
+        cls = _get_fg_class()
+        if _is_browser_class(cls) and not _is_game_class(cls):
+            return self.send_backspaces(n)
+        posted, failed = _post_wm_char("\x08" * n)
+        if failed:
+            print(f"[Injector] delete_stream posted={posted} failed={failed}")
+        return failed == 0
+
+    def send_backspaces(self, n: int) -> bool:
+        """
+        Send *n* Backspace keypresses in one batched SendInput call. Correct only
+        when the text being deleted was ALSO sent through SendInput (browser
+        path) or when no further text will be typed through another transport —
+        otherwise use delete_stream() for queue-ordering safety.
+        """
+        if n <= 0:
+            return True
+        VK_BACK = 0x08
+        events: list[_Input] = []
+        for _ in range(n):
+            events.append(_Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_BACK)))
+            events.append(_Input(
+                type=_INPUT_KEYBOARD,
+                ki=_KbdInput(wVk=VK_BACK, dwFlags=_KEYEVENTF_KEYUP),
+            ))
+        arr = (_Input * len(events))(*events)
+        sent = ctypes.windll.user32.SendInput(len(events), arr, ctypes.sizeof(_Input))
+        ok = sent == len(events)
+        if not ok:
+            print(f"[Injector] send_backspaces sent={sent}/{len(events)}")
+        return ok
+
     # ── Implementation ─────────────────────────────────────────────────────────
 
     def _inject(self, text: str, release_mods: bool = True) -> bool:
@@ -490,22 +557,26 @@ class Injector:
             print("[Injector] Browser clipboard failed -> VK_PACKET fallback")
             return self._direct_inject(text)
 
-        # Non-browser: respect config-driven injection mode.
-        # - clipboard  : most universal for office/web/chat apps
-        # - keystrokes : direct Win32/SendInput path first
-        # - auto       : clipboard first, then direct fallback
-        # Auto-mode exception: when the clipboard holds non-text content (a
-        # screenshot, copied files) that we cannot back up, try direct injection
-        # first so the user's clipboard isn't destroyed. Explicit clipboard mode
-        # keeps clipboard-first — the user chose the most reliable paste path.
-        if self.method == "auto" and self._clipboard_has_nontext():
-            print("[Injector] Clipboard holds non-text content — trying direct inject first")
+        # Native (non-browser) target with non-text on the clipboard (a screenshot
+        # from Win+Shift+S, copied files) — applies to EVERY mode, not just auto.
+        # A clipboard paste here would (a) destroy that content and (b) can outright
+        # FAIL when the capture tool still holds the clipboard open, which is the
+        # "dictated while screenshotting, text never landed" case. WM_CHAR is
+        # reliable for native apps and touches nothing on the clipboard, so use it
+        # first; fall back to clipboard only if direct injection fully fails.
+        if self._clipboard_has_nontext():
+            print("[Injector] Clipboard holds non-text (image/files) — direct inject first (preserve it)")
             if self._direct_inject(text):
                 return True
             if self._partial_direct:
                 return False  # some chars landed — a paste now would duplicate them
+            print("[Injector] Direct inject failed -> clipboard paste (last resort)")
             return self._clipboard_paste(text)
 
+        # Non-browser: respect config-driven injection mode.
+        # - clipboard  : most universal for office/web/chat apps
+        # - keystrokes : direct Win32/SendInput path first
+        # - auto       : clipboard first, then direct fallback
         if self.method == "clipboard":
             if self._clipboard_paste(text):
                 return True

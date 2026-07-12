@@ -70,6 +70,7 @@ class Config:
     custom_vocabulary: str = ""  # Comma-separated terms to boost in Whisper (names, acronyms, domain words)
     auto_punctuate: bool = True   # Add trailing period when Whisper output has no terminal punctuation
     live_captions: bool = False   # Show live text of what you're saying (replaces the waveform bar while recording)
+    live_inject: bool = False     # Type words into the app live as you speak (Parakeet mode); corrects at hotkey-release
     trailing_space: bool = False  # Append a space after each injection (useful when dictating mid-sentence)
     auto_enter: bool = False      # Press Enter after injection (useful for chat/search boxes)
     toggle_timeout: int = 0       # Seconds before auto-stopping in toggle mode (0 = disabled; long dictation must not be cut off)

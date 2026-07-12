@@ -18,12 +18,29 @@ import ctypes.wintypes as wt
 
 _ICON_SIZE = 26  # rendered size in the history row
 
+# Explicit signature — ExtractIconExW has HICON* out-params that must be full
+# pointer width on 64-bit Windows; without argtypes ctypes can mis-marshal the
+# handles/count. Declared once at import (best-effort).
+try:
+    _ExtractIconExW = ctypes.windll.shell32.ExtractIconExW
+    _ExtractIconExW.argtypes = [
+        wt.LPCWSTR, ctypes.c_int,
+        ctypes.POINTER(wt.HICON), ctypes.POINTER(wt.HICON), ctypes.c_uint,
+    ]
+    _ExtractIconExW.restype = ctypes.c_uint
+except Exception:
+    _ExtractIconExW = None
+
 # exe stem (lowercased) -> friendly display name
 _KNOWN_APPS = {
     "chrome": "Chrome", "msedge": "Edge", "firefox": "Firefox",
     "brave": "Brave", "opera": "Opera", "opera_gx": "Opera GX", "arc": "Arc",
-    "vivaldi": "Vivaldi",
-    "code": "VS Code", "cursor": "Cursor", "devenv": "Visual Studio",
+    "vivaldi": "Vivaldi", "zen": "Zen",
+    "code": "VS Code", "code - insiders": "VS Code", "cursor": "Cursor",
+    "devenv": "Visual Studio", "antigravity": "Antigravity",
+    "antigravity ide": "Antigravity", "windsurf": "Windsurf",
+    "trae": "Trae", "sublime_text": "Sublime Text", "idea64": "IntelliJ",
+    "pycharm64": "PyCharm", "rider64": "Rider", "webstorm64": "WebStorm",
     "winword": "Word", "excel": "Excel", "powerpnt": "PowerPoint",
     "outlook": "Outlook", "olk": "Outlook", "onenote": "OneNote",
     "ms-teams": "Teams", "teams": "Teams",
@@ -35,8 +52,15 @@ _KNOWN_APPS = {
     "windowsterminal": "Terminal", "wt": "Terminal",
     "powershell": "PowerShell", "pwsh": "PowerShell", "cmd": "Command Prompt",
     "notion": "Notion", "obsidian": "Obsidian", "figma": "Figma",
-    "zoom": "Zoom",
+    "zoom": "Zoom", "spotify": "Spotify", "thunderbird": "Thunderbird",
+    "acrobat": "Acrobat", "acrord32": "Acrobat Reader", "postman": "Postman",
+    "sublime_merge": "Sublime Merge", "gitkraken": "GitKraken",
 }
+
+# Generic host processes that HOST another app's window — resolving their exe
+# yields a useless label ("Application Frame Host"). The real app is a child
+# window with a different PID (see _exe_path_for_hwnd).
+_HOST_PROCESSES = {"applicationframehost"}
 
 # Browser stems — their window title carries the site/tab name, which is a far
 # better label than "Chrome" (e.g. "Claude", "Gmail").
@@ -50,25 +74,74 @@ _BROWSER_SUFFIXES = (
 )
 
 
+def _pid_for_hwnd(hwnd: int) -> int:
+    pid = wt.DWORD(0)
+    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value
+
+
+def _exe_for_pid(pid: int) -> str:
+    if not pid:
+        return ""
+    k32 = ctypes.windll.kernel32
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = wt.DWORD(1024)
+        if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return buf.value
+    finally:
+        k32.CloseHandle(h)
+    return ""
+
+
+def _stem_of(exe: str) -> str:
+    if not exe:
+        return ""
+    return exe.rsplit("\\", 1)[-1].rsplit(".", 1)[0].lower()
+
+
+# Callback type for EnumChildWindows
+_ENUMCHILDPROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+
+
+def _resolve_host_child_pid(hwnd: int, host_pid: int) -> int:
+    """UWP/Store windows are hosted by ApplicationFrameHost.exe; the real app runs
+    in a child window with a DIFFERENT pid. Return that child's pid (0 if none)."""
+    found = {"pid": 0}
+
+    def _cb(child, _lparam):
+        cpid = _pid_for_hwnd(child)
+        if cpid and cpid != host_pid:
+            found["pid"] = cpid
+            return False  # stop enumeration
+        return True
+
+    try:
+        ctypes.windll.user32.EnumChildWindows(hwnd, _ENUMCHILDPROC(_cb), 0)
+    except Exception:
+        pass
+    return found["pid"]
+
+
 def _exe_path_for_hwnd(hwnd: int) -> str:
     try:
-        u32 = ctypes.windll.user32
-        k32 = ctypes.windll.kernel32
-        pid = wt.DWORD(0)
-        u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        if not pid.value:
+        pid = _pid_for_hwnd(hwnd)
+        if not pid:
             return ""
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
-        if not h:
-            return ""
-        try:
-            buf = ctypes.create_unicode_buffer(1024)
-            size = wt.DWORD(1024)
-            if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
-                return buf.value
-        finally:
-            k32.CloseHandle(h)
+        exe = _exe_for_pid(pid)
+        # UWP/Store apps: the foreground window belongs to the generic host — dig
+        # into the child window that belongs to the real app.
+        if _stem_of(exe) in _HOST_PROCESSES:
+            child_pid = _resolve_host_child_pid(hwnd, pid)
+            if child_pid:
+                child_exe = _exe_for_pid(child_pid)
+                if child_exe:
+                    return child_exe
+        return exe
     except Exception:
         pass
     return ""
@@ -110,9 +183,7 @@ def capture_app_info(hwnd: int) -> dict:
     try:
         exe = _exe_path_for_hwnd(hwnd)
         info["app_exe"] = exe
-        stem = ""
-        if exe:
-            stem = exe.rsplit("\\", 1)[-1].rsplit(".", 1)[0].lower()
+        stem = _stem_of(exe)
         name = _KNOWN_APPS.get(stem, "")
         if stem in _BROWSERS:
             label = _browser_service_label(_window_title(hwnd))
@@ -121,8 +192,8 @@ def capture_app_info(hwnd: int) -> dict:
         if not name and stem:
             name = stem.replace("_", " ").replace("-", " ").title()
         info["app_name"] = name
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[AppInfo] capture failed: {e}")
     return info
 
 
@@ -196,21 +267,54 @@ def _hicon_to_pil(hicon, size: int = 32):
     return img
 
 
+def _extract_via_extracticon(exe_path: str):
+    """exe path -> RGBA PIL image via ExtractIconExW (reads the exe's own icon
+    resource directly). More reliable than the shell icon for Electron/Chromium
+    exes (Antigravity, Cursor, Discord, VS Code). Returns None on failure."""
+    if _ExtractIconExW is None:
+        return None
+    try:
+        u32 = ctypes.windll.user32
+        large = wt.HICON()
+        small = wt.HICON()
+        # ExtractIconExW(file, index, *large, *small, nIcons) -> icons extracted
+        n = _ExtractIconExW(
+            exe_path, 0, ctypes.byref(large), ctypes.byref(small), 1)
+        hicon = large.value or small.value
+        if not n or not hicon:
+            return None
+        try:
+            return _hicon_to_pil(hicon, 32)
+        finally:
+            if large.value:
+                u32.DestroyIcon(large)
+            if small.value:
+                u32.DestroyIcon(small)
+    except Exception:
+        return None
+
+
 def _extract_exe_icon(exe_path: str):
     """exe path -> RGBA PIL image, or None."""
     try:
         SHGFI_ICON = 0x100
+        SHGFI_LARGEICON = 0x0
         info = _SHFILEINFOW()
         res = ctypes.windll.shell32.SHGetFileInfoW(
-            exe_path, 0, ctypes.byref(info), ctypes.sizeof(info), SHGFI_ICON)
-        if not res or not info.hIcon:
-            return None
-        try:
-            return _hicon_to_pil(info.hIcon, 32)
-        finally:
-            ctypes.windll.user32.DestroyIcon(info.hIcon)
+            exe_path, 0, ctypes.byref(info), ctypes.sizeof(info),
+            SHGFI_ICON | SHGFI_LARGEICON)
+        if res and info.hIcon:
+            try:
+                img = _hicon_to_pil(info.hIcon, 32)
+            finally:
+                ctypes.windll.user32.DestroyIcon(info.hIcon)
+            if img is not None:
+                return img
+        # Shell lookup gave nothing usable — pull the icon straight from the exe.
+        return _extract_via_extracticon(exe_path)
     except Exception:
-        return None
+        # Last resort even if SHGetFileInfoW raised.
+        return _extract_via_extracticon(exe_path)
 
 
 def get_app_icon(exe_path: str, bg: str):

@@ -45,7 +45,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.16"
+APP_VERSION = "1.6.17"
 
 
 class WhisperFlowApp:
@@ -161,6 +161,9 @@ class WhisperFlowApp:
 
         # Streaming transcription session (Parakeet mode) — one per recording
         self._session: StreamingSession | None = None
+        # Live Typing (opt-in) per-dictation state
+        self._live_inject_active = False   # live-inject engaged for the current dictation
+        self._live_focus_lost = False      # foreground left the target while streaming
         # Monotonic id per dictation: stale upgrade results from a previous
         # dictation are discarded instead of contaminating the current popup.
         self._dictation_seq = 0
@@ -533,6 +536,67 @@ class WhisperFlowApp:
     # Recording pipeline
     # ------------------------------------------------------------------
 
+    def _on_stream_inject(self, chunk: str) -> bool:
+        """Type a locked chunk into the target app live (called from the
+        StreamingSession worker thread — Win32 only, no tkinter).
+
+        Injects ONLY while the original recording target is still the foreground
+        window. A focus change mid-dictation flips _live_focus_lost and returns
+        False, which freezes the session's streaming — so we never type into, nor
+        later backspace-reconcile, the wrong window."""
+        try:
+            fg = ctypes.windll.user32.GetForegroundWindow()
+        except Exception:
+            fg = 0
+        if not self._recording_hwnd or fg != self._recording_hwnd:
+            self._live_focus_lost = True
+            return False
+        try:
+            return self.injector.inject_stream(chunk)
+        except Exception as e:
+            print(f"[App] Live stream-inject error: {e}")
+            return False
+
+    def _reconcile_live(self, streamed: str, target: str, can_backspace: bool) -> tuple[bool, int]:
+        """Converge the live-streamed text already in the document to the final
+        `target` text. Returns (ok, our_char_count_in_doc).
+
+        The ONLY place a backspace is ever sent for live-inject — and it deletes
+        strictly OUR OWN streamed characters (bounded by len(streamed)), never the
+        user's content. When backspacing isn't safe (focus left the field / stream
+        froze), append the missing tail words with ZERO deletions instead."""
+        if streamed == target:
+            return True, len(streamed)
+
+        if can_backspace:
+            common = os.path.commonprefix([streamed, target])
+            # Back off to the last word boundary so we never re-type a word fragment
+            # (e.g. "ice"→"ice cream" must not leave "ic" + "e cream").
+            if common and common[-1] != " " and (len(common) < len(streamed)
+                                                  and len(common) < len(target)):
+                cut = common.rfind(" ")
+                common = common[: cut + 1] if cut >= 0 else ""
+            n_del = len(streamed) - len(common)
+            tail = target[len(common):]
+            # delete_stream, NOT send_backspaces: deletions must ride the same
+            # transport as the streamed text (WM_CHAR queue for native apps) or
+            # trailing backspaces can interleave AFTER the tail and eat it.
+            ok_del = self.injector.delete_stream(n_del) if n_del > 0 else True
+            ok_type = self.injector.inject_stream(tail) if tail else True
+            return (ok_del and ok_type), len(target)
+
+        # Append-only fallback: never delete. Add only words beyond what we streamed.
+        sw = streamed.split()
+        tw = target.split()
+        remainder = tw[len(sw):]
+        if not remainder:
+            return True, len(streamed)
+        add = (" " if streamed else "") + " ".join(remainder)
+        if getattr(self.config, "trailing_space", False):
+            add += " "
+        ok = self.injector.inject_stream(add)
+        return ok, len(streamed) + len(add)
+
     def _on_start_recording(self) -> None:
         self._last_dictation_ts = time.time()
         try:
@@ -576,16 +640,27 @@ class WhisperFlowApp:
             # dictations are transcribed while you speak, so the tail left at
             # hotkey-release is always small — stop latency stays constant.
             if self._use_parakeet():
+                # Live Typing (opt-in): words are injected into the target app AS
+                # you speak. Only in Parakeet mode (needs the stable incremental
+                # stream). Reset per-dictation focus state; suppress the caption
+                # bar since the app itself now shows the text.
+                live = bool(getattr(self.config, "live_inject", False))
+                self._live_inject_active = live
+                self._live_focus_lost = False
                 session = StreamingSession(
                     self.recorder,
                     self.parakeet,
                     context_words=self._get_context_words(),
                     hotwords=self._get_hotwords(),
                     on_caption=self.popup.update_caption,
-                    captions_enabled=bool(getattr(self.config, "live_captions", False)),
+                    captions_enabled=bool(getattr(self.config, "live_captions", False)) and not live,
+                    on_inject=self._on_stream_inject if live else None,
+                    live_inject=live,
                 )
                 self._session = session
                 session.start()
+            else:
+                self._live_inject_active = False
         except Exception as e:
             print(f"[App] Failed to start recording: {e}")
             self.feedback.error_occurred(str(e))
@@ -635,10 +710,12 @@ class WhisperFlowApp:
                 # ── Parakeet path: committed prefix + tail-only final pass ──
                 text, tail_audio, capture_rate = session.finalize()
                 final_audio = tail_audio
+                _streamed = session.injected_text if self._live_inject_active else ""
                 # Near-silence gate: when nothing was committed while speaking
                 # and the whole result came from an essentially silent tail,
-                # it's a hallucination (dead/muted mic), not dictation.
-                if text and not session.committed_text:
+                # it's a hallucination (dead/muted mic), not dictation. Skip the
+                # gate if live-inject already typed real words on screen.
+                if text and not session.committed_text and not _streamed:
                     import numpy as _np
                     _peak = (float(_np.max(_np.abs(tail_audio)))
                              if tail_audio is not None and len(tail_audio) else 0.0)
@@ -647,14 +724,21 @@ class WhisperFlowApp:
                               f"(peak={_peak:.4f}) — mic delivered no speech.")
                         text = ""
                 if not text:
-                    if total_samples < capture_rate * 0.3:
-                        print("[App] Recording too short, ignoring.")
-                        self.feedback.error_occurred("Recording too short")
+                    if _streamed:
+                        # Final pass came back empty but we already typed live from
+                        # real hypotheses — keep what's on screen rather than
+                        # backspacing it out. Reconcile below becomes a no-op.
+                        text = _streamed
+                        print(f"[App] Empty final pass; keeping streamed text '{_streamed}'.")
                     else:
-                        print("[App] Empty transcription result.")
-                        self.feedback.error_occurred("No speech detected")
-                    self.hotkey_manager.set_idle()
-                    return
+                        if total_samples < capture_rate * 0.3:
+                            print("[App] Recording too short, ignoring.")
+                            self.feedback.error_occurred("Recording too short")
+                        else:
+                            print("[App] Empty transcription result.")
+                            self.feedback.error_occurred("No speech detected")
+                        self.hotkey_manager.set_idle()
+                        return
                 transcribed_text = text
                 # Upgrade = LLM context-fix only. Parakeet already beats the
                 # local whisper models on English accuracy, so a whisper
@@ -718,6 +802,7 @@ class WhisperFlowApp:
         # set_idle() ALWAYS fires, so the "Transcribing…" pill is never orphaned
         # on screen (it hides via the is_user_facing guard in _on_state_change).
         result = False
+        _live_del = 0   # chars we put in the doc via live-inject (for popup Replace)
         try:
             # Fast path: in the overwhelmingly common case the target window
             # never lost focus during recording (the popup is WS_EX_NOACTIVATE),
@@ -785,10 +870,27 @@ class WhisperFlowApp:
                 _text_to_inject = transcribed_text
                 if getattr(self.config, "trailing_space", False):
                     _text_to_inject += " "
-                print(f"[App] Injecting: {len(_text_to_inject)} chars")
-                # Modifiers already released above — skip the second release
-                result = self.injector.inject(_text_to_inject, release_mods=False)
-                print(f"[App] Inject result: {result}")
+                _streamed_live = (session.injected_text
+                                  if (session is not None and self._live_inject_active)
+                                  else "")
+                if _streamed_live:
+                    # Live Typing: text is already in the app as the user spoke.
+                    # Converge it to the final result — backspacing ONLY our own
+                    # streamed characters, and only when the target field is
+                    # provably still focused (else append the tail, no deletes).
+                    can_bs = (not self._live_focus_lost
+                              and not session.stream_frozen
+                              and focus_unchanged)
+                    print(f"[App] Live reconcile: streamed={len(_streamed_live)} "
+                          f"target={len(_text_to_inject)} backspace={can_bs}")
+                    result, _live_del = self._reconcile_live(
+                        _streamed_live, _text_to_inject, can_bs)
+                    print(f"[App] Live reconcile result={result} del={_live_del}")
+                else:
+                    print(f"[App] Injecting: {len(_text_to_inject)} chars")
+                    # Modifiers already released above — skip the second release
+                    result = self.injector.inject(_text_to_inject, release_mods=False)
+                    print(f"[App] Inject result: {result}")
             except Exception as e:
                 print(f"[App] Injection error (popup will still appear): {e}")
 
@@ -817,10 +919,13 @@ class WhisperFlowApp:
         # undo_count=0 when injection failed: Replace must NOT Ctrl+Z the user's
         # own prior edits when there is nothing of ours to undo.
         _undo_n = 1 if result else 0
+        # Live-injected dictations were typed as many keystroke bursts, so Replace
+        # must delete exactly the chars we put in (backspace) rather than one Ctrl+Z.
+        _live_dc = _live_del if (result and _live_del) else 0
         self.popup.show_cursor_icon(
             transcribed_text,
             on_insert=lambda t=transcribed_text, h=hwnd: self._insert_text(t, h),
-            on_replace=lambda new_text, t=transcribed_text, h=hwnd, uc=_undo_n: self._replace_text(new_text, h, t, undo_count=uc),
+            on_replace=lambda new_text, t=transcribed_text, h=hwnd, uc=_undo_n, dc=_live_dc: self._replace_text(new_text, h, t, undo_count=uc, del_chars=dc),
             on_insert_result=lambda new_text, h=hwnd: self._insert_text(new_text, h),
             inserted=result,
             hwnd=hwnd,
@@ -1336,15 +1441,24 @@ class WhisperFlowApp:
         self.injector.inject(text)
         print(f"[App] Manual insert: {len(text)} chars")
 
-    def _replace_text(self, new_text: str, hwnd: int, original_text: str = "", undo_count: int = 1) -> None:
+    def _replace_text(self, new_text: str, hwnd: int, original_text: str = "",
+                      undo_count: int = 1, del_chars: int = 0) -> None:
         import keyboard as kb
 
         self._restore_target_focus(hwnd)
-        # undo_count=0 means the original injection failed — there is nothing of
-        # ours to undo, and Ctrl+Z would destroy the user's own last edit.
-        for _ in range(max(0, undo_count)):
-            kb.send("ctrl+z")
-            time.sleep(0.05)
+        if del_chars > 0:
+            # Live-injected dictation: our text landed as many keystroke bursts, so
+            # a single Ctrl+Z won't cleanly remove it. Delete exactly the characters
+            # we put in (they end at the caret), then inject the replacement.
+            # delete_stream = same-transport deletion (see injector docstring).
+            self.injector.delete_stream(del_chars)
+            time.sleep(0.10)  # let the deletions process before the paste lands
+        else:
+            # undo_count=0 means the original injection failed — there is nothing of
+            # ours to undo, and Ctrl+Z would destroy the user's own last edit.
+            for _ in range(max(0, undo_count)):
+                kb.send("ctrl+z")
+                time.sleep(0.05)
         self.injector.inject(new_text)
         print(f"[App] Replaced with refined text: '{new_text}'")
         if original_text:

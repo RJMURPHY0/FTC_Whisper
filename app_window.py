@@ -1954,6 +1954,9 @@ class AppWindow:
                      "Append a space after each injection (useful for mid-sentence dictation)", False)
         _toggle_card("auto_enter", "Press Enter After Insert",
                      "Send Enter after injecting (useful for chat / search boxes)", False)
+        _toggle_card("live_inject", "Live Typing (Beta)",
+                     "Type each word into the app as you speak instead of all at once. "
+                     "Self-corrects when you finish. Parakeet engine only.", False)
         _toggle_card("warm_mic", "Instant Mic Start",
                      "Keep the microphone warm so recording starts instantly and the "
                      "first word is never clipped (mic indicator stays on; audio is "
