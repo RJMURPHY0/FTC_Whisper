@@ -233,7 +233,9 @@ class AIRefiner:
             return text
 
     def context_fix(self, text: str) -> str:
-        """Fix misheard words using sentence context. Rejects result if word count changes."""
+        """Fix misheard words using sentence context. Rejects the result if word
+        count changes beyond tolerance OR too many words were substituted —
+        a count-only guard silently accepted same-length rewrites."""
         if len(text.split()) < 4:
             return text
         result = self.refine(text, mode="context_fix")
@@ -243,10 +245,23 @@ class AIRefiner:
         # count shifts from legitimate corrections (contractions like
         # "do not"->"don't", hyphenation, split/merged compounds). A strict
         # equality check silently rejected valid fixes.
-        orig_n = len(text.split())
-        new_n = len(result.split())
+        orig_words = text.split()
+        new_words = result.split()
+        orig_n = len(orig_words)
+        new_n = len(new_words)
         tolerance = max(1, round(orig_n * 0.1))
         if abs(new_n - orig_n) > tolerance:
             print(f"[AIRefiner] context_fix rejected: word count changed {orig_n} -> {new_n} (tolerance {tolerance}), using original")
             return text
+        # Substitution guard: the count check alone lets an equal-length rewrite
+        # through untouched. context_fix should touch a few misheard words, never
+        # rework the sentence — reject when more than ~1/3 of words changed.
+        if new_n == orig_n:
+            def _bare(w: str) -> str:
+                return w.strip(".,!?;:\"'").lower()
+            changed = sum(1 for a, b in zip(orig_words, new_words) if _bare(a) != _bare(b))
+            max_changed = max(1, orig_n // 3)
+            if changed > max_changed:
+                print(f"[AIRefiner] context_fix rejected: {changed}/{orig_n} words substituted (max {max_changed}), using original")
+                return text
         return result

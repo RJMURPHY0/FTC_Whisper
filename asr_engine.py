@@ -267,12 +267,24 @@ class ParakeetTranscriber:
         text = text.strip().lstrip(",;: ")
 
         # Custom vocabulary: canonical casing for exact whole-word matches.
+        # Skip terms that collide with everyday English function words — a vocab
+        # entry like "IT" (department) or "US" (country) would otherwise re-case
+        # every ordinary "it is a test" / "call us today" in the dictation.
         for term in (t.strip() for t in (hotwords_str or "").split(",")):
-            if len(term) >= 2:
+            if len(term) >= 2 and term.lower() not in self._VOCAB_CASING_STOPLIST:
                 text = re.sub(
                     rf"\b{re.escape(term)}\b", term, text, flags=re.IGNORECASE
                 )
         return text
+
+    # Common words whose casing must never be forced by the custom vocabulary —
+    # the acronym reading ("IT", "US", "AM", "SO"…) is far rarer in dictation
+    # than the plain English word, so re-casing corrupts correct text.
+    _VOCAB_CASING_STOPLIST = frozenset({
+        "it", "us", "in", "is", "at", "am", "an", "as", "be", "by", "do", "go",
+        "he", "if", "me", "my", "no", "of", "on", "or", "so", "to", "up", "we",
+        "was", "hi", "ok", "all", "and", "the", "for", "but", "not", "you",
+    })
 
     def polish(self, text: str) -> str:
         """Final whole-utterance polish: leading capital + terminal punctuation.

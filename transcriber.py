@@ -171,29 +171,44 @@ class Transcriber:
         print(f"[Transcriber] '{text}'")
         return text
 
+    # Bracketed/symbol tokens can never be dictated speech — safe to strip anywhere.
+    _TOKEN_ARTIFACTS = (
+        "[BLANK_AUDIO]", "[MUSIC]", "[SOUND]", "[NOISE]", "[INAUDIBLE]",
+        "(music)", "(silence)", "(Silence)", "(applause)", "♪",
+    )
+    # Hallucinated SENTENCES appear standalone or as a leading/trailing segment on
+    # silence. They are also perfectly dictatable English — a blind substring
+    # replace() deleted them out of the MIDDLE of real dictation (saying
+    # "Thank you for watching. Please subscribe." transcribed as "" — words the
+    # user actually spoke, silently destroyed). Only strip at the edges.
+    _PHRASE_ARTIFACTS = (
+        "Thank you for watching.", "Thank you for watching!",
+        "Thanks for watching.", "Thanks for watching!",
+        "Please subscribe.",
+    )
+    # "Subtitles by the Amara.org community." style credits — strip only as a
+    # short trailing sentence (few tokens, so a real dictated sentence that
+    # merely starts with these words is left alone), never out of mid-dictation.
+    _CREDIT_RE = re.compile(
+        r"(?:^|(?<=[.!?]\s))(?:Subtitles|Transcribed) by \S+(?:\s+\S+){0,5}\s*$"
+    )
+
     def _post_process(self, text: str) -> str:
         text = text.strip()
-        for artifact in (
-            "[BLANK_AUDIO]",
-            "[MUSIC]",
-            "[SOUND]",
-            "[NOISE]",
-            "[INAUDIBLE]",
-            "(music)",
-            "(silence)",
-            "(Silence)",
-            "(applause)",
-            "...",
-            "♪",
-            "Thank you for watching.",
-            "Thank you for watching!",
-            "Thanks for watching.",
-            "Thanks for watching!",
-            "Please subscribe.",
-            "Subtitles by",
-            "Transcribed by",
-        ):
+        for artifact in self._TOKEN_ARTIFACTS:
             text = text.replace(artifact, "")
+        # "..." mid-sentence: replace with a space, not "" — deleting it merged
+        # the surrounding words ("thought...maybe" -> "thoughtmaybe").
+        text = text.replace("...", " ")
+        text = self._CREDIT_RE.sub("", text.strip())
+        for artifact in self._PHRASE_ARTIFACTS:
+            t = text.strip()
+            if t == artifact:
+                text = ""
+            elif t.startswith(artifact):
+                text = t[len(artifact):]
+            elif t.endswith(artifact):
+                text = t[: -len(artifact)]
         # Strip lines that are just whitespace/punctuation after artifact removal
         text = text.strip(" \t\n.,!")
         # Whisper sometimes outputs a lone full stop on silence — discard it
@@ -206,10 +221,10 @@ class Transcriber:
         # Remove only pure non-word fillers (sounds with no semantic meaning).
         # Do NOT strip words like "like", "so", "actually", "yeah" — the user
         # may have said them intentionally and removing them corrupts the text.
-        # "er" alone is a hesitation; "err" is a real verb ("to err is human"),
-        # so only the single-r form is stripped.
+        # "er" is NOT stripped: it deleted the real word "ER" (emergency room)
+        # and the element symbol "Er" — "I went to the ER" became "I went to the."
         fillers = (
-            r"\bum+\b", r"\buh+\b", r"\ber\b", r"\berm+\b", r"\bhmm+\b", r"\bmhm+\b",
+            r"\bum+\b", r"\buh+\b", r"\berm+\b", r"\bhmm+\b", r"\bmhm+\b",
         )
         for filler in fillers:
             text = re.sub(filler, "", text, flags=re.IGNORECASE)

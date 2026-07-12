@@ -321,7 +321,12 @@ def _post_wm_char(text: str) -> tuple[int, int]:
         if ok:
             posted += 1
         else:
-            failed += 1
+            # Stop at the FIRST failed post: continuing would leave holes in the
+            # middle of the landed text ("I like ice cr" + later chars landing
+            # after the gap). Stopping keeps what landed a clean prefix of the
+            # chunk, which the live-inject reconcile can converge safely.
+            failed = len(text) - posted
+            break
     if failed:
         print(f"[Injector] WM_CHAR posted={posted} failed={failed}")
     return posted, failed
@@ -778,16 +783,24 @@ class Injector:
 
         def _do():
             global _orig_pending
-            time.sleep(0.45)  # 0.45s: enough for slow Chrome tabs to process the paste
+            # 1.5s: a busy Chrome renderer / RDP session can service the Ctrl+V
+            # paste event well after our keystroke lands. Restoring at 0.45s LOST
+            # that race — the app read the clipboard after the restore and pasted
+            # the user's OLD clipboard content instead of the dictation ("said X,
+            # typed something else entirely"). The gen guard makes a longer delay
+            # free: any newer paste supersedes this restore.
+            time.sleep(1.5)
+            # Hold the lock across check AND write: a check-then-unlocked-write
+            # let a newer paste's verified clipboard get clobbered between its
+            # readback and its Ctrl+V being serviced.
             with _clip_lock:
                 if _clip_gen != gen:
                     return  # a newer paste superseded us — it carries the original now
-            try:
-                Injector._clipboard_set(original, bump=False)
-            except Exception:
-                pass
-            finally:
-                with _clip_lock:
+                try:
+                    Injector._clipboard_set(original, bump=False)
+                except Exception:
+                    pass
+                finally:
                     _orig_pending = None
 
         threading.Thread(target=_do, daemon=True).start()

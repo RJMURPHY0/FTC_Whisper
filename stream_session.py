@@ -239,6 +239,15 @@ class StreamingSession:
         new_words = locked[n_have:]
         if not new_words:
             return
+        if n_have == 0 and new_words[0] and new_words[0][0].islower():
+            # Mirror polish()'s leading capital NOW: finalize() capitalises the
+            # first word, and a byte-exact reconcile prefix-compare means a
+            # lowercase live first char would force a FULL delete+retype of the
+            # whole dictation (the exact "typed twice / truncated" corruption
+            # when a transport drops keys). Capitalising here collapses the
+            # reconcile to appending the terminal period. Agreement compares
+            # via _norm_word (case-folded), so this never breaks the prefix check.
+            new_words = [new_words[0][0].upper() + new_words[0][1:], *new_words[1:]]
         chunk = (" " if self._injected_text else "") + " ".join(new_words)
         ok = False
         try:
