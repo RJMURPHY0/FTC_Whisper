@@ -26,9 +26,18 @@ Output: `dist\FTC Whisper.exe`. Before building, bump `APP_VERSION` in `app.py` 
 1. Bump `APP_VERSION` in `app.py` (e.g. `"1.0.7"`)
 2. Update all four version fields in `version_info.txt` to match
 3. Commit and push to `main`
-4. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`
-5. `.github/workflows/build-release.yml` builds, **code-signs via Azure Trusted
-   Signing**, and publishes `FTC-Whisper.exe` to the `vX.Y.Z` release automatically.
+
+That's it — `.github/workflows/build-release.yml` now **auto-releases on a version
+bump**: a cheap `check` job reads `APP_VERSION`, and if no release for that version
+exists yet it runs the full Windows build, **code-signs via Azure Trusted Signing**,
+and publishes `FTC-Whisper.exe` to a `vX.Y.Z` release (creating the tag at that
+commit). A push to main with an UNCHANGED version is a no-op (the check job exits in
+seconds). The updater checks GitHub **Releases**, not commits — before this,
+pushing to main shipped nothing the app could see, so it kept reporting "up to date".
+
+Explicit tag push (`git tag vX.Y.Z && git push origin vX.Y.Z`) and manual
+`workflow_dispatch` still force a build — use them to re-cut a version if a build
+failed after the tag was already created.
 
 **Do NOT build locally and upload by hand for public releases** — code signing
 only runs in CI (see `docs/CODE_SIGNING.md`), so a hand-built exe ships unsigned

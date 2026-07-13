@@ -1,7 +1,15 @@
 name: Build and publish Windows installer
 
+# Publishes a signed release from EITHER path:
+#   1. Pushing a version tag  (git tag vX.Y.Z && git push origin vX.Y.Z) — always builds.
+#   2. Pushing a commit to main that bumps APP_VERSION — auto-builds when no
+#      release for that version exists yet. This closes the gap where "push to
+#      main" shipped code the auto-updater never saw (it checks GitHub Releases,
+#      not commits), so the app kept reporting the old version as "up to date".
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
@@ -10,7 +18,43 @@ permissions:
   contents: write
 
 jobs:
+  # Cheap gate (seconds on Linux) so an ordinary main push with no version bump
+  # doesn't spin up the heavy Windows build. Outputs the version + a go/no-go.
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.decide.outputs.VERSION }}
+      should_release: ${{ steps.decide.outputs.GO }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Decide whether to release
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(python3 -c "import re; print(re.search(r'APP_VERSION = \"(.+?)\"', open('app.py').read()).group(1))")
+          echo "APP_VERSION=$VERSION"
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          # Explicit tag push or manual dispatch always builds.
+          if [[ "${GITHUB_REF}" == refs/tags/* || "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "Explicit release trigger (${GITHUB_EVENT_NAME} ${GITHUB_REF})."
+            echo "GO=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Branch push: build only if this version has no published release yet.
+          # Checking the RELEASE (not just the tag) means a previously FAILED
+          # build self-heals on the next push instead of being locked out.
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release v$VERSION already published — nothing to do."
+            echo "GO=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "No release for v$VERSION yet — building and publishing."
+            echo "GO=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build-windows:
+    needs: check
+    if: ${{ needs.check.outputs.should_release == 'true' }}
     runs-on: windows-latest
 
     steps:
