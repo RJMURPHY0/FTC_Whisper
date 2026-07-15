@@ -15,8 +15,17 @@ History tab falls back to the generic tile.
 
 import ctypes
 import ctypes.wintypes as wt
+import os
+import re
+import sys
 
-_ICON_SIZE = 26  # rendered size in the history row
+_ICON_SIZE = 36  # rendered size in the history row (fills the row height; the
+                 # header's reduced pady keeps the row the same 44px tall)
+
+# Base dir for bundled assets — sys._MEIPASS in a frozen build, else this file's
+# folder (same pattern as logo_cache.py).
+_BASE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+_BRAND_DIR = os.path.join(_BASE_DIR, "assets", "brand_icons")
 
 # Explicit signature — ExtractIconExW has HICON* out-params that must be full
 # pointer width on 64-bit Windows; without argtypes ctypes can mis-marshal the
@@ -30,6 +39,20 @@ try:
     _ExtractIconExW.restype = ctypes.c_uint
 except Exception:
     _ExtractIconExW = None
+
+# PrivateExtractIconsW lets us request an EXACT pixel size — it picks the best
+# embedded icon frame (modern exes ship 48px and 256px variants) and returns a
+# handle at that size, so a 48px extraction stays crisp when downsampled to the
+# 36px row icon. ExtractIconEx/SHGetFileInfo only give the 32px system size.
+try:
+    _PrivateExtractIconsW = ctypes.windll.user32.PrivateExtractIconsW
+    _PrivateExtractIconsW.argtypes = [
+        wt.LPCWSTR, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.POINTER(wt.HICON), ctypes.POINTER(wt.UINT), wt.UINT, wt.DWORD,
+    ]
+    _PrivateExtractIconsW.restype = wt.UINT
+except Exception:
+    _PrivateExtractIconsW = None
 
 # exe stem (lowercased) -> friendly display name
 _KNOWN_APPS = {
@@ -294,8 +317,33 @@ def _extract_via_extracticon(exe_path: str):
         return None
 
 
+def _extract_via_private(exe_path: str, size: int = 48):
+    """exe path -> RGBA PIL image via PrivateExtractIconsW at an exact size.
+    Best crispness source for native exes. Returns None on failure."""
+    if _PrivateExtractIconsW is None:
+        return None
+    try:
+        hicon = wt.HICON()
+        iconid = wt.UINT()
+        n = _PrivateExtractIconsW(
+            exe_path, 0, size, size,
+            ctypes.byref(hicon), ctypes.byref(iconid), 1, 0)
+        if not n or not hicon.value:
+            return None
+        try:
+            return _hicon_to_pil(hicon, size)
+        finally:
+            ctypes.windll.user32.DestroyIcon(hicon)
+    except Exception:
+        return None
+
+
 def _extract_exe_icon(exe_path: str):
     """exe path -> RGBA PIL image, or None."""
+    # Prefer an exact 48px extraction (crispest when downscaled to the row size).
+    img = _extract_via_private(exe_path, 48)
+    if img is not None:
+        return img
     try:
         SHGFI_ICON = 0x100
         SHGFI_LARGEICON = 0x0
@@ -337,6 +385,186 @@ def get_app_icon(exe_path: str, bg: str):
     except Exception:
         photo = None
     _icon_cache[key] = photo
+    return photo
+
+
+# ── Bundled brand icons (real app/service logos) ─────────────────────────────
+# Highest-fidelity source: a curated pack of real favicons/logos keyed by the
+# captured app_name. This is the ONLY way to show the correct icon for a
+# browser-hosted web app (Claude, ChatGPT, Gemini, Gmail…) — there the captured
+# exe is the browser, so exe-icon extraction can only ever yield the browser's
+# icon. For native apps not in this pack, exe extraction still applies.
+_brand_icon_cache: dict = {}  # (slug, bg) -> PhotoImage | None
+
+# Rendering tunables for brand icons (see get_brand_icon):
+_BRAND_TILE_OPAQUE = 0.72   # ≥ this opaque fraction ⇒ treat as full-bleed tile
+_BRAND_RADIUS = 0.225       # corner radius as a fraction of the tile size
+_BRAND_GLYPH_SCALE = 0.82   # floating glyphs occupy this fraction of the cell
+
+# Textual app_name (lowercased) -> icon slug (a file assets/brand_icons/<slug>.png).
+# Keys cover the names produced by _KNOWN_APPS values AND browser tab labels.
+_BRAND_ALIASES = {
+    "claude": "claude", "claude ai": "claude",
+    "chatgpt": "chatgpt", "chat gpt": "chatgpt", "openai": "openai",
+    "gemini": "gemini", "google gemini": "gemini", "bard": "gemini",
+    "copilot": "copilot", "microsoft copilot": "copilot",
+    "perplexity": "perplexity", "perplexity ai": "perplexity",
+    "antigravity": "antigravity", "google antigravity": "antigravity",
+    "cursor": "cursor",
+    "notion": "notion",
+    "slack": "slack",
+    "discord": "discord",
+    "telegram": "telegram",
+    "whatsapp": "whatsapp", "whatsapp web": "whatsapp",
+    "gmail": "gmail", "google mail": "gmail",
+    "outlook": "outlook", "outlook web": "outlook",
+    "teams": "teams", "microsoft teams": "teams",
+    "github": "github",
+    "gitlab": "gitlab",
+    "linear": "linear",
+    "figma": "figma",
+    "spotify": "spotify",
+    "youtube": "youtube",
+    "reddit": "reddit",
+    "linkedin": "linkedin",
+    "stack overflow": "stackoverflow", "stackoverflow": "stackoverflow",
+    "zoom": "zoom",
+    "trello": "trello",
+    "asana": "asana",
+    "atlassian": "atlassian", "jira": "atlassian", "confluence": "atlassian",
+    "google docs": "docs", "docs": "docs",
+    "google drive": "drive", "drive": "drive",
+}
+
+# Slugs we actually shipped a PNG for (guards a name mapping to a missing file).
+try:
+    _BRAND_SLUGS = {f[:-4] for f in os.listdir(_BRAND_DIR) if f.endswith(".png")}
+except Exception:
+    _BRAND_SLUGS = set()
+
+
+def _brand_slug(app_name: str) -> str:
+    """Map a captured app_name to a bundled icon slug, or '' if none."""
+    n = (app_name or "").strip().lower()
+    if not n:
+        return ""
+    slug = _BRAND_ALIASES.get(n, "")
+    if slug and slug in _BRAND_SLUGS:
+        return slug
+    # Fall back to a compacted form matching a shipped file directly
+    # (e.g. "Cursor" -> "cursor", "GitLab" -> "gitlab").
+    compact = re.sub(r"[^a-z0-9]", "", n)
+    if compact in _BRAND_SLUGS:
+        return compact
+    return ""
+
+
+def get_brand_icon(app_name: str, bg: str):
+    """Real bundled logo for a known app/service, composited onto bg. None if the
+    app isn't in the curated pack. Caller keeps the reference; the cache does."""
+    slug = _brand_slug(app_name)
+    if not slug:
+        return None
+    key = (slug, bg)
+    if key in _brand_icon_cache:
+        return _brand_icon_cache[key]
+    photo = None
+    try:
+        from PIL import Image, ImageDraw, ImageChops, ImageTk
+        big = _ICON_SIZE * 4  # render 4x, downsample for smooth corners/edges
+        src = Image.open(os.path.join(_BRAND_DIR, slug + ".png")).convert("RGBA")
+        # Two visually distinct favicon shapes need different handling so every
+        # row reads at a CONSISTENT optical size:
+        #   • full-bleed colour tile (Claude, Outlook, ChatGPT) → fill the cell
+        #     and round the corners (iOS/app-icon look).
+        #   • floating glyph on transparency (Antigravity, Gemini, Slack) →
+        #     trim to the mark, then scale it to a fixed fraction of the cell so
+        #     a tall mark (Antigravity's "A") no longer towers over the tiles.
+        alpha = src.split()[3]
+        opaque_frac = alpha.histogram()[255] / float(src.size[0] * src.size[1])
+        canvas = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+        if opaque_frac >= _BRAND_TILE_OPAQUE:
+            tile = src.resize((big, big), Image.LANCZOS)
+            mask = Image.new("L", (big, big), 0)
+            ImageDraw.Draw(mask).rounded_rectangle(
+                [0, 0, big - 1, big - 1], radius=int(big * _BRAND_RADIUS), fill=255)
+            r, g, b, a = tile.split()
+            tile.putalpha(ImageChops.multiply(a, mask))
+            canvas.alpha_composite(tile)
+        else:
+            bb = src.getbbox()
+            if bb:
+                src = src.crop(bb)
+            w, h = src.size
+            scale = (_BRAND_GLYPH_SCALE * big) / max(w, h)
+            nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
+            glyph = src.resize((nw, nh), Image.LANCZOS)
+            canvas.alpha_composite(glyph, ((big - nw) // 2, (big - nh) // 2))
+        icon = canvas.resize((_ICON_SIZE, _ICON_SIZE), Image.LANCZOS)
+        base = Image.new("RGBA", icon.size, bg)
+        base.alpha_composite(icon)
+        photo = ImageTk.PhotoImage(base.convert("RGB"))
+    except Exception:
+        photo = None
+    _brand_icon_cache[key] = photo
+    return photo
+
+
+_monogram_cache: dict = {}  # (letter, bg) -> PhotoImage | None
+
+# Stable, pleasant tile colours picked by hashing the app name — so "Claude"
+# is always the same colour, "Outlook" another, etc.
+_MONOGRAM_COLORS = [
+    "#f39200",  # FTC orange
+    "#4a7edb", "#3fae6f", "#c85c9e", "#d9534f", "#6f6fd6",
+    "#2fa8a8", "#e0a52e", "#8a6fd6", "#5c8a3f", "#d67f4a",
+]
+
+
+def get_monogram_icon(app_name: str, bg: str):
+    """Coloured rounded tile with the app's initial(s) — used when the real exe
+    icon can't be extracted but we DO know the app name (e.g. 'Claude'). Keeps
+    every history row visually identifiable instead of showing a generic tile.
+    None on failure. Caller keeps the reference; the cache does that."""
+    name = (app_name or "").strip()
+    if not name:
+        return None
+    letter = name[0].upper()
+    key = (letter, bg)
+    if key in _monogram_cache:
+        return _monogram_cache[key]
+    photo = None
+    try:
+        from PIL import Image, ImageDraw, ImageFont, ImageTk
+        # Deterministic colour from the name (no randomness — same app, same hue).
+        color = _MONOGRAM_COLORS[sum(ord(c) for c in name) % len(_MONOGRAM_COLORS)]
+        s = _ICON_SIZE * 4  # draw 4x, downsample for smooth corners/text
+        img = Image.new("RGBA", (s, s), bg)
+        d = ImageDraw.Draw(img)
+        d.rounded_rectangle([0, 0, s - 1, s - 1], radius=s // 4, fill=color)
+        font = None
+        for _fname in ("segoeui.ttf", "arialbd.ttf", "arial.ttf"):
+            try:
+                font = ImageFont.truetype(_fname, int(s * 0.55))
+                break
+            except Exception:
+                continue
+        if font is None:
+            font = ImageFont.load_default()
+        try:
+            bbox = d.textbbox((0, 0), letter, font=font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            tx = (s - tw) / 2 - bbox[0]
+            ty = (s - th) / 2 - bbox[1]
+        except Exception:
+            tw, th = d.textsize(letter, font=font)  # Pillow <8 fallback
+            tx, ty = (s - tw) / 2, (s - th) / 2
+        d.text((tx, ty), letter, fill="#ffffff", font=font)
+        img = img.resize((_ICON_SIZE, _ICON_SIZE), Image.LANCZOS)
+        photo = ImageTk.PhotoImage(img.convert("RGB"))
+    except Exception:
+        photo = None
+    _monogram_cache[key] = photo
     return photo
 
 

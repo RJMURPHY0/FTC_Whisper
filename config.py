@@ -53,7 +53,7 @@ class Config:
 
     hotkey: str = "alt+v"
     refine_hotkey: str = "alt+r"
-    mode: str = "hold"  # "hold" or "toggle"
+    mode: str = "toggle"  # "hold" or "toggle" — toggle is the default (press to start/stop)
     whisper_model: str = "small.en"  # accurate/upgrade model; was "base" (same size as the fast pass = no accuracy gain). tiny, base, small, medium, large-v3, large-v3-turbo
     language: str = "en"
     sample_rate: int = 16000

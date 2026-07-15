@@ -14,10 +14,13 @@ from typing import Callable, Optional
 import ctypes
 
 try:
-    from app_icons import get_app_icon, get_fallback_icon
+    from app_icons import (get_app_icon, get_brand_icon,
+                           get_monogram_icon, get_fallback_icon)
 except Exception:
-    get_app_icon = lambda *a, **k: None       # noqa: E731
-    get_fallback_icon = lambda *a, **k: None  # noqa: E731
+    get_app_icon = lambda *a, **k: None        # noqa: E731
+    get_brand_icon = lambda *a, **k: None      # noqa: E731
+    get_monogram_icon = lambda *a, **k: None   # noqa: E731
+    get_fallback_icon = lambda *a, **k: None   # noqa: E731
 
 # ── Dark colour palette ───────────────────────────────────────────────────────
 C = {
@@ -1353,12 +1356,24 @@ class AppWindow:
         row.pack(fill="x")
 
         header = tk.Frame(row, bg=C["surface"])
-        header.pack(fill="x", padx=10, pady=8)
+        # pady 4 (was 8): the 36px icon now spans the row's vertical space that
+        # the old padding used to occupy, so the row height is unchanged (44px)
+        # and the two-line text block keeps the same distance to the row edge.
+        header.pack(fill="x", padx=10, pady=4)
 
         # App icon (real exe icon; generic tile for pre-capture rows).
         # Two variants per exe — normal and hover row background.
-        icon_n = get_app_icon(app_exe, C["surface"]) or get_fallback_icon(C["surface"])
-        icon_h = get_app_icon(app_exe, C["surface_hover"]) or get_fallback_icon(C["surface_hover"])
+        # Fidelity order: real bundled brand logo (only way to get the correct
+        # icon for a browser-hosted web app) → real exe icon (native apps) →
+        # coloured monogram → generic tile.
+        icon_n = (get_brand_icon(app_name, C["surface"])
+                  or get_app_icon(app_exe, C["surface"])
+                  or get_monogram_icon(app_name, C["surface"])
+                  or get_fallback_icon(C["surface"]))
+        icon_h = (get_brand_icon(app_name, C["surface_hover"])
+                  or get_app_icon(app_exe, C["surface_hover"])
+                  or get_monogram_icon(app_name, C["surface_hover"])
+                  or get_fallback_icon(C["surface_hover"]))
         icon_lbl = tk.Label(header, bg=C["surface"])
         if icon_n is not None:
             icon_lbl.configure(image=icon_n)

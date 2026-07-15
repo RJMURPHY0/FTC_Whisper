@@ -79,6 +79,16 @@ datas += [
     (_build_cfg, '.'),
 ]
 
+# ── Brand icon pack (real app/service logos for the History list) ────────────
+# Bundled under assets/brand_icons/ — app_icons.get_brand_icon() resolves them
+# via sys._MEIPASS/assets/brand_icons at runtime.
+import glob as _glob
+_brand_dir = os.path.join(APP_DIR, 'assets', 'brand_icons')
+_brand_pngs = _glob.glob(os.path.join(_brand_dir, '*.png'))
+for _p in _brand_pngs:
+    datas.append((_p, os.path.join('assets', 'brand_icons')))
+print(f"[spec] Bundling {len(_brand_pngs)} brand icons from assets/brand_icons")
+
 # ── Extra hidden imports that PyInstaller often misses ───────────────────────
 hiddenimports += [
     'tkinter', 'tkinter.ttk', 'tkinter.messagebox', 'tkinter.simpledialog',
