@@ -1415,61 +1415,54 @@ class AppWindow:
         copy_cv.bind("<Leave>", lambda _e: (copy_state.update(fg=C["subtext"]),
                                             _draw_copy()))
 
-        # Time label doubles as the delete control: hovering it swaps the
-        # timestamp for a bin icon; clicking asks Yes/No inline, then the row
-        # vanishes immediately (Supabase row follows 30 days later).
+        # Timestamp (display only).
         time_lbl = tk.Label(header, text=time_str, fg=C["subtext"],
                             bg=C["surface"], font=("Segoe UI", 8), width=5)
         time_lbl.pack(side="right", padx=(6, 0))
         confirming = [False]
 
-        def _time_enter(_e=None):
-            if not confirming[0]:
-                time_lbl.configure(text="🗑", fg=C["error"], cursor="hand2")
+        # Delete control — a clean line-art trash-can (drawn, not an emoji). It
+        # is HIDDEN by default and appears (left of the timestamp) only while the
+        # row is hovered. Clicking it expands the row so the full text is visible
+        # and drops a clear "Delete this transcription?  Delete / Cancel" bar
+        # underneath. Delete removes the row from the UI immediately (the
+        # Supabase row follows 30 days later).
+        del_cv = tk.Canvas(header, width=22, height=22, bg=C["surface"],
+                           highlightthickness=0, bd=0, cursor="hand2")
+        # NOT packed here — on hover it REPLACES the timestamp in its slot.
+        del_state = {"bg": C["surface"], "fg": C["subtext"]}
 
-        def _time_leave(_e=None):
-            if not confirming[0]:
-                time_lbl.configure(text=time_str, fg=C["subtext"])
+        def _draw_trash():
+            del_cv.delete("all")
+            del_cv.configure(bg=del_state["bg"])
+            c = del_state["fg"]
+            # handle + lid
+            del_cv.create_line(8, 5, 14, 5, fill=c, width=2, capstyle="round")
+            del_cv.create_line(4, 7, 18, 7, fill=c, width=2, capstyle="round")
+            # bucket body (rounded bottom)
+            del_cv.create_line(6, 8, 7, 17, 15, 17, 16, 8, fill=c, width=2,
+                               capstyle="round", joinstyle="round")
+            # inner stripes
+            for x in (9, 11, 13):
+                del_cv.create_line(x, 9, x, 15, fill=c, width=1,
+                                   capstyle="round")
+        _draw_trash()
 
-        def _do_delete():
-            def _worker():
-                try:
-                    if self._db:
-                        self._db.delete_transcription(item)
-                except Exception as e:
-                    print(f"[History] Delete failed: {e}")
-            threading.Thread(target=_worker, daemon=True).start()
-            try:
-                self._hist_all.remove(item)
-            except ValueError:
-                pass
-            self._render_history()
-
-        def _cancel_delete():
-            confirming[0] = False
-            for w in (yes_lbl, no_lbl):
-                w.pack_forget()
-            time_lbl.configure(text=time_str, fg=C["subtext"])
-            time_lbl.pack(side="right", padx=(6, 0))
-
-        yes_lbl = tk.Label(header, text="Yes", fg=C["error"], bg=C["surface"],
-                           font=("Segoe UI", 8, "bold"), cursor="hand2")
-        no_lbl = tk.Label(header, text="No", fg=C["subtext"], bg=C["surface"],
-                          font=("Segoe UI", 8, "bold"), cursor="hand2")
-        yes_lbl.bind("<Button-1>", lambda _e: _do_delete())
-        no_lbl.bind("<Button-1>", lambda _e: _cancel_delete())
-
-        def _time_click(_e=None):
-            if confirming[0]:
+        def _show_bin():
+            # Bin REPLACES the timestamp in its slot (packed right after the
+            # copy icon so it keeps the timestamp's priority over the text
+            # column — this is why it shows even on long-text rows, where a
+            # last-packed widget would be clipped out of the full header).
+            if confirming[0] or del_cv.winfo_ismapped():
                 return
-            confirming[0] = True
             time_lbl.pack_forget()
-            no_lbl.pack(side="right", padx=(4, 0))
-            yes_lbl.pack(side="right", padx=(8, 0))
+            del_cv.pack(side="right", padx=(6, 0), after=copy_cv)
 
-        time_lbl.bind("<Button-1>", _time_click)
-        time_lbl.bind("<Enter>", _time_enter, add="+")
-        time_lbl.bind("<Leave>", _time_leave, add="+")
+        def _hide_bin():
+            if del_cv.winfo_ismapped():
+                del_cv.pack_forget()
+            if not confirming[0] and not time_lbl.winfo_ismapped():
+                time_lbl.pack(side="right", padx=(6, 0), after=copy_cv)
 
         mid = tk.Frame(header, bg=C["surface"])
         mid.pack(side="left", fill="x", expand=True)
@@ -1494,21 +1487,100 @@ class AppWindow:
         detail_lbl.pack(fill="x", padx=(46, 10), pady=(0, 10))
         expanded = [False]
 
+        def _expand():
+            if expanded[0]:
+                return
+            prev_lbl.pack_forget()      # avoid showing the text twice
+            detail.pack(fill="x", after=header)
+            expanded[0] = True
+
+        def _collapse():
+            if not expanded[0]:
+                return
+            detail.pack_forget()
+            if app_lbl is not None:
+                prev_lbl.pack(fill="x", before=app_lbl)
+            else:
+                prev_lbl.pack(fill="x")
+            expanded[0] = False
+
+        def _toggle(_e=None):
+            if confirming[0]:
+                return  # ignore row clicks while the confirm bar is open
+            _collapse() if expanded[0] else _expand()
+
+        # Inline confirm controls — clicking the bin shows "Cancel  Delete" in
+        # the header, just LEFT of the timestamp. They're packed with the
+        # timestamp's layout priority so they never clip on long-text rows; the
+        # row still expands so the full text being deleted stays visible.
+        cancel_lbl = tk.Label(header, text="Cancel", fg=C["subtext"],
+                              bg=C["surface"], font=("Segoe UI", 9),
+                              cursor="hand2")
+
+        def _do_delete(_e=None):
+            def _worker():
+                try:
+                    if self._db:
+                        self._db.delete_transcription(item)
+                except Exception as e:
+                    print(f"[History] Delete failed: {e}")
+            threading.Thread(target=_worker, daemon=True).start()
+            try:
+                self._hist_all.remove(item)
+            except ValueError:
+                pass
+            self._render_history()
+
+        del_btn = RoundedButton(header, text="Delete", fg=C["bg"],
+                                fill=C["error"], font=("Segoe UI", 9, "bold"),
+                                padx=12, pady=4, command=_do_delete)
+
+        def _cancel(_e=None):
+            confirming[0] = False
+            del_btn.pack_forget()
+            cancel_lbl.pack_forget()
+            _collapse()
+            _set_bg(C["surface"])
+
+        cancel_lbl.bind("<Button-1>", _cancel)
+
+        def _start_confirm(_e=None):
+            if confirming[0]:
+                return
+            _hide_bin()                    # bin away, timestamp back in its slot
+            confirming[0] = True
+            _expand()                      # show all the text being deleted
+            # Order left→right: Cancel, Delete, timestamp. Packed after the
+            # timestamp so they land immediately to its left with priority.
+            del_btn.pack(side="right", after=time_lbl, padx=(0, 6))
+            cancel_lbl.pack(side="right", after=del_btn, padx=(0, 8))
+            _set_bg(C["surface"])          # drop the hover highlight
+
+        del_cv.bind("<Button-1>", _start_confirm)
+
         hover_widgets = [row, header, icon_lbl, mid, prev_lbl, time_lbl,
-                         yes_lbl, no_lbl, detail, detail_lbl] \
+                         detail, detail_lbl, cancel_lbl] \
             + ([app_lbl] if app_lbl else [])
 
         def _set_bg(bg: str):
+            if confirming[0]:
+                bg = C["surface"]          # no hover highlight during confirm
+            hover = (bg == C["surface_hover"])
             for w in hover_widgets:
                 try:
                     w.configure(bg=bg)
                 except tk.TclError:
                     return  # row destroyed mid-hover (refresh/search)
             if icon_n is not None:
-                icon_lbl.configure(
-                    image=icon_h if bg == C["surface_hover"] else icon_n)
+                icon_lbl.configure(image=icon_h if hover else icon_n)
             copy_state["bg"] = bg
             _draw_copy()
+            del_state["bg"] = bg
+            _draw_trash()
+            # The bin replaces the timestamp only while the row is hovered
+            # (and not mid-confirm).
+            if not confirming[0]:
+                _show_bin() if hover else _hide_bin()
 
         def _on_enter(_e=None):
             _set_bg(C["surface_hover"])
@@ -1528,32 +1600,20 @@ class AppWindow:
                     _set_bg(C["surface"])
             row.after(1, _check)
 
-        def _toggle(_e=None):
-            if expanded[0]:
-                # Collapse: drop the full-text detail and bring the one-line
-                # preview back (above the app name, where it started).
-                detail.pack_forget()
-                if app_lbl is not None:
-                    prev_lbl.pack(fill="x", before=app_lbl)
-                else:
-                    prev_lbl.pack(fill="x")
-            else:
-                # Expand: hide the truncated preview so the full text below is
-                # not shown twice — one block of text per state.
-                prev_lbl.pack_forget()
-                detail.pack(fill="x", after=header)
-            expanded[0] = not expanded[0]
-
         for w in [row, header, icon_lbl, mid, prev_lbl] + \
                  ([app_lbl] if app_lbl else []):
             w.bind("<Enter>", _on_enter)
             w.bind("<Leave>", _on_leave)
             w.configure(cursor="hand2")
             w.bind("<Button-1>", _toggle)
-        # time_lbl keeps its own bin-icon hover handlers (bound above with
-        # add="+") — row hover is added alongside, not instead.
+        # time_lbl and the trash canvas keep row-hover alongside their own
+        # handlers. The bin turns red on direct hover as a delete affordance.
         time_lbl.bind("<Enter>", _on_enter, add="+")
         time_lbl.bind("<Leave>", _on_leave, add="+")
+        del_cv.bind("<Enter>", lambda _e: (del_state.update(fg=C["error"]),
+                                           _draw_trash(), _on_enter()))
+        del_cv.bind("<Leave>", lambda _e: (del_state.update(fg=C["subtext"]),
+                                           _draw_trash(), _on_leave()))
         detail_lbl.bind("<Enter>", _on_enter)
         detail_lbl.bind("<Leave>", _on_leave)
         detail_lbl.bind("<Button-1>", _toggle)
