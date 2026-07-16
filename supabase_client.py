@@ -24,6 +24,16 @@ def _local_history_path() -> str:
     return os.path.join(folder, "history.json")
 
 
+def _tombstones_path() -> str:
+    return os.path.join(os.path.dirname(_local_history_path()),
+                        "history-tombstones.json")
+
+
+# Days a deleted transcription stays in Supabase before the actual remote
+# delete happens (deletes are immediate in the UI, deferred remotely).
+_TOMBSTONE_GRACE_DAYS = 30
+
+
 class SupabaseLogger:
     def __init__(self, url: str, key: str):
         self._url = url
@@ -152,16 +162,25 @@ class SupabaseLogger:
     def fetch_history(self, limit: int = 30) -> list:
         """Fetch recent transcriptions (synchronous, 10 s timeout).
         Falls back to the local history file if Supabase is unavailable or empty."""
-        if not self._enabled:
-            return self._fetch_local(limit)
+        # Opportunistic upkeep: remote-delete tombstones past their 30-day grace.
+        threading.Thread(target=self._purge_expired_tombstones,
+                         daemon=True, name="tombstone-purge").start()
+
+        # Remote history is strictly per-account. Without an authenticated
+        # user an unfiltered query would return EVERY user's transcriptions —
+        # so signed-out sessions read only the local file.
+        if (not self._enabled or not self._user_id
+                or self._user_id == "local"):
+            return self._filter_tombstoned(self._fetch_local(limit))
 
         result: list = [None]
         error: list = [None]
 
         def _fetch() -> None:
-            # Try with the app columns first; fall back to the legacy column
-            # set if the remote table doesn't have them yet.
+            # Try with id + app columns first; fall back for remote tables
+            # that don't have the newer columns yet.
             for cols in (
+                "id, transcribed_text, refined_text, created_at, app_name, app_exe",
                 "transcribed_text, refined_text, created_at, app_name, app_exe",
                 "transcribed_text, refined_text, created_at",
             ):
@@ -170,11 +189,10 @@ class SupabaseLogger:
                         self._get_client()
                         .table(_TABLE)
                         .select(cols)
+                        .eq("user_id", self._user_id)
                         .order("created_at", desc=True)
                         .limit(limit)
                     )
-                    if self._user_id and self._user_id != "local":
-                        q = q.eq("user_id", self._user_id)
                     result[0] = q.execute().data or []
                     error[0] = None
                     return
@@ -187,13 +205,13 @@ class SupabaseLogger:
 
         if t.is_alive():
             print("[Supabase] Fetch history timed out — using local history")
-            return self._fetch_local(limit)
+            return self._filter_tombstoned(self._fetch_local(limit))
         if error[0]:
             print(f"[Supabase] Fetch history failed: {error[0]} — using local history")
-            return self._fetch_local(limit)
+            return self._filter_tombstoned(self._fetch_local(limit))
         if not result[0]:
-            return self._fetch_local(limit)
-        return self._enrich_from_local(result[0])
+            return self._filter_tombstoned(self._fetch_local(limit))
+        return self._filter_tombstoned(self._enrich_from_local(result[0]))
 
     def _enrich_from_local(self, remote: list) -> list:
         """Fill in app_name/app_exe from the local file for remote rows that
@@ -230,25 +248,169 @@ class SupabaseLogger:
         return remote
 
     def clear_history(self) -> bool:
-        """Delete all transcription records for the current user AND the local
-        history file. Returns True if anything was cleared. (Clearing only the
-        remote left fetch_history falling back to the untouched local file, so
-        'Clear' visibly did nothing.)"""
+        """Soft-clear: history disappears from the app immediately; the actual
+        Supabase rows are deleted after a 30-day grace period (tombstone),
+        so an accidental clear is recoverable server-side."""
         local_ok = self._clear_local()
-        if not self._enabled:
-            return local_ok
-        if not self._user_id or self._user_id == "local":
-            print("[Supabase] Remote clear skipped: no authenticated user_id")
-            return local_ok
+        now = datetime.datetime.now(datetime.timezone.utc)
+        stone = {
+            "all_before": now.isoformat(),
+            "purge_after": (now + datetime.timedelta(
+                days=_TOMBSTONE_GRACE_DAYS)).isoformat(),
+        }
+        if self._user_id and self._user_id != "local":
+            stone["user_id"] = self._user_id
+        self._add_tombstone(stone)
+        return local_ok or True
+
+    def delete_transcription(self, item: dict) -> bool:
+        """Soft-delete one transcription: removed from the app immediately,
+        deleted from Supabase after the 30-day grace period."""
+        text = item.get("transcribed_text") or ""
+        created = item.get("created_at") or ""
+        now = datetime.datetime.now(datetime.timezone.utc)
+        stone = {
+            "id": item.get("id"),
+            "text": text,
+            "created_at": created,
+            "purge_after": (now + datetime.timedelta(
+                days=_TOMBSTONE_GRACE_DAYS)).isoformat(),
+        }
+        if self._user_id and self._user_id != "local":
+            stone["user_id"] = self._user_id
+        self._add_tombstone(stone)
+        # Remove from the local history file too.
         try:
-            q = self._get_client().table(_TABLE).delete()
-            q = q.eq("user_id", self._user_id)
-            q.execute()
-            print("[Supabase] History cleared.")
-            return True
+            path = _local_history_path()
+            with _local_history_lock:
+                if os.path.exists(path):
+                    with open(path, "r", encoding="utf-8") as f:
+                        entries = json.load(f)
+                    entries = [e for e in entries
+                               if not (e.get("transcribed_text") == text
+                                       and e.get("created_at") == created)]
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(entries, f, ensure_ascii=False)
         except Exception as e:
-            print(f"[Supabase] Clear history failed: {e}")
-            return local_ok
+            print(f"[LocalHistory] Delete failed: {e}")
+        return True
+
+    # ── Tombstones (deferred remote deletes) ──────────────────────────
+
+    def _load_tombstones(self) -> list:
+        try:
+            path = _tombstones_path()
+            if not os.path.exists(path):
+                return []
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f) or []
+        except Exception:
+            return []
+
+    def _save_tombstones(self, stones: list) -> None:
+        try:
+            with open(_tombstones_path(), "w", encoding="utf-8") as f:
+                json.dump(stones, f, ensure_ascii=False)
+        except Exception as e:
+            print(f"[Tombstones] Save failed: {e}")
+
+    def _add_tombstone(self, stone: dict) -> None:
+        with _local_history_lock:
+            stones = self._load_tombstones()
+            stones.append(stone)
+            self._save_tombstones(stones)
+
+    def _filter_tombstoned(self, items: list) -> list:
+        """Hide rows the user deleted (individually or via Clear) from any
+        fetched result — remote rows survive up to 30 days after deletion."""
+        stones = self._load_tombstones()
+        # A tombstone only hides rows for the account that created it — a
+        # Clear by one person must not blank another person's history on a
+        # shared machine.
+        uid = self._user_id if (self._user_id and self._user_id != "local") else None
+        stones = [s for s in stones if s.get("user_id") == uid]
+        if not stones or not items:
+            return items
+
+        def _dt(iso):
+            try:
+                return datetime.datetime.fromisoformat(
+                    (iso or "").replace("Z", "+00:00"))
+            except Exception:
+                return None
+
+        cutoffs = [_dt(s.get("all_before")) for s in stones if s.get("all_before")]
+        cutoffs = [c for c in cutoffs if c]
+        row_ids = {s.get("id") for s in stones if s.get("id") is not None}
+        row_keys = {(s.get("text"), s.get("created_at"))
+                    for s in stones if s.get("id") is None and s.get("text")}
+
+        out = []
+        for it in items:
+            if it.get("id") is not None and it.get("id") in row_ids:
+                continue
+            if (it.get("transcribed_text"), it.get("created_at")) in row_keys:
+                continue
+            ts = _dt(it.get("created_at"))
+            if ts and cutoffs and any(ts <= c for c in cutoffs):
+                continue
+            out.append(it)
+        return out
+
+    def _purge_expired_tombstones(self) -> None:
+        """Execute remote deletes for tombstones past their grace period.
+        Best-effort: failures keep the tombstone for the next attempt."""
+        if getattr(self, "_purge_running", False):
+            return
+        self._purge_running = True
+        try:
+            now = datetime.datetime.now(datetime.timezone.utc)
+
+            def _dt(iso):
+                try:
+                    return datetime.datetime.fromisoformat(
+                        (iso or "").replace("Z", "+00:00"))
+                except Exception:
+                    return None
+
+            stones = self._load_tombstones()
+            if not stones:
+                return
+            keep = []
+            changed = False
+            for s in stones:
+                pa = _dt(s.get("purge_after"))
+                if pa is None or pa > now:
+                    keep.append(s)
+                    continue
+                owner = s.get("user_id")
+                if not owner:
+                    changed = True  # local-only rows: nothing remote to delete
+                    continue
+                # Only the owning account's client can (and should) delete.
+                if (not self._enabled or owner != self._user_id):
+                    keep.append(s)
+                    continue
+                try:
+                    q = self._get_client().table(_TABLE).delete().eq("user_id", owner)
+                    if s.get("all_before"):
+                        q = q.lte("created_at", s["all_before"])
+                    elif s.get("id") is not None:
+                        q = q.eq("id", s["id"])
+                    else:
+                        q = (q.eq("transcribed_text", s.get("text") or "")
+                              .eq("created_at", s.get("created_at") or ""))
+                    q.execute()
+                    changed = True
+                    print("[Supabase] Purged tombstoned history (30-day grace elapsed).")
+                except Exception as e:
+                    print(f"[Supabase] Tombstone purge failed (will retry): {e}")
+                    keep.append(s)
+            if changed:
+                with _local_history_lock:
+                    self._save_tombstones(keep)
+        finally:
+            self._purge_running = False
 
     def _clear_local(self) -> bool:
         try:
@@ -274,12 +436,17 @@ class SupabaseLogger:
                             entries = json.load(f)
                     except Exception:
                         entries = []
-                entries.insert(0, {
+                record = {
                     "transcribed_text": text,
                     "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     "app_name": app_name,
                     "app_exe": app_exe,
-                })
+                }
+                # Tag with the signed-in user so history stays per-person even
+                # when several accounts share this Windows machine.
+                if self._user_id and self._user_id != "local":
+                    record["user_id"] = self._user_id
+                entries.insert(0, record)
                 entries = entries[:200]
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(entries, f, ensure_ascii=False)
@@ -294,6 +461,14 @@ class SupabaseLogger:
             with _local_history_lock:
                 with open(path, "r", encoding="utf-8") as f:
                     entries = json.load(f)
+            # Per-person: a signed-in user sees their own entries (plus legacy
+            # untagged ones written before tagging existed); signed-out sees
+            # only untagged local entries.
+            if self._user_id and self._user_id != "local":
+                entries = [e for e in entries
+                           if e.get("user_id") in (self._user_id, None, "")]
+            else:
+                entries = [e for e in entries if not e.get("user_id")]
             return entries[:limit]
         except Exception as e:
             print(f"[LocalHistory] Read failed: {e}")

@@ -1415,9 +1415,61 @@ class AppWindow:
         copy_cv.bind("<Leave>", lambda _e: (copy_state.update(fg=C["subtext"]),
                                             _draw_copy()))
 
+        # Time label doubles as the delete control: hovering it swaps the
+        # timestamp for a bin icon; clicking asks Yes/No inline, then the row
+        # vanishes immediately (Supabase row follows 30 days later).
         time_lbl = tk.Label(header, text=time_str, fg=C["subtext"],
-                            bg=C["surface"], font=("Segoe UI", 8))
+                            bg=C["surface"], font=("Segoe UI", 8), width=5)
         time_lbl.pack(side="right", padx=(6, 0))
+        confirming = [False]
+
+        def _time_enter(_e=None):
+            if not confirming[0]:
+                time_lbl.configure(text="🗑", fg=C["error"], cursor="hand2")
+
+        def _time_leave(_e=None):
+            if not confirming[0]:
+                time_lbl.configure(text=time_str, fg=C["subtext"])
+
+        def _do_delete():
+            def _worker():
+                try:
+                    if self._db:
+                        self._db.delete_transcription(item)
+                except Exception as e:
+                    print(f"[History] Delete failed: {e}")
+            threading.Thread(target=_worker, daemon=True).start()
+            try:
+                self._hist_all.remove(item)
+            except ValueError:
+                pass
+            self._render_history()
+
+        def _cancel_delete():
+            confirming[0] = False
+            for w in (yes_lbl, no_lbl):
+                w.pack_forget()
+            time_lbl.configure(text=time_str, fg=C["subtext"])
+            time_lbl.pack(side="right", padx=(6, 0))
+
+        yes_lbl = tk.Label(header, text="Yes", fg=C["error"], bg=C["surface"],
+                           font=("Segoe UI", 8, "bold"), cursor="hand2")
+        no_lbl = tk.Label(header, text="No", fg=C["subtext"], bg=C["surface"],
+                          font=("Segoe UI", 8, "bold"), cursor="hand2")
+        yes_lbl.bind("<Button-1>", lambda _e: _do_delete())
+        no_lbl.bind("<Button-1>", lambda _e: _cancel_delete())
+
+        def _time_click(_e=None):
+            if confirming[0]:
+                return
+            confirming[0] = True
+            time_lbl.pack_forget()
+            no_lbl.pack(side="right", padx=(4, 0))
+            yes_lbl.pack(side="right", padx=(8, 0))
+
+        time_lbl.bind("<Button-1>", _time_click)
+        time_lbl.bind("<Enter>", _time_enter, add="+")
+        time_lbl.bind("<Leave>", _time_leave, add="+")
 
         mid = tk.Frame(header, bg=C["surface"])
         mid.pack(side="left", fill="x", expand=True)
@@ -1443,7 +1495,8 @@ class AppWindow:
         expanded = [False]
 
         hover_widgets = [row, header, icon_lbl, mid, prev_lbl, time_lbl,
-                         detail, detail_lbl] + ([app_lbl] if app_lbl else [])
+                         yes_lbl, no_lbl, detail, detail_lbl] \
+            + ([app_lbl] if app_lbl else [])
 
         def _set_bg(bg: str):
             for w in hover_widgets:
@@ -1491,13 +1544,16 @@ class AppWindow:
                 detail.pack(fill="x", after=header)
             expanded[0] = not expanded[0]
 
-        for w in [row, header, icon_lbl, mid, prev_lbl, time_lbl] + \
+        for w in [row, header, icon_lbl, mid, prev_lbl] + \
                  ([app_lbl] if app_lbl else []):
             w.bind("<Enter>", _on_enter)
             w.bind("<Leave>", _on_leave)
             w.configure(cursor="hand2")
-            if w is not time_lbl:
-                w.bind("<Button-1>", _toggle)
+            w.bind("<Button-1>", _toggle)
+        # time_lbl keeps its own bin-icon hover handlers (bound above with
+        # add="+") — row hover is added alongside, not instead.
+        time_lbl.bind("<Enter>", _on_enter, add="+")
+        time_lbl.bind("<Leave>", _on_leave, add="+")
         detail_lbl.bind("<Enter>", _on_enter)
         detail_lbl.bind("<Leave>", _on_leave)
         detail_lbl.bind("<Button-1>", _toggle)
@@ -1517,6 +1573,11 @@ class AppWindow:
         frame.pack(fill="x", padx=12, pady=12)
         tk.Label(frame, text="Delete all history?", fg=C["text"], bg=C["surface"],
                  font=("Segoe UI", 10)).pack(anchor="w")
+        tk.Label(frame,
+                 text="Disappears from the app now; removed from the\n"
+                      "cloud after 30 days.",
+                 fg=C["subtext"], bg=C["surface"], justify="left",
+                 font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
         btn_row = tk.Frame(frame, bg=C["surface"])
         btn_row.pack(anchor="w", pady=(8, 0))
         yes = RoundedButton(btn_row, text="Yes, delete all", fg=C["bg"], fill=C["error"],

@@ -45,7 +45,7 @@ from supabase_client import SupabaseLogger
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.19"
+APP_VERSION = "1.6.20"
 
 
 class WhisperFlowApp:
@@ -139,6 +139,13 @@ class WhisperFlowApp:
         self.popup.set_ai_refiner(self.ai_refiner)
         self.popup.set_voice_prompt_callback(
             lambda audio, rate, blocking=True: self._fast_engine().transcribe(audio, rate, blocking=blocking)
+        )
+        self.popup.set_voice_capture_fns(
+            start=self.recorder.start_aux_capture,
+            read=lambda: (self.recorder.read_aux_audio(),
+                          self.recorder.active_sample_rate),
+            stop=lambda: (self.recorder.stop_aux_capture(),
+                          self.recorder.active_sample_rate),
         )
 
         self._recording_hwnd: int = 0
@@ -756,6 +763,18 @@ class WhisperFlowApp:
                     return
 
                 final_audio = audio
+                # Silence gate BEFORE the fast pass — near-silent clips must
+                # never reach the model at all: whisper invents fluent text on
+                # silence/noise, and anything it returns here gets injected.
+                # (The old gate only ran when the fast pass came back empty.)
+                import numpy as _np
+                _clip_peak = float(_np.max(_np.abs(final_audio))) if len(final_audio) else 0.0
+                if _clip_peak < 0.002:
+                    print(f"[App] Near-silent clip (peak={_clip_peak:.4f}) — "
+                          "skipping transcription entirely.")
+                    self.hotkey_manager.set_idle()
+                    self.feedback.error_occurred("No speech detected")
+                    return
                 print(
                     f"[App] Transcribing {len(final_audio) / capture_rate:.1f}s of audio at {capture_rate} Hz..."
                 )

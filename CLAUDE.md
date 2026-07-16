@@ -213,6 +213,20 @@ DEDICATED level-only callback — never the recording callback — so a recordin
 during a mic test can't get interleaved chunks from two streams. `get_live_levels()`
 returns the monitor's levels while a monitor is active.
 
+The popup's voice-prompt mic (refinement panel 🎙) captures via
+`Recorder.start_aux_capture()/read_aux_audio()/stop_aux_capture()` (v1.6.20+) — the
+recording callback feeds a separate aux buffer. It must NEVER open its own
+sounddevice stream: that recorded the Windows default mic instead of the configured
+device, and the mic-watchdog's PortAudio re-init (which only checks
+recording/monitor/aux states) could kill a rogue stream mid-read.
+
+History is per-account (v1.6.20+): remote fetch requires an authenticated user_id
+(unauthenticated sessions read only the local file — an unfiltered query would
+return every user's rows), local entries are tagged with user_id, and deletes are
+soft: rows/Clear vanish from the UI immediately via tombstones
+(`%APPDATA%\FTC Whisper\history-tombstones.json`), with the real Supabase delete
+deferred 30 days (`_purge_expired_tombstones`, fired on fetch).
+
 ## Key invariants
 
 - `_update_context()` is called with the **best available** result only (Parakeet final / whisper accurate / LLM-fixed), never the whisper fast-model result — so the rolling context always reflects the highest-quality transcription

@@ -159,6 +159,10 @@ class Transcriber:
                 speech_pad_ms=self._vad_speech_pad_ms,
             ),
             no_speech_threshold=0.7,
+            # Drop segments the model itself doubts: skipped only when BOTH
+            # no-speech probability is high AND avg log-prob is poor, so real
+            # mumbled speech (decoded confidently) is never affected.
+            log_prob_threshold=-0.8,
             condition_on_previous_text=False,
             temperature=[0.0],        # list disables temperature fallback retries entirely
             repetition_penalty=1.1,   # discourages looping/repeated phrases
@@ -168,6 +172,17 @@ class Transcriber:
 
         text = "".join(s.text for s in segments)
         text = self._post_process(text)
+        # Prompt-echo guard: on unclear audio whisper sometimes emits part of
+        # the initial_prompt (i.e. a PREVIOUS dictation) verbatim instead of
+        # what was said. A long exact repeat of the rolling context is echo,
+        # not coincidence — 8+ words so a genuinely re-dictated short phrase
+        # ("Kind regards, Ryan") is never suppressed.
+        if context_words and len(text.split()) >= 8:
+            norm = lambda s: re.sub(
+                r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", s.lower())).strip()
+            if norm(text) and norm(text) in norm(context_words):
+                print(f"[Transcriber] Discarding prompt echo: '{text}'")
+                return ""
         print(f"[Transcriber] '{text}'")
         return text
 

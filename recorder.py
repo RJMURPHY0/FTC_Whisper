@@ -86,6 +86,12 @@ class Recorder:
         self._monitor_rms: float = 0.0
         self._monitor_peak: float = 0.0
         self._monitor_active = False
+        # Aux capture (popup voice-prompt mic): audio is taken from the SAME
+        # stream/callback as recordings, so the watchdog's PortAudio re-init
+        # can never run underneath it and it always uses the configured device.
+        self._aux_chunks: list[np.ndarray] = []
+        self._aux_active = False
+        self._aux_cold_opened = False
         # Heartbeat of the recording/warm stream: monotonic time of the last
         # audio callback. Seeded on stream open so a just-opened stream counts
         # as healthy before its first callback arrives.
@@ -133,6 +139,8 @@ class Recorder:
             self._last_callback_ts = time.monotonic()
             self._last_rms = rms
             self._last_peak = peak
+            if self._aux_active:
+                self._aux_chunks.append(data)
             if self._recording:
                 self._chunks.append(data)
                 self._chunks_samples += n
@@ -275,7 +283,7 @@ class Recorder:
             tick += 1
             if not self._warm_enabled:
                 continue
-            if self.is_recording or self._monitor_active:
+            if self.is_recording or self._monitor_active or self._aux_active:
                 continue
             try:
                 if not self._stream_looks_alive():
@@ -514,6 +522,64 @@ class Recorder:
         duration = len(audio) / max(self.active_sample_rate, 1)
         print(f"[Recorder] Captured {duration:.1f}s of audio.")
         return audio
+
+    # ------------------------------------------------------------------
+    # Aux capture (popup voice-prompt mic)
+    # ------------------------------------------------------------------
+
+    def start_aux_capture(self) -> bool:
+        """Begin capturing audio for the popup's voice-prompt mic. Reuses the
+        recording/warm stream so it records from the configured input device
+        and is protected from the watchdog's PortAudio re-init. Coexists with
+        a main recording (the callback feeds both buffers independently)."""
+        with self._lock:
+            self._aux_chunks = []
+            self._aux_active = True
+            self._aux_cold_opened = False
+        if self._stream_looks_alive():
+            return True
+        if self._warm_enabled and self._ensure_warm_stream():
+            return True
+        # Cold mode: open a stream just for this capture.
+        try:
+            with self._stream_lifecycle_lock:
+                if self._stream is None:
+                    self._stream = self._open_best_input_stream()
+                    with self._lock:
+                        self._last_callback_ts = time.monotonic()
+                    self._stream.start()
+                    with self._lock:
+                        self._aux_cold_opened = True
+            return True
+        except Exception as e:
+            with self._lock:
+                self._aux_active = False
+            self._stream = None
+            print(f"[Recorder] Aux capture failed to open stream: {e}")
+            return False
+
+    def read_aux_audio(self) -> Optional[np.ndarray]:
+        """Snapshot of all aux audio captured so far (None if none yet)."""
+        with self._lock:
+            if not self._aux_chunks:
+                return None
+            return np.concatenate(self._aux_chunks, axis=0).flatten()
+
+    def stop_aux_capture(self) -> Optional[np.ndarray]:
+        """End aux capture and return the full captured audio (or None)."""
+        with self._lock:
+            self._aux_active = False
+            chunks = self._aux_chunks
+            self._aux_chunks = []
+            cold = self._aux_cold_opened
+            self._aux_cold_opened = False
+        if cold:
+            with self._stream_lifecycle_lock:
+                if not self._recording and not self._warm_stream_is_open:
+                    self._close_stream_locked()
+        if not chunks:
+            return None
+        return np.concatenate(chunks, axis=0).flatten()
 
     # ------------------------------------------------------------------
     # Mic test monitor

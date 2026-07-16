@@ -78,7 +78,7 @@ CANVAS_H = BAR_MAX_H + 6
 # words, and the user can wheel-scroll back through everything said.
 CAPTION_MIN_CHARS = 16   # legacy floor (bar now renders at CAPTION_MAX_CHARS)
 CAPTION_MAX_CHARS = 60
-CAPTION_MAX_LINES = 8
+CAPTION_MAX_LINES = 5
 CAPTION_SCROLL_HOLDOFF = 4.0  # secs after a manual scroll before auto-tail resumes
 
 # How long the post-transcription icon badge stays before auto-dismissing, so it
@@ -114,6 +114,9 @@ class FloatingPopup:
         self._cursor_y: int = 0
         self._ai_refiner = None
         self._voice_prompt_fn = None
+        self._voice_capture_start = None
+        self._voice_capture_read = None
+        self._voice_capture_stop = None
         self._mic_recording: bool = False
         self._mic_pulse_on: bool = True
         self._original_text: str = ""
@@ -149,6 +152,16 @@ class FloatingPopup:
 
     def set_voice_prompt_callback(self, fn) -> None:
         self._voice_prompt_fn = fn
+
+    def set_voice_capture_fns(self, start, read, stop) -> None:
+        """Recorder-backed audio capture for the voice-prompt mic.
+        start() -> bool; read() -> (audio|None, rate); stop() -> (audio|None, rate).
+        Replaces the popup opening its own sounddevice stream, which recorded
+        the Windows default mic (not the configured device) and could be killed
+        mid-read by the recorder watchdog's PortAudio re-init."""
+        self._voice_capture_start = start
+        self._voice_capture_read = read
+        self._voice_capture_stop = stop
 
     def show_status(
         self,
@@ -843,16 +856,20 @@ class FloatingPopup:
         self._caption_wrap.pack_forget()
 
         if recording and self._captions_enabled:
-            # Live-caption mode: timer | waveform on top, caption bar beneath.
+            # Live-caption mode: waveform centred at the top (timer at the far
+            # left), caption paragraph beneath — text starts at the left edge
+            # and reads naturally rightward, wrapping down to CAPTION_MAX_LINES
+            # before scrolling.
             self._draw_bars_initial()  # fresh bars every session
             self._timer_var.set("00:00.0")
             self._rec_start = time.time()
             self._timer_lbl.pack(side="left", before=self._status_label, padx=(0, 12))
-            self._wave_canvas.pack(side="left", before=self._status_label, padx=(0, 12))
+            # expand=True centres the waveform in the remaining row width so it
+            # sits top-middle above the caption text.
+            self._wave_canvas.pack(side="left", before=self._status_label,
+                                   expand=True)
             self._status_label.configure(text="")
             self._reset_caption_widget("Listening…")
-            # anchor="w" + no fill so the bar sizes to its content and genuinely
-            # grows horizontally from narrow, rather than snapping to the row width.
             self._caption_wrap.pack(side="top", anchor="w", pady=(10, 0))
             # The waveform loop drives the timer and keeps _last_activity fresh.
             self._start_waveform()
@@ -1179,45 +1196,50 @@ class FloatingPopup:
         self._start_mic_pulse()
 
         def _run():
-            import sounddevice as _sd
-            import numpy as _np
-
-            all_chunks = []
-            CHUNK = 3200        # 0.2 s at 16 kHz
-            PREVIEW_EVERY = 8   # re-transcribe every ~1.6 s
-            chunk_count = 0
-
+            if not self._voice_capture_start:
+                self.root.after(0, lambda: self._ai_status.configure(
+                    text="⚠  Voice capture not configured"))
+                self.root.after(2000, self._finish_mic)
+                return
             try:
-                with _sd.InputStream(samplerate=16000, channels=1, dtype="float32",
-                                     blocksize=CHUNK) as stream:
-                    start = time.time()
-                    while self._mic_recording and (time.time() - start) < 30.0:
-                        data, _ = stream.read(CHUNK)
-                        all_chunks.append(data.copy())
-                        chunk_count += 1
-
-                        if chunk_count % PREVIEW_EVERY == 0:
-                            snap = _np.concatenate(all_chunks, axis=0).flatten()
-                            # non-blocking: skip if the model is still busy from last preview
-                            preview = self._voice_prompt_fn(snap, 16000, blocking=False)
+                if not self._voice_capture_start():
+                    self.root.after(0, lambda: self._ai_status.configure(
+                        text="⚠  Mic unavailable"))
+                    self.root.after(2000, self._finish_mic)
+                    return
+                start = time.time()
+                last_preview = 0.0
+                while self._mic_recording and (time.time() - start) < 120.0:
+                    time.sleep(0.15)
+                    if time.time() - last_preview >= 1.6:
+                        last_preview = time.time()
+                        snap, rate = self._voice_capture_read()
+                        if snap is not None and len(snap) > rate // 2:
+                            # non-blocking: skip if the model is busy from last preview
+                            preview = self._voice_prompt_fn(snap, rate, blocking=False)
                             if preview and preview.strip():
                                 p = preview.strip()
                                 self.root.after(0, lambda p=p: self._set_ask_entry(p))
             except Exception as exc:
                 err = str(exc)
+                try:
+                    self._voice_capture_stop()
+                except Exception:
+                    pass
                 self.root.after(0, lambda: self._ai_status.configure(text=f"⚠  Mic error: {err}"))
                 self.root.after(2000, self._finish_mic)
                 return
 
-            if not all_chunks:
-                self.root.after(0, self._finish_mic)
+            audio, rate = self._voice_capture_stop()
+            if audio is None or len(audio) < rate // 4:
+                self.root.after(0, lambda: self._ai_status.configure(text="⚠  No speech detected"))
+                self.root.after(2000, self._finish_mic)
                 return
 
             # Final blocking pass on the full buffer — gives the cleanest result
             self.root.after(0, lambda: self._ai_status.configure(text="✦  Finalising…"))
             try:
-                audio = _np.concatenate(all_chunks, axis=0).flatten()
-                text = self._voice_prompt_fn(audio, 16000, blocking=True)
+                text = self._voice_prompt_fn(audio, rate, blocking=True)
             except Exception as exc:
                 err = str(exc)
                 self.root.after(0, lambda: self._ai_status.configure(text=f"⚠  Transcription error: {err}"))
