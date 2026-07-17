@@ -213,8 +213,8 @@ class AuthManager:
                         return
 
                 client = self._get_client()
-                at = data.get("access_token") or data.get("access_token", "")
-                rt = data.get("refresh_token") or data.get("refresh_token", "")
+                at = data.get("access_token") or ""
+                rt = data.get("refresh_token") or ""
                 if not at or not rt:
                     raise KeyError("Missing tokens in session file")
                 r = client.auth.set_session(at, rt)

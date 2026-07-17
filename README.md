@@ -60,33 +60,54 @@ A small badge appears near your cursor after each transcription. Click it to ope
 
 ## Configuration
 
-Edit **`config.json`** (in the same folder as the app) to customise settings:
+Edit **`config.json`** (in the same folder as the app) to customise settings.
+Defaults below are the built-in fallbacks from `config.py` — any key missing from
+`config.json` uses these. (Frozen `.exe` builds seed a starter `config.json` on
+first run.)
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `hotkey` | `alt+v` | Trigger key — e.g. `caps lock`, `f9`, `ctrl+shift+space` |
 | `refine_hotkey` | `alt+r` | Select text anywhere and press this to refine it |
-| `mode` | `hold` | `hold` (hold while speaking) or `toggle` (press to start/stop) |
-| `whisper_model` | `base.en` | Model size: `tiny.en`, `base.en`, `small.en`, `medium.en`, `large-v3` |
+| `mode` | `toggle` | `toggle` (press to start/stop) or `hold` (hold while speaking) |
+| `whisper_model` | `small.en` | Accurate-pass Whisper model: `tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo` (or `.en` variants) |
 | `language` | `en` | Whisper language code |
+| `sample_rate` | `16000` | Recording sample rate in Hz (other capture rates are resampled automatically) |
 | `input_device` | *(empty)* | Optional microphone override (device name fragment or numeric index); empty = auto-default + fallback |
+| `inject_method` | `clipboard` | `clipboard` (paste) or `keystrokes` (typed key events) |
 | `sound_feedback` | `true` | Beep sounds on start/stop |
+| `auto_start` | `false` | Reserved — currently unused (the app always registers its Windows logon startup task) |
 | `anthropic_api_key` | *(empty)* | [Anthropic API key](https://console.anthropic.com/) — enables AI refinement |
+| `openrouter_api_key` | *(empty)* | OpenRouter API key — alternative to Anthropic for AI refinement |
+| `openrouter_model` | `google/gemini-2.5-flash-lite` | OpenRouter model used for refinement/context-fix |
+| `warm_mic` | `true` | Keep the mic stream warm with a ~1.5 s pre-roll — instant start, first syllable never lost |
+| `auto_update` | `true` | Silently download new releases and install them when the app is idle |
+| `use_parakeet` | `true` | Parakeet TDT engine (near-instant, high accuracy, English) with Whisper fallback |
+| `custom_vocabulary` | *(empty)* | Comma-separated terms to boost (names, acronyms, domain words) |
+| `auto_punctuate` | `true` | Add a trailing period when the output has no terminal punctuation |
+| `live_captions` | `false` | Show live text of what you're saying (replaces the waveform bar while recording) |
+| `live_inject` | `false` | Type words into the app live as you speak (Parakeet mode); corrects at hotkey release |
+| `trailing_space` | `false` | Append a space after each injection (useful when dictating mid-sentence) |
+| `auto_enter` | `false` | Press Enter after injection (useful for chat/search boxes) |
+| `toggle_timeout` | `0` | Seconds before auto-stopping in toggle mode (`0` = disabled) |
+| `max_recording_duration` | `0` | Hard cap on recording length in seconds (`0` = unlimited) |
 | `supabase_url` | *(empty)* | Supabase project URL — enables history & sync |
 | `supabase_key` | *(empty)* | Supabase anon/publishable key |
 | `supabase_email` | *(empty)* | Auto sign-in email on startup |
 | `supabase_password` | *(empty)* | Auto sign-in password on startup |
 
-> **Tip:** Larger Whisper models are more accurate but slower to load.  
-> `base.en` is the best balance for most users on CPU.
+> **Tip:** With `use_parakeet` on (the default), English dictation uses the
+> Parakeet TDT engine and `whisper_model` is the accurate upgrade pass / fallback.
+> Larger Whisper models are more accurate but slower to load — `small.en` (the
+> default) is the best balance on CPU.
 
 ### Model Sizes
 
 | Model | Size | Speed | Accuracy |
 |-------|------|-------|----------|
 | `tiny.en` | ~75 MB | Fastest | ★★☆☆☆ |
-| `base.en` | ~150 MB | Fast | ★★★☆☆ — **recommended** |
-| `small.en` | ~500 MB | Medium | ★★★★☆ |
+| `base.en` | ~150 MB | Fast | ★★★☆☆ |
+| `small.en` | ~500 MB | Medium | ★★★★☆ — **default** |
 | `medium.en` | ~1.5 GB | Slow | ★★★★☆ |
 | `large-v3` | ~3 GB | Slowest | ★★★★★ — GPU recommended |
 

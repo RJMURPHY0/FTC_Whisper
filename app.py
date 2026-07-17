@@ -133,6 +133,7 @@ class WhisperFlowApp:
         self.feedback = Feedback(
             sound_enabled=config.sound_feedback,
             on_icon_change=self.tray.update_icon,
+            on_error_notify=self._on_pipeline_error,
         )
 
         self.popup = FloatingPopup()
@@ -328,6 +329,9 @@ class WhisperFlowApp:
         # If this launch is the first run of a new version, toast it
         self._announce_update_if_any()
 
+        # If config.json was corrupt and reset to defaults, tell the user
+        self._announce_config_reset_if_any()
+
     def _fetch_remote_api_keys(self) -> None:
         try:
             if not self.ai_refiner.openrouter_api_key:
@@ -451,6 +455,65 @@ class WhisperFlowApp:
                 self.app_window._ui_after(1500, _announce)
         except Exception as e:
             print(f"[App] Update announce failed (non-fatal): {e}")
+
+    def _announce_config_reset_if_any(self) -> None:
+        """Config.load() fell back to defaults because config.json was corrupt:
+        record it in the app log and tell the user (tray notification, toast
+        fallback — same pattern as _announce_update_if_any). The reset itself
+        already happened in Config.load(); this only surfaces it."""
+        warning = getattr(self.config, "_load_warning", "")
+        if not warning:
+            return
+        try:
+            with open(_startup_log_path(), "a", encoding="utf-8") as f:
+                f.write(
+                    f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Config reset: {warning}\n"
+                )
+        except Exception:
+            pass
+        try:
+            def _announce():
+                if not self.tray.notify(warning, "FTC Whisper — settings reset"):
+                    self.app_window.show_toast(f"FTC Whisper: {warning}", 8000)
+
+            self.app_window._ui_after(1500, _announce)
+        except Exception as e:
+            print(f"[App] Config reset announce failed (non-fatal): {e}")
+
+    # Benign end-of-dictation outcomes that already have deliberate feedback
+    # (error buzz + idle icon) — logged, but not worth a popup notification.
+    _EXPECTED_PIPELINE_ERRORS = ("Recording too short", "No speech detected")
+
+    def _on_pipeline_error(self, error: str) -> None:
+        """Called by Feedback.error_occurred IN ADDITION to the error buzz.
+
+        The frozen build is console=False, so the print in error_occurred
+        vanishes and report_error no-ops when unconfigured — a failed dictation
+        was invisible beyond a 300 Hz buzz. Always append to the app log;
+        unexpected errors also get a tray notification (toast fallback — same
+        pattern as _announce_update_if_any)."""
+        try:
+            with open(_startup_log_path(), "a", encoding="utf-8") as f:
+                f.write(
+                    f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Pipeline error: {error}\n"
+                )
+        except Exception:
+            pass
+        if error in self._EXPECTED_PIPELINE_ERRORS:
+            return
+        short = error if len(error) <= 200 else error[:200] + "…"
+        try:
+            def _notify():
+                if not self.tray.notify(
+                    f"Dictation failed: {short}", "FTC Whisper"
+                ):
+                    self.app_window.show_toast(
+                        f"FTC Whisper — dictation failed: {short}", 6000
+                    )
+
+            self.app_window._ui_after(0, _notify)
+        except Exception as e:
+            print(f"[App] Pipeline error notify failed (non-fatal): {e}")
 
     def _on_hotkey_change(self, new_hotkey: str) -> None:
         """Called when the user saves a new hotkey in the dashboard."""

@@ -82,6 +82,9 @@ class Config:
 
     # Derived / runtime fields (not persisted)
     _config_path: str = field(default="", repr=False)
+    # Set when config.json was corrupt and settings fell back to defaults —
+    # app.py surfaces it as a visible notification once the tray/UI is up.
+    _load_warning: str = field(default="", repr=False)
 
     def save(self) -> None:
         """Persist current settings to disk atomically.
@@ -93,6 +96,7 @@ class Config:
         """
         data = asdict(self)
         data.pop("_config_path", None)
+        data.pop("_load_warning", None)
         path = self._config_path or get_config_path()
         tmp = f"{path}.{os.getpid()}.tmp"
         try:
@@ -127,7 +131,24 @@ class Config:
                     if hasattr(config, key) and not key.startswith("_"):
                         setattr(config, key, value)
             except (json.JSONDecodeError, IOError) as e:
+                # Reset-to-defaults fallback (kept) — but never silently:
+                # preserve the bad file and flag the reset so app.py can show
+                # a visible notification once the tray/UI is up.
+                backup = ""
+                try:
+                    backup = os.path.join(
+                        os.path.dirname(path) or ".", "config.corrupt.bak"
+                    )
+                    shutil.copy(path, backup)
+                    print(f"[Config] Backed up unreadable config to {backup}")
+                except Exception as be:
+                    backup = ""
+                    print(f"[Config] Could not back up corrupt config (non-fatal): {be}")
                 print(f"[Config] Warning: Could not load {path}: {e}. Using defaults.")
+                config._load_warning = (
+                    "Settings file was corrupt — settings were reset to defaults."
+                    + (f" Old file saved as {os.path.basename(backup)}." if backup else "")
+                )
         else:
             # Create default config file
             config.save()

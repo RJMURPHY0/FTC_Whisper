@@ -36,15 +36,20 @@ class Feedback:
         self,
         sound_enabled: bool = True,
         on_icon_change: Optional[Callable[[str], None]] = None,
+        on_error_notify: Optional[Callable[[str], None]] = None,
     ):
         """
         Args:
             sound_enabled: Whether to play sound feedback
             on_icon_change: Callback to change tray icon. Called with state name:
                             "idle", "recording", "processing"
+            on_error_notify: Optional callback invoked with the error message so
+                             the app can log it and show a visible notification —
+                             additive on top of the buzz, never replaces it
         """
         self.sound_enabled = sound_enabled
         self.on_icon_change = on_icon_change
+        self.on_error_notify = on_error_notify
 
     def recording_started(self) -> None:
         """Called when recording begins."""
@@ -92,3 +97,13 @@ class Feedback:
 
         print(f"[Feedback] Error: {error}")
         report_error(error)
+
+        # Additive visibility: the buzz alone is easy to miss (and silent when
+        # sound is off), print vanishes in console=False builds, and
+        # report_error no-ops when unconfigured — let the app log the error
+        # and show a visible notification too.
+        if self.on_error_notify:
+            try:
+                self.on_error_notify(error)
+            except Exception as e:
+                print(f"[Feedback] error notify failed (non-fatal): {e}")
