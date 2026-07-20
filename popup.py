@@ -130,6 +130,78 @@ def _apply_popup_corners(hwnd: int) -> bool:
         return False
 
 
+class _RoundedField(tk.Canvas):
+    """Hosts a square-cornered tk widget on a rounded-rect background.
+
+    tk.Text has no corner radius and paints an opaque rectangle, so the only way
+    to round one is to inset it far enough that its own corners never reach the
+    curve and paint the rounding underneath. `fill` matches the child's own bg,
+    so the seam between the two is invisible.
+
+    The child keeps driving the layout: callers still size it in character units
+    and `sync()` re-reads its requested size, so the popup geometry that hangs
+    off that sizing (caption growth, Ask-box autosize) behaves exactly as before.
+    """
+
+    def __init__(self, parent, *, fill, radius=6, pad=4, on_resize=None, **kw):
+        super().__init__(parent, bg=parent.cget("bg"),
+                         highlightthickness=0, bd=0, **kw)
+        self._fill = fill
+        self._radius = radius
+        self._pad = pad
+        # Fired when the usable inner width changes. A child that measures its
+        # own wrapped height (the Ask box) must re-measure afterwards: until the
+        # canvas has laid out, the child still reports its natural width and
+        # would count every line as fitting on one row.
+        self._on_resize = on_resize
+        self._last_inner_w = None
+        self._shape = None
+        self._child = None
+        self._win = None
+        self._stretch = False
+        self.bind("<Configure>", lambda _e: self._paint())
+
+    def host(self, child, *, stretch: bool = False):
+        """Embed `child`. stretch=True fills the canvas width (for pack expand),
+        else the canvas takes its width from the child's own requested size."""
+        self._child = child
+        self._stretch = stretch
+        self._win = self.create_window(self._pad, self._pad, anchor="nw",
+                                       window=child)
+        self.sync()
+        return child
+
+    def sync(self) -> None:
+        """Re-read the child's requested size and resize to wrap it."""
+        if self._child is None:
+            return
+        self.configure(height=self._child.winfo_reqheight() + self._pad * 2)
+        if not self._stretch:
+            self.configure(width=self._child.winfo_reqwidth() + self._pad * 2)
+        self._paint()
+
+    def _paint(self) -> None:
+        if self._child is None:
+            return
+        w, h = self.winfo_width(), self.winfo_height()
+        if w <= 1 or h <= 1:
+            return
+        from app_window import _rr
+        if self._shape is not None:
+            self.delete(self._shape)
+        self._shape = _rr(self, 0, 0, w - 1, h - 1, self._radius, fill=self._fill)
+        self.tag_lower(self._shape)
+        inner_w = (w - self._pad * 2) if self._stretch else self._child.winfo_reqwidth()
+        self.itemconfigure(self._win, width=max(1, inner_w),
+                           height=max(1, h - self._pad * 2))
+        if inner_w != self._last_inner_w:
+            self._last_inner_w = inner_w
+            if self._on_resize is not None:
+                # after_idle so the child has actually re-wrapped at the new
+                # width before anything measures it.
+                self.after_idle(self._on_resize)
+
+
 class FloatingPopup:
     def __init__(self):
         self.root: Optional[tk.Toplevel] = None
@@ -501,8 +573,11 @@ class FloatingPopup:
         # demand in _enter_status_mode.
         self._captions_enabled = False
         self._caption_wrap = tk.Frame(f, bg=CP["bg"])
+        self._caption_box = _RoundedField(
+            self._caption_wrap, fill=CP["bg_light"], radius=6, pad=4
+        )
         self._caption_text = tk.Text(
-            self._caption_wrap,
+            self._caption_box,
             fg=CP["text"],
             bg=CP["bg_light"],
             font=("Segoe UI", 11),
@@ -532,7 +607,8 @@ class FloatingPopup:
             width=10,
         )
         self._caption_text.configure(yscrollcommand=self._caption_scroll.set)
-        self._caption_text.pack(side="left", fill="both", expand=True)
+        self._caption_box.host(self._caption_text)
+        self._caption_box.pack(side="left", fill="both", expand=True)
         self._caption_lines = 0  # last rendered visible-line count (reposition debounce)
         # Manual scrollback: Windows routes wheel input to the hovered window
         # even though the popup never activates (WS_EX_NOACTIVATE), so a wheel
@@ -735,8 +811,10 @@ class FloatingPopup:
         # horizontally instead of expanding.
         self._ask_lines = 1
         self._ask_showing_placeholder = True
+        self._ask_box = _RoundedField(ask_row, fill=CP["btn_bg"], radius=6, pad=4,
+                                      on_resize=lambda: self._autosize_ask())
         self._ask_entry = tk.Text(
-            ask_row,
+            self._ask_box,
             height=1,
             wrap="word",
             bg=CP["btn_bg"],
@@ -749,7 +827,8 @@ class FloatingPopup:
             pady=4,
             highlightthickness=0,
         )
-        self._ask_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self._ask_box.host(self._ask_entry, stretch=True)
+        self._ask_box.pack(side="left", fill="x", expand=True, padx=(0, 4))
         self._ask_entry.insert("1.0", ASK_PLACEHOLDER)
 
         def _clear_placeholder(_e=None):
@@ -950,6 +1029,7 @@ class FloatingPopup:
         self._caption_text.configure(
             state="disabled", width=CAPTION_MAX_CHARS, height=1
         )
+        self._caption_box.sync()
 
     def _update_caption_widget(self, text: str) -> None:
         """Render live caption text into the bar: fixed paragraph width, growing
@@ -977,6 +1057,7 @@ class FloatingPopup:
             lines = max(1, lines)
             shown = min(lines, CAPTION_MAX_LINES)
             self._caption_text.configure(height=shown, state="disabled")
+            self._caption_box.sync()
 
             if lines > shown:
                 self._caption_scroll.pack(side="right", fill="y")
@@ -1353,6 +1434,7 @@ class FloatingPopup:
             return
         self._ask_lines = n
         self._ask_entry.configure(height=n)
+        self._ask_box.sync()
         # Panel is anchored bottom-centre (y = bottom - height - 60), so a taller
         # box must be re-placed or it would grow down into the taskbar.
         if self._mode == "refinement":
