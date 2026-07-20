@@ -69,6 +69,20 @@ BAR_MIN_H = 5
 CANVAS_W = NUM_BARS * (BAR_W + BAR_GAP) - BAR_GAP
 CANVAS_H = BAR_MAX_H + 6
 
+
+def _bar_geom(index: int, height: float) -> tuple[float, float]:
+    """(centre_x, half_length) for the line segment that draws bar `index`.
+
+    Bars are round-capped lines rather than rectangles, so the cap adds BAR_W/2
+    past each endpoint. The segment is shortened by BAR_W so the drawn height
+    still equals `height` and the tallest bar keeps fitting inside CANVAS_H.
+    Floored just above zero so the shortest bar renders as a dot — a
+    zero-length line draws nothing.
+    """
+    cx = index * (BAR_W + BAR_GAP) + BAR_W / 2
+    return cx, max(0.5, (height - BAR_W) / 2)
+
+
 # Live-caption bar (shown beneath the waveform when captions are on).
 # The bar is a FIXED-WIDTH paragraph block (CAPTION_MAX_CHARS wide) from the very
 # first word: text wraps and grows vertically up to CAPTION_MAX_LINES, then
@@ -91,18 +105,29 @@ ASK_PLACEHOLDER = "Ask AI — e.g. 'change language to French' or 'make this sho
 ICON_AUTO_DISMISS_SECS = 30.0
 
 
-def _apply_popup_corners(hwnd: int) -> None:
-    """Apply Win11 DWM rounded corners — no GDI clipping, no black artifacts."""
+def _apply_popup_corners(hwnd: int) -> bool:
+    """Apply Win11 DWM rounded corners — no GDI clipping, no black artifacts.
+
+    `hwnd` may be a Tk *child* handle: on Windows `Toplevel.winfo_id()` returns
+    the inner Tk window, not the frame DWM actually composes. Passing that
+    straight to DwmSetWindowAttribute fails with E_HANDLE (0x80070006) and the
+    corners stay square — silently, because ctypes does not raise on a bad
+    HRESULT. Resolve to the real top-level via GA_ROOT first, and return whether
+    the call actually succeeded so callers can tell a no-op from a success.
+    """
     try:
+        GA_ROOT = 2
         DWMWA_WINDOW_CORNER_PREFERENCE = 33
         DWMWCP_ROUND = 2
+        top = ctypes.windll.user32.GetAncestor(hwnd, GA_ROOT) or hwnd
         pref = ctypes.c_int(DWMWCP_ROUND)
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(
-            hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
+        hr = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            top, DWMWA_WINDOW_CORNER_PREFERENCE,
             ctypes.byref(pref), ctypes.sizeof(pref),
         )
+        return hr == 0
     except Exception:
-        pass
+        return False
 
 
 class FloatingPopup:
@@ -527,20 +552,17 @@ class FloatingPopup:
     def _draw_bars_initial(self) -> None:
         self._wave_canvas.delete("all")
         self._bar_ids = []
+        mid = CANVAS_H // 2
         for i in range(NUM_BARS):
-            x1 = i * (BAR_W + BAR_GAP)
-            x2 = x1 + BAR_W
-            mid = CANVAS_H // 2
-            y1 = mid - BAR_MIN_H // 2
-            y2 = mid + BAR_MIN_H // 2
-            bid = self._wave_canvas.create_rectangle(
-                x1,
-                y1,
-                x2,
-                y2,
+            cx, half = _bar_geom(i, BAR_MIN_H)
+            bid = self._wave_canvas.create_line(
+                cx,
+                mid - half,
+                cx,
+                mid + half,
                 fill=CP["bar_idle"],
-                outline="",
-                width=0,
+                width=BAR_W,
+                capstyle="round",
             )
             self._bar_ids.append(bid)
 
@@ -579,10 +601,9 @@ class FloatingPopup:
 
                 h = max(BAR_MIN_H, min(BAR_MAX_H, h_idle + h_voice))
 
-                x1 = i * (BAR_W + BAR_GAP)
-                x2 = x1 + BAR_W
+                cx, half = _bar_geom(i, h)
                 # Always orange while recording so the waveform is always visible
-                self._wave_canvas.coords(bid, x1, mid - h / 2, x2, mid + h / 2)
+                self._wave_canvas.coords(bid, cx, mid - half, cx, mid + half)
                 self._wave_canvas.itemconfigure(bid, fill=CP["bar_active"])
 
             # Update timer
@@ -1003,13 +1024,10 @@ class FloatingPopup:
         self._mic_level = 0.0
         # Reset bars to idle height
         if self._bar_ids:
+            mid = CANVAS_H // 2
             for i, bid in enumerate(self._bar_ids):
-                x1 = i * (BAR_W + BAR_GAP)
-                x2 = x1 + BAR_W
-                mid = CANVAS_H // 2
-                self._wave_canvas.coords(
-                    bid, x1, mid - BAR_MIN_H // 2, x2, mid + BAR_MIN_H // 2
-                )
+                cx, half = _bar_geom(i, BAR_MIN_H)
+                self._wave_canvas.coords(bid, cx, mid - half, cx, mid + half)
                 self._wave_canvas.itemconfigure(bid, fill=CP["bar_idle"])
 
     def _enter_icon_mode(self) -> None:
