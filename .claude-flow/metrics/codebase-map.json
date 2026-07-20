@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-07-13T11:03:28.743Z",
+  "timestamp": "2026-07-17T15:23:58.578Z",
   "projectRoot": "C:\\Users\\ryan.murphy\\FTC -whisper - transcription",
   "structure": {
     "hasPackageJson": false,
@@ -7,5 +7,5 @@
     "hasClaudeConfig": true,
     "hasClaudeFlow": true
   },
-  "scannedAt": 1783940608743
+  "scannedAt": 1784301838578
 }

@@ -733,3 +733,2012 @@
 [2026-07-13T10:56:43.241Z] [INFO] Worker audit completed in 3762ms
 [2026-07-13T11:03:28.742Z] [INFO] Starting worker: map (1/2 concurrent)
 [2026-07-13T11:03:28.744Z] [INFO] Worker map completed in 4ms
+[2026-07-13T11:06:43.254Z] [INFO] Worker audit deferred: Memory too low: 4.0% free
+[2026-07-13T11:07:28.891Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-13T11:07:28.892Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-13T11:07:28.903Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T11:07:28.904Z] [INFO] Worker optimize completed in 15ms
+[2026-07-13T11:07:28.909Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-13T11:07:28.909Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T11:07:33.256Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T11:07:33.258Z] [INFO] Worker audit completed in 4350ms
+[2026-07-13T11:09:28.651Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-13T11:09:28.654Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-13T11:09:28.655Z] [INFO] Worker consolidate completed in 7ms
+[2026-07-13T11:11:28.872Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-13T11:11:28.873Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-13T11:11:28.884Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T11:11:28.886Z] [INFO] Worker testgaps completed in 17ms
+[2026-07-13T11:16:43.272Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-13T11:16:43.272Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T11:16:46.256Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T11:16:46.258Z] [INFO] Worker audit completed in 2987ms
+[2026-07-13T11:18:28.759Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-13T11:18:28.760Z] [INFO] Worker map completed in 3ms
+[2026-07-13T11:22:28.910Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-13T11:22:28.911Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-13T11:22:28.917Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T11:22:28.919Z] [INFO] Worker optimize completed in 11ms
+[2026-07-13T11:26:46.269Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-13T11:26:46.269Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T11:26:49.526Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T11:26:49.527Z] [INFO] Worker audit completed in 3260ms
+[2026-07-13T11:31:28.893Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-13T11:31:28.894Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-13T11:31:28.909Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T11:31:28.909Z] [INFO] Worker testgaps completed in 18ms
+[2026-07-13T11:33:28.770Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-13T11:33:28.771Z] [INFO] Worker map completed in 2ms
+[2026-07-13T11:36:49.543Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-13T11:36:49.543Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T11:36:53.766Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T11:36:53.768Z] [INFO] Worker audit completed in 4230ms
+[2026-07-13T11:37:28.930Z] [INFO] Worker optimize deferred: Memory too low: 9.3% free
+[2026-07-13T11:39:28.672Z] [INFO] Worker consolidate deferred: Memory too low: 5.1% free
+[2026-07-13T11:46:53.788Z] [INFO] Worker audit deferred: Memory too low: 9.3% free
+[2026-07-13T11:48:28.778Z] [INFO] Worker map deferred: Memory too low: 7.9% free
+[2026-07-13T11:51:28.920Z] [INFO] Worker testgaps deferred: Memory too low: 5.6% free
+[2026-07-13T11:52:28.939Z] [INFO] Worker optimize deferred: Memory too low: 5.1% free
+[2026-07-13T11:56:53.814Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-13T11:56:53.816Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T11:56:58.783Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T11:56:58.785Z] [INFO] Worker audit completed in 4983ms
+[2026-07-13T11:56:58.789Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-13T11:56:58.789Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-13T11:56:58.794Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T11:56:58.795Z] [INFO] Worker optimize completed in 8ms
+[2026-07-13T11:56:58.798Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-13T11:56:58.805Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-13T11:56:58.808Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-13T11:56:58.809Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T11:56:58.817Z] [INFO] Worker consolidate completed in 20ms
+[2026-07-13T11:56:58.822Z] [INFO] Starting worker: map (2/2 concurrent)
+[2026-07-13T11:56:58.825Z] [INFO] Starting worker: testgaps (3/2 concurrent)
+[2026-07-13T11:56:58.826Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-13T11:56:58.842Z] [INFO] Worker map completed in 22ms
+[2026-07-13T11:56:58.849Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T11:56:58.851Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T11:56:58.851Z] [INFO] Worker audit completed in 44ms
+[2026-07-13T11:56:58.855Z] [INFO] Worker testgaps completed in 31ms
+[2026-07-13T11:56:58.861Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-13T11:56:58.861Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-13T11:56:58.868Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T11:56:58.870Z] [INFO] Worker optimize completed in 10ms
+[2026-07-13T12:03:28.785Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-13T12:03:28.786Z] [INFO] Worker map completed in 3ms
+[2026-07-13T12:06:58.801Z] [INFO] Worker audit deferred: Memory too low: 7.1% free
+[2026-07-13T12:07:28.944Z] [INFO] Worker optimize deferred: Memory too low: 6.6% free
+[2026-07-13T12:09:28.684Z] [INFO] Worker consolidate deferred: Memory too low: 5.9% free
+[2026-07-13T12:11:28.923Z] [INFO] Worker testgaps deferred: Memory too low: 5.3% free
+[2026-07-13T12:16:58.813Z] [INFO] Worker audit deferred: Memory too low: 6.7% free
+[2026-07-13T12:18:28.794Z] [INFO] Worker map deferred: Memory too low: 6.0% free
+[2026-07-13T12:22:28.950Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-13T12:22:28.951Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-13T12:22:28.973Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T12:22:28.975Z] [INFO] Worker optimize completed in 30ms
+[2026-07-13T12:22:28.983Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-13T12:22:28.984Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T12:22:34.206Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T12:22:34.208Z] [INFO] Worker audit completed in 5228ms
+[2026-07-13T12:22:34.211Z] [INFO] Worker optimize deferred: Memory too low: 9.6% free
+[2026-07-13T12:22:34.212Z] [INFO] Worker consolidate deferred: Memory too low: 9.6% free
+[2026-07-13T12:23:04.226Z] [INFO] Worker testgaps deferred: Memory too low: 9.8% free
+[2026-07-13T12:23:04.227Z] [INFO] Worker audit deferred: Memory too low: 9.8% free
+[2026-07-13T12:23:34.236Z] [INFO] Worker map deferred: Memory too low: 8.7% free
+[2026-07-13T12:23:34.237Z] [INFO] Worker optimize deferred: Memory too low: 8.7% free
+[2026-07-13T12:24:04.251Z] [INFO] Worker consolidate deferred: Memory too low: 8.7% free
+[2026-07-13T12:24:04.252Z] [INFO] Worker testgaps deferred: Memory too low: 8.7% free
+[2026-07-13T12:24:34.253Z] [INFO] Worker audit deferred: Memory too low: 7.5% free
+[2026-07-13T12:24:34.254Z] [INFO] Worker map deferred: Memory too low: 7.5% free
+[2026-07-13T12:25:04.254Z] [INFO] Worker optimize deferred: Memory too low: 9.7% free
+[2026-07-13T12:25:04.255Z] [INFO] Worker consolidate deferred: Memory too low: 9.7% free
+[2026-07-13T12:25:34.271Z] [INFO] Worker testgaps deferred: Memory too low: 7.3% free
+[2026-07-13T12:25:34.271Z] [INFO] Worker audit deferred: Memory too low: 7.3% free
+[2026-07-13T12:26:04.285Z] [INFO] Worker map deferred: Memory too low: 7.6% free
+[2026-07-13T12:26:04.286Z] [INFO] Worker optimize deferred: Memory too low: 7.6% free
+[2026-07-13T12:26:34.295Z] [INFO] Worker consolidate deferred: Memory too low: 7.2% free
+[2026-07-13T12:26:34.296Z] [INFO] Worker testgaps deferred: Memory too low: 7.2% free
+[2026-07-13T12:26:58.817Z] [INFO] Worker audit deferred: Memory too low: 8.5% free
+[2026-07-13T12:27:04.310Z] [INFO] Worker audit deferred: Memory too low: 7.8% free
+[2026-07-13T12:27:04.311Z] [INFO] Worker map deferred: Memory too low: 7.8% free
+[2026-07-13T12:27:34.311Z] [INFO] Worker optimize deferred: Memory too low: 9.1% free
+[2026-07-13T12:27:34.312Z] [INFO] Worker consolidate deferred: Memory too low: 9.1% free
+[2026-07-13T12:28:04.326Z] [INFO] Worker testgaps deferred: Memory too low: 7.8% free
+[2026-07-13T12:28:04.327Z] [INFO] Worker audit deferred: Memory too low: 7.8% free
+[2026-07-13T12:28:34.340Z] [INFO] Worker audit deferred: Memory too low: 8.0% free
+[2026-07-13T12:28:34.340Z] [INFO] Worker map deferred: Memory too low: 8.0% free
+[2026-07-13T12:29:04.358Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-13T12:29:04.361Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-13T12:29:04.373Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T12:29:04.374Z] [INFO] Worker optimize completed in 19ms
+[2026-07-13T12:29:04.379Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-13T12:29:04.380Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-13T12:29:04.383Z] [INFO] Starting worker: testgaps (2/2 concurrent)
+[2026-07-13T12:29:04.384Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-13T12:29:04.390Z] [INFO] Worker consolidate completed in 13ms
+[2026-07-13T12:29:04.394Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-13T12:29:04.395Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T12:29:07.439Z] [INFO] Worker audit deferred: Memory too low: 9.8% free
+[2026-07-13T12:29:07.442Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T12:29:07.443Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T12:29:07.444Z] [INFO] Worker testgaps completed in 3063ms
+[2026-07-13T12:29:07.447Z] [INFO] Worker audit completed in 3055ms
+[2026-07-13T12:29:07.450Z] [INFO] Worker map deferred: Memory too low: 9.8% free
+[2026-07-13T12:29:07.451Z] [INFO] Worker audit deferred: Memory too low: 9.8% free
+[2026-07-13T12:29:07.452Z] [INFO] Worker map deferred: Memory too low: 9.8% free
+[2026-07-13T12:29:37.458Z] [INFO] Worker audit deferred: Memory too low: 8.3% free
+[2026-07-13T12:29:37.458Z] [INFO] Worker map deferred: Memory too low: 8.3% free
+[2026-07-13T12:29:37.459Z] [INFO] Worker audit deferred: Memory too low: 8.3% free
+[2026-07-13T12:30:07.462Z] [INFO] Worker map deferred: Memory too low: 8.6% free
+[2026-07-13T12:30:07.463Z] [INFO] Worker audit deferred: Memory too low: 8.6% free
+[2026-07-13T12:30:07.463Z] [INFO] Worker map deferred: Memory too low: 8.6% free
+[2026-07-13T12:30:37.463Z] [INFO] Worker audit deferred: Memory too low: 7.5% free
+[2026-07-13T12:30:37.464Z] [INFO] Worker map deferred: Memory too low: 7.5% free
+[2026-07-13T12:30:37.464Z] [INFO] Worker audit deferred: Memory too low: 7.5% free
+[2026-07-13T12:31:07.470Z] [INFO] Worker map deferred: Memory too low: 7.6% free
+[2026-07-13T12:31:07.471Z] [INFO] Worker audit deferred: Memory too low: 7.6% free
+[2026-07-13T12:31:07.471Z] [INFO] Worker map deferred: Memory too low: 7.6% free
+[2026-07-13T12:31:28.926Z] [INFO] Worker testgaps deferred: Memory too low: 5.7% free
+[2026-07-13T12:31:37.482Z] [INFO] Worker audit deferred: Memory too low: 6.4% free
+[2026-07-13T12:31:37.483Z] [INFO] Worker map deferred: Memory too low: 6.4% free
+[2026-07-13T12:31:37.484Z] [INFO] Worker testgaps deferred: Memory too low: 6.4% free
+[2026-07-13T12:32:07.490Z] [INFO] Worker audit deferred: Memory too low: 6.5% free
+[2026-07-13T12:32:07.491Z] [INFO] Worker map deferred: Memory too low: 6.4% free
+[2026-07-13T12:32:07.491Z] [INFO] Worker testgaps deferred: Memory too low: 6.4% free
+[2026-07-13T12:32:37.504Z] [INFO] Worker audit deferred: Memory too low: 7.1% free
+[2026-07-13T12:32:37.505Z] [INFO] Worker map deferred: Memory too low: 7.1% free
+[2026-07-13T12:32:37.506Z] [INFO] Worker testgaps deferred: Memory too low: 7.1% free
+[2026-07-13T12:33:07.519Z] [INFO] Worker audit deferred: Memory too low: 6.7% free
+[2026-07-13T12:33:07.520Z] [INFO] Worker map deferred: Memory too low: 6.7% free
+[2026-07-13T12:33:07.521Z] [INFO] Worker testgaps deferred: Memory too low: 6.7% free
+[2026-07-13T12:33:28.797Z] [INFO] Worker map deferred: Memory too low: 5.9% free
+[2026-07-13T12:33:37.533Z] [INFO] Worker audit deferred: Memory too low: 7.3% free
+[2026-07-13T12:33:37.533Z] [INFO] Worker map deferred: Memory too low: 7.3% free
+[2026-07-13T12:33:37.534Z] [INFO] Worker testgaps deferred: Memory too low: 7.3% free
+[2026-07-13T12:34:07.539Z] [INFO] Worker map deferred: Memory too low: 7.1% free
+[2026-07-13T12:34:07.540Z] [INFO] Worker audit deferred: Memory too low: 7.1% free
+[2026-07-13T12:34:07.540Z] [INFO] Worker map deferred: Memory too low: 7.1% free
+[2026-07-13T12:34:37.549Z] [INFO] Worker testgaps deferred: Memory too low: 5.5% free
+[2026-07-13T12:34:37.550Z] [INFO] Worker map deferred: Memory too low: 5.5% free
+[2026-07-13T12:34:37.550Z] [INFO] Worker audit deferred: Memory too low: 5.5% free
+[2026-07-13T12:35:07.552Z] [INFO] Worker map deferred: Memory too low: 5.4% free
+[2026-07-13T12:35:07.553Z] [INFO] Worker testgaps deferred: Memory too low: 5.4% free
+[2026-07-13T12:35:07.554Z] [INFO] Worker map deferred: Memory too low: 5.4% free
+[2026-07-13T12:35:37.563Z] [INFO] Worker audit deferred: Memory too low: 6.5% free
+[2026-07-13T12:35:37.563Z] [INFO] Worker map deferred: Memory too low: 6.5% free
+[2026-07-13T12:35:37.564Z] [INFO] Worker testgaps deferred: Memory too low: 6.5% free
+[2026-07-13T12:36:07.575Z] [INFO] Worker map deferred: Memory too low: 5.2% free
+[2026-07-13T12:36:07.576Z] [INFO] Worker audit deferred: Memory too low: 5.2% free
+[2026-07-13T12:36:07.576Z] [INFO] Worker map deferred: Memory too low: 5.2% free
+[2026-07-13T12:36:37.586Z] [INFO] Worker testgaps deferred: Memory too low: 5.2% free
+[2026-07-13T12:36:37.587Z] [INFO] Worker map deferred: Memory too low: 5.2% free
+[2026-07-13T12:36:37.587Z] [INFO] Worker audit deferred: Memory too low: 5.2% free
+[2026-07-13T12:36:58.826Z] [INFO] Worker audit deferred: Memory too low: 4.7% free
+[2026-07-13T12:37:07.587Z] [INFO] Worker map deferred: Memory too low: 5.7% free
+[2026-07-13T12:37:07.588Z] [INFO] Worker testgaps deferred: Memory too low: 5.7% free
+[2026-07-13T12:37:07.589Z] [INFO] Worker map deferred: Memory too low: 5.7% free
+[2026-07-13T12:37:28.991Z] [INFO] Worker optimize deferred: Memory too low: 5.5% free
+[2026-07-13T12:37:37.592Z] [INFO] Worker audit deferred: Memory too low: 7.6% free
+[2026-07-13T12:37:37.593Z] [INFO] Worker audit deferred: Memory too low: 7.6% free
+[2026-07-13T12:37:37.594Z] [INFO] Worker map deferred: Memory too low: 7.6% free
+[2026-07-13T12:38:07.600Z] [INFO] Worker testgaps deferred: Memory too low: 3.5% free
+[2026-07-13T12:38:07.601Z] [INFO] Worker map deferred: Memory too low: 3.5% free
+[2026-07-13T12:38:07.601Z] [INFO] Worker optimize deferred: Memory too low: 3.5% free
+[2026-07-13T12:38:37.602Z] [INFO] Worker audit deferred: Memory too low: 7.2% free
+[2026-07-13T12:38:37.603Z] [INFO] Worker audit deferred: Memory too low: 7.2% free
+[2026-07-13T12:38:37.604Z] [INFO] Worker map deferred: Memory too low: 7.2% free
+[2026-07-13T12:39:07.609Z] [INFO] Worker testgaps deferred: Memory too low: 7.6% free
+[2026-07-13T12:39:07.610Z] [INFO] Worker map deferred: Memory too low: 7.5% free
+[2026-07-13T12:39:07.611Z] [INFO] Worker optimize deferred: Memory too low: 7.5% free
+[2026-07-13T12:39:28.681Z] [INFO] Worker consolidate deferred: Memory too low: 6.0% free
+[2026-07-13T12:39:37.616Z] [INFO] Worker audit deferred: Memory too low: 6.5% free
+[2026-07-13T12:39:37.617Z] [INFO] Worker audit deferred: Memory too low: 6.5% free
+[2026-07-13T12:39:37.617Z] [INFO] Worker map deferred: Memory too low: 6.5% free
+[2026-07-13T12:40:07.631Z] [INFO] Worker testgaps deferred: Memory too low: 6.7% free
+[2026-07-13T12:40:07.632Z] [INFO] Worker map deferred: Memory too low: 6.7% free
+[2026-07-13T12:40:07.632Z] [INFO] Worker optimize deferred: Memory too low: 6.7% free
+[2026-07-13T12:40:37.642Z] [INFO] Worker consolidate deferred: Memory too low: 8.3% free
+[2026-07-13T12:40:37.643Z] [INFO] Worker audit deferred: Memory too low: 8.3% free
+[2026-07-13T12:40:37.643Z] [INFO] Worker audit deferred: Memory too low: 8.3% free
+[2026-07-13T12:41:07.648Z] [INFO] Worker map deferred: Memory too low: 7.1% free
+[2026-07-13T12:41:07.649Z] [INFO] Worker testgaps deferred: Memory too low: 7.1% free
+[2026-07-13T12:41:07.649Z] [INFO] Worker map deferred: Memory too low: 7.1% free
+[2026-07-13T12:41:37.663Z] [INFO] Worker optimize deferred: Memory too low: 6.9% free
+[2026-07-13T12:41:37.664Z] [INFO] Worker consolidate deferred: Memory too low: 6.9% free
+[2026-07-13T12:41:37.665Z] [INFO] Worker audit deferred: Memory too low: 6.9% free
+[2026-07-13T12:42:07.679Z] [INFO] Worker audit deferred: Memory too low: 5.1% free
+[2026-07-13T12:42:07.680Z] [INFO] Worker map deferred: Memory too low: 5.1% free
+[2026-07-13T12:42:07.680Z] [INFO] Worker testgaps deferred: Memory too low: 5.1% free
+[2026-07-13T12:42:37.688Z] [INFO] Worker map deferred: Memory too low: 7.6% free
+[2026-07-13T12:42:37.689Z] [INFO] Worker optimize deferred: Memory too low: 7.6% free
+[2026-07-13T12:42:37.690Z] [INFO] Worker consolidate deferred: Memory too low: 7.6% free
+[2026-07-13T12:43:07.693Z] [INFO] Worker audit deferred: Memory too low: 7.7% free
+[2026-07-13T12:43:07.694Z] [INFO] Worker audit deferred: Memory too low: 7.7% free
+[2026-07-13T12:43:07.695Z] [INFO] Worker map deferred: Memory too low: 7.7% free
+[2026-07-13T12:43:37.706Z] [INFO] Worker testgaps deferred: Memory too low: 5.9% free
+[2026-07-13T12:43:37.707Z] [INFO] Worker map deferred: Memory too low: 5.9% free
+[2026-07-13T12:43:37.707Z] [INFO] Worker optimize deferred: Memory too low: 5.9% free
+[2026-07-13T12:44:07.708Z] [INFO] Worker consolidate deferred: Memory too low: 6.3% free
+[2026-07-13T12:44:07.708Z] [INFO] Worker audit deferred: Memory too low: 6.3% free
+[2026-07-13T12:44:07.709Z] [INFO] Worker audit deferred: Memory too low: 6.3% free
+[2026-07-13T12:44:37.716Z] [INFO] Worker map deferred: Memory too low: 7.4% free
+[2026-07-13T12:44:37.717Z] [INFO] Worker testgaps deferred: Memory too low: 7.3% free
+[2026-07-13T12:44:37.717Z] [INFO] Worker map deferred: Memory too low: 7.3% free
+[2026-07-13T12:45:07.718Z] [INFO] Worker optimize deferred: Memory too low: 3.8% free
+[2026-07-13T12:45:07.719Z] [INFO] Worker consolidate deferred: Memory too low: 3.8% free
+[2026-07-13T12:45:07.719Z] [INFO] Worker audit deferred: Memory too low: 3.8% free
+[2026-07-13T12:45:37.733Z] [INFO] Worker audit deferred: Memory too low: 5.4% free
+[2026-07-13T12:45:37.734Z] [INFO] Worker map deferred: Memory too low: 5.4% free
+[2026-07-13T12:45:37.735Z] [INFO] Worker testgaps deferred: Memory too low: 5.4% free
+[2026-07-13T12:46:07.749Z] [INFO] Worker map deferred: Memory too low: 6.5% free
+[2026-07-13T12:46:07.750Z] [INFO] Worker optimize deferred: Memory too low: 6.5% free
+[2026-07-13T12:46:07.751Z] [INFO] Worker consolidate deferred: Memory too low: 6.5% free
+[2026-07-13T12:46:37.762Z] [INFO] Worker audit deferred: Memory too low: 4.3% free
+[2026-07-13T12:46:37.763Z] [INFO] Worker audit deferred: Memory too low: 4.3% free
+[2026-07-13T12:46:37.763Z] [INFO] Worker map deferred: Memory too low: 4.3% free
+[2026-07-13T12:46:58.846Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-13T12:46:58.847Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T12:47:03.512Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T12:47:03.515Z] [INFO] Worker audit completed in 4673ms
+[2026-07-13T12:47:03.520Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-13T12:47:03.521Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-13T12:47:03.535Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T12:47:03.537Z] [INFO] Worker testgaps completed in 19ms
+[2026-07-13T12:47:03.544Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-13T12:47:03.550Z] [INFO] Starting worker: optimize (2/2 concurrent)
+[2026-07-13T12:47:03.550Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-13T12:47:03.563Z] [INFO] Worker map completed in 22ms
+[2026-07-13T12:47:03.570Z] [INFO] Starting worker: consolidate (2/2 concurrent)
+[2026-07-13T12:47:03.573Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-13T12:47:03.578Z] [INFO] Starting worker: audit (3/2 concurrent)
+[2026-07-13T12:47:03.582Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T12:47:03.594Z] [INFO] Worker consolidate completed in 27ms
+[2026-07-13T12:47:03.601Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T12:47:03.603Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T12:47:03.605Z] [INFO] Worker optimize completed in 58ms
+[2026-07-13T12:47:03.608Z] [INFO] Worker audit completed in 33ms
+[2026-07-13T12:47:03.614Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-13T12:47:03.615Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T12:47:03.617Z] [INFO] Starting worker: map (2/2 concurrent)
+[2026-07-13T12:47:03.631Z] [INFO] Worker map completed in 16ms
+[2026-07-13T12:47:03.638Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T12:47:03.640Z] [INFO] Worker audit completed in 29ms
+[2026-07-13T12:48:28.813Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-13T12:48:28.814Z] [INFO] Worker map completed in 3ms
+[2026-07-13T12:51:28.939Z] [INFO] Worker testgaps deferred: Memory too low: 8.8% free
+[2026-07-13T12:52:28.993Z] [INFO] Worker optimize deferred: Memory too low: 6.1% free
+[2026-07-13T12:57:03.564Z] [INFO] Worker audit deferred: Memory too low: 6.5% free
+[2026-07-13T13:03:28.843Z] [INFO] Worker map deferred: Memory too low: 8.4% free
+[2026-07-13T13:07:03.594Z] [INFO] Worker audit deferred: Memory too low: 6.1% free
+[2026-07-13T13:07:29.001Z] [INFO] Worker optimize deferred: Memory too low: 6.4% free
+[2026-07-13T13:09:28.685Z] [INFO] Worker consolidate deferred: Memory too low: 4.8% free
+[2026-07-13T13:11:28.977Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-13T13:11:28.979Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-13T13:11:29.008Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T13:11:29.010Z] [INFO] Worker testgaps completed in 47ms
+[2026-07-13T13:11:29.014Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-13T13:11:29.014Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-13T13:11:29.023Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T13:11:29.023Z] [INFO] Worker testgaps completed in 11ms
+[2026-07-13T13:11:29.037Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-13T13:11:29.037Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-13T13:11:29.048Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-13T13:11:29.048Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T13:11:33.410Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T13:11:33.412Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T13:11:33.414Z] [INFO] Worker optimize completed in 4388ms
+[2026-07-13T13:11:33.416Z] [INFO] Worker audit completed in 4371ms
+[2026-07-13T13:11:33.418Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-13T13:11:33.422Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-13T13:11:33.423Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T13:11:33.425Z] [INFO] Starting worker: optimize (3/2 concurrent)
+[2026-07-13T13:11:33.425Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-13T13:11:33.432Z] [INFO] Starting worker: consolidate (4/2 concurrent)
+[2026-07-13T13:11:33.434Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-13T13:11:33.440Z] [INFO] Worker map completed in 23ms
+[2026-07-13T13:11:33.442Z] [INFO] Worker consolidate completed in 12ms
+[2026-07-13T13:11:33.446Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T13:11:33.447Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T13:11:33.448Z] [INFO] Worker audit completed in 28ms
+[2026-07-13T13:11:33.450Z] [INFO] Worker optimize completed in 27ms
+[2026-07-13T13:15:28.612Z] [INFO] Worker harness deferred: Memory too low: 7.3% free
+[2026-07-13T13:17:03.599Z] [INFO] Worker audit deferred: Memory too low: 4.7% free
+[2026-07-13T13:18:28.865Z] [INFO] Worker map deferred: Memory too low: 6.1% free
+[2026-07-13T13:22:29.019Z] [INFO] Worker optimize deferred: Memory too low: 4.4% free
+[2026-07-13T13:27:03.611Z] [INFO] Worker audit deferred: Memory too low: 6.5% free
+[2026-07-13T13:31:29.018Z] [INFO] Worker testgaps deferred: Memory too low: 8.4% free
+[2026-07-13T13:33:28.897Z] [INFO] Worker map deferred: Memory too low: 6.3% free
+[2026-07-13T13:37:03.626Z] [INFO] Worker audit deferred: Memory too low: 6.1% free
+[2026-07-13T13:37:29.036Z] [INFO] Worker optimize deferred: Memory too low: 4.7% free
+[2026-07-13T13:39:28.701Z] [INFO] Worker consolidate deferred: Memory too low: 3.8% free
+[2026-07-13T13:47:03.644Z] [INFO] Worker audit deferred: Memory too low: 3.6% free
+[2026-07-13T13:48:28.906Z] [INFO] Worker map deferred: Memory too low: 6.9% free
+[2026-07-13T13:51:29.032Z] [INFO] Worker testgaps deferred: Memory too low: 5.8% free
+[2026-07-13T13:52:29.043Z] [INFO] Worker optimize deferred: Memory too low: 6.4% free
+[2026-07-13T13:57:03.650Z] [INFO] Worker audit deferred: Memory too low: 7.8% free
+[2026-07-13T14:03:28.923Z] [INFO] Worker map deferred: Memory too low: 8.6% free
+[2026-07-13T14:07:03.652Z] [INFO] Worker audit deferred: Memory too low: 6.0% free
+[2026-07-13T14:07:29.059Z] [INFO] Worker optimize deferred: Memory too low: 5.9% free
+[2026-07-13T14:09:28.710Z] [INFO] Worker consolidate deferred: Memory too low: 8.2% free
+[2026-07-13T14:11:29.040Z] [INFO] Worker testgaps deferred: Memory too low: 6.2% free
+[2026-07-13T14:17:03.656Z] [INFO] Worker audit deferred: Memory too low: 7.0% free
+[2026-07-13T14:18:28.935Z] [INFO] Worker map deferred: Memory too low: 9.5% free
+[2026-07-13T14:22:29.061Z] [INFO] Worker optimize deferred: Memory too low: 3.9% free
+[2026-07-13T14:27:03.674Z] [INFO] Worker audit deferred: Memory too low: 4.1% free
+[2026-07-13T14:31:29.057Z] [INFO] Worker testgaps deferred: Memory too low: 8.6% free
+[2026-07-13T14:33:28.946Z] [INFO] Worker map deferred: Memory too low: 7.5% free
+[2026-07-13T14:37:03.678Z] [INFO] Worker audit deferred: Memory too low: 6.7% free
+[2026-07-13T14:37:29.075Z] [INFO] Worker optimize deferred: Memory too low: 6.8% free
+[2026-07-13T14:39:28.716Z] [INFO] Worker consolidate deferred: Memory too low: 7.4% free
+[2026-07-13T14:47:03.708Z] [INFO] Worker audit deferred: Memory too low: 3.3% free
+[2026-07-13T14:48:28.954Z] [INFO] Worker map deferred: Memory too low: 6.4% free
+[2026-07-13T14:51:29.075Z] [INFO] Worker testgaps deferred: Memory too low: 2.7% free
+[2026-07-13T14:52:29.093Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-13T14:52:29.094Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-13T14:52:29.124Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:29.126Z] [INFO] Worker optimize completed in 47ms
+[2026-07-13T14:52:29.131Z] [INFO] Starting worker: harness (1/2 concurrent)
+[2026-07-13T14:52:29.153Z] [INFO] Worker harness completed in 23ms
+[2026-07-13T14:52:29.157Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-13T14:52:29.157Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T14:52:33.656Z] [INFO] Starting worker: map (2/2 concurrent)
+[2026-07-13T14:52:33.657Z] [INFO] Worker map completed in 4ms
+[2026-07-13T14:52:33.660Z] [INFO] Starting worker: optimize (2/2 concurrent)
+[2026-07-13T14:52:33.661Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-13T14:52:33.670Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-13T14:52:33.671Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T14:52:33.683Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:33.685Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:33.686Z] [INFO] Worker audit completed in 4531ms
+[2026-07-13T14:52:33.689Z] [INFO] Worker optimize completed in 30ms
+[2026-07-13T14:52:33.693Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-13T14:52:33.693Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-13T14:52:33.696Z] [INFO] Starting worker: map (2/2 concurrent)
+[2026-07-13T14:52:33.707Z] [INFO] Starting worker: audit (3/2 concurrent)
+[2026-07-13T14:52:33.707Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T14:52:33.709Z] [INFO] Starting worker: optimize (4/2 concurrent)
+[2026-07-13T14:52:33.709Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-13T14:52:33.710Z] [INFO] Worker map completed in 16ms
+[2026-07-13T14:52:33.724Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:33.725Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:33.726Z] [INFO] Worker testgaps completed in 35ms
+[2026-07-13T14:52:33.729Z] [INFO] Worker audit completed in 61ms
+[2026-07-13T14:52:33.735Z] [INFO] Starting worker: consolidate (2/2 concurrent)
+[2026-07-13T14:52:33.737Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-13T14:52:33.741Z] [INFO] Starting worker: audit (3/2 concurrent)
+[2026-07-13T14:52:33.742Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T14:52:33.744Z] [INFO] Starting worker: map (4/2 concurrent)
+[2026-07-13T14:52:33.745Z] [INFO] Worker consolidate completed in 12ms
+[2026-07-13T14:52:33.746Z] [INFO] Worker map completed in 4ms
+[2026-07-13T14:52:33.761Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:33.762Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:33.763Z] [INFO] Worker audit completed in 58ms
+[2026-07-13T14:52:33.766Z] [INFO] Worker optimize completed in 58ms
+[2026-07-13T14:52:33.771Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-13T14:52:33.772Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-13T14:52:33.775Z] [INFO] Starting worker: optimize (2/2 concurrent)
+[2026-07-13T14:52:33.776Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-13T14:52:33.787Z] [INFO] Starting worker: audit (3/2 concurrent)
+[2026-07-13T14:52:33.787Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T14:52:33.798Z] [INFO] Starting worker: map (4/2 concurrent)
+[2026-07-13T14:52:33.800Z] [INFO] Worker map completed in 5ms
+[2026-07-13T14:52:33.818Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:33.819Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:33.820Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:33.822Z] [INFO] Worker testgaps completed in 53ms
+[2026-07-13T14:52:33.825Z] [INFO] Worker optimize completed in 52ms
+[2026-07-13T14:52:33.828Z] [INFO] Worker audit completed in 89ms
+[2026-07-13T14:52:33.836Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-13T14:52:33.837Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T14:52:33.838Z] [INFO] Starting worker: optimize (2/2 concurrent)
+[2026-07-13T14:52:33.839Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-13T14:52:33.841Z] [INFO] Starting worker: consolidate (3/2 concurrent)
+[2026-07-13T14:52:33.857Z] [INFO] Starting worker: testgaps (4/2 concurrent)
+[2026-07-13T14:52:33.857Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-13T14:52:33.872Z] [INFO] Starting worker: audit (4/2 concurrent)
+[2026-07-13T14:52:33.873Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T14:52:33.874Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-13T14:52:33.875Z] [INFO] Worker consolidate completed in 35ms
+[2026-07-13T14:52:33.898Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:33.900Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:33.902Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:33.904Z] [INFO] Worker audit completed in 71ms
+[2026-07-13T14:52:33.906Z] [INFO] Worker optimize completed in 69ms
+[2026-07-13T14:52:33.908Z] [INFO] Worker audit completed in 123ms
+[2026-07-13T14:52:33.912Z] [INFO] Starting worker: map (2/2 concurrent)
+[2026-07-13T14:52:33.915Z] [INFO] Starting worker: optimize (3/2 concurrent)
+[2026-07-13T14:52:33.916Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-13T14:52:33.919Z] [INFO] Starting worker: audit (4/2 concurrent)
+[2026-07-13T14:52:33.920Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T14:52:33.921Z] [INFO] Starting worker: testgaps (4/2 concurrent)
+[2026-07-13T14:52:33.921Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-13T14:52:33.923Z] [INFO] Starting worker: map (4/2 concurrent)
+[2026-07-13T14:52:33.924Z] [INFO] Worker map completed in 14ms
+[2026-07-13T14:52:33.927Z] [INFO] Worker map completed in 5ms
+[2026-07-13T14:52:33.968Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:33.969Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:33.969Z] [INFO] Worker testgaps completed in 115ms
+[2026-07-13T14:52:33.973Z] [INFO] Worker audit completed in 104ms
+[2026-07-13T14:52:33.977Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-13T14:52:33.978Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T14:52:33.981Z] [INFO] Starting worker: optimize (2/2 concurrent)
+[2026-07-13T14:52:33.981Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-13T14:52:33.984Z] [INFO] Starting worker: consolidate (3/2 concurrent)
+[2026-07-13T14:52:33.984Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-13T14:52:33.985Z] [INFO] Worker consolidate completed in 4ms
+[2026-07-13T14:52:34.011Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:34.012Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:34.013Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:34.014Z] [INFO] Worker optimize completed in 101ms
+[2026-07-13T14:52:34.016Z] [INFO] Worker audit completed in 99ms
+[2026-07-13T14:52:34.018Z] [INFO] Worker testgaps completed in 98ms
+[2026-07-13T14:52:34.023Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-13T14:52:34.023Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T14:52:34.027Z] [INFO] Starting worker: map (2/2 concurrent)
+[2026-07-13T14:52:34.030Z] [INFO] Starting worker: testgaps (3/2 concurrent)
+[2026-07-13T14:52:34.030Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-13T14:52:34.030Z] [INFO] Worker map completed in 6ms
+[2026-07-13T14:52:34.060Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:34.062Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:34.062Z] [INFO] Worker audit completed in 87ms
+[2026-07-13T14:52:34.065Z] [INFO] Worker optimize completed in 87ms
+[2026-07-13T14:52:34.071Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:34.073Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:52:34.075Z] [INFO] Worker audit completed in 55ms
+[2026-07-13T14:52:34.078Z] [INFO] Worker testgaps completed in 50ms
+[2026-07-13T14:57:03.724Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-13T14:57:03.724Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T14:57:06.816Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T14:57:06.817Z] [INFO] Worker audit completed in 3096ms
+[2026-07-13T15:03:28.963Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-13T15:03:28.964Z] [INFO] Worker map completed in 2ms
+[2026-07-13T15:07:06.827Z] [INFO] Worker audit deferred: Memory too low: 9.4% free
+[2026-07-13T15:07:29.141Z] [INFO] Worker optimize deferred: Memory too low: 7.7% free
+[2026-07-13T15:09:28.735Z] [INFO] Worker consolidate deferred: Memory too low: 5.0% free
+[2026-07-13T15:11:29.077Z] [INFO] Worker testgaps deferred: Memory too low: 4.8% free
+[2026-07-13T15:17:06.841Z] [INFO] Worker audit deferred: Memory too low: 5.3% free
+[2026-07-13T15:18:28.979Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-13T15:18:28.980Z] [INFO] Worker map completed in 3ms
+[2026-07-13T15:18:28.984Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-13T15:18:28.985Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T15:18:32.628Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T15:18:32.631Z] [INFO] Worker audit completed in 3647ms
+[2026-07-13T15:18:32.637Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-13T15:18:32.637Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-13T15:18:32.648Z] [INFO] Starting worker: consolidate (2/2 concurrent)
+[2026-07-13T15:18:32.652Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-13T15:18:32.653Z] [INFO] Worker consolidate completed in 8ms
+[2026-07-13T15:18:32.658Z] [INFO] Starting worker: testgaps (2/2 concurrent)
+[2026-07-13T15:18:32.658Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-13T15:18:32.670Z] [INFO] Starting worker: audit (3/2 concurrent)
+[2026-07-13T15:18:32.670Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T15:18:32.676Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T15:18:32.679Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T15:18:32.680Z] [INFO] Worker optimize completed in 46ms
+[2026-07-13T15:18:32.683Z] [INFO] Worker testgaps completed in 28ms
+[2026-07-13T15:18:32.687Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T15:18:32.689Z] [INFO] Worker audit completed in 22ms
+[2026-07-13T15:22:29.161Z] [INFO] Worker optimize deferred: Memory too low: 8.0% free
+[2026-07-13T15:27:06.847Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-13T15:27:06.848Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T15:27:10.440Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T15:27:10.441Z] [INFO] Worker audit completed in 3597ms
+[2026-07-13T15:27:10.447Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-13T15:27:10.448Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-13T15:27:10.459Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T15:27:10.460Z] [INFO] Worker optimize completed in 15ms
+[2026-07-13T17:32:31.097Z] [INFO] Worker testgaps deferred: Memory too low: 9.7% free
+[2026-07-13T17:32:31.098Z] [INFO] Worker map deferred: Memory too low: 9.7% free
+[2026-07-13T17:32:31.100Z] [INFO] Worker optimize deferred: Memory too low: 9.7% free
+[2026-07-13T17:32:31.101Z] [INFO] Worker audit deferred: Memory too low: 9.7% free
+[2026-07-13T17:32:31.103Z] [INFO] Worker consolidate deferred: Memory too low: 9.7% free
+[2026-07-13T17:32:31.103Z] [INFO] Worker backup deferred: Memory too low: 9.7% free
+[2026-07-13T17:42:31.115Z] [INFO] Worker audit deferred: Memory too low: 8.6% free
+[2026-07-13T17:47:31.100Z] [INFO] Worker map deferred: Memory too low: 8.9% free
+[2026-07-13T17:47:31.101Z] [INFO] Worker optimize deferred: Memory too low: 8.9% free
+[2026-07-13T17:52:31.106Z] [INFO] Worker testgaps deferred: Memory too low: 9.0% free
+[2026-07-13T17:52:31.119Z] [INFO] Worker audit deferred: Memory too low: 9.0% free
+[2026-07-13T18:02:31.116Z] [INFO] Worker map deferred: Memory too low: 9.7% free
+[2026-07-13T18:02:31.124Z] [INFO] Worker optimize deferred: Memory too low: 9.7% free
+[2026-07-13T18:02:31.126Z] [INFO] Worker consolidate deferred: Memory too low: 9.7% free
+[2026-07-13T18:02:31.127Z] [INFO] Worker audit deferred: Memory too low: 9.7% free
+[2026-07-13T18:12:31.114Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-13T18:12:31.115Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-13T18:12:31.130Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T18:12:31.132Z] [INFO] Worker testgaps completed in 22ms
+[2026-07-13T18:12:31.137Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-13T18:12:31.138Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-13T18:12:31.149Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T18:12:31.151Z] [INFO] Worker testgaps completed in 16ms
+[2026-07-13T18:12:31.157Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-13T18:12:31.161Z] [INFO] Starting worker: optimize (2/2 concurrent)
+[2026-07-13T18:12:31.162Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-13T18:12:31.172Z] [INFO] Worker map completed in 18ms
+[2026-07-13T18:12:31.178Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-13T18:12:31.178Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T19:06:00.759Z] [INFO] Starting worker: consolidate (3/2 concurrent)
+[2026-07-13T19:06:00.761Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-13T19:06:00.762Z] [INFO] Worker consolidate completed in 6ms
+[2026-07-13T19:06:00.767Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T19:06:00.768Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T19:06:00.770Z] [INFO] Worker optimize completed in 3209611ms
+[2026-07-13T19:06:00.774Z] [INFO] Worker audit completed in 3209598ms
+[2026-07-13T19:06:00.779Z] [INFO] Starting worker: backup (1/2 concurrent)
+[2026-07-13T19:06:00.796Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-13T19:06:00.797Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T19:06:00.801Z] [INFO] Starting worker: map (3/2 concurrent)
+[2026-07-13T19:06:00.812Z] [INFO] Starting worker: optimize (4/2 concurrent)
+[2026-07-13T19:06:00.812Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-13T19:06:00.821Z] [INFO] Worker backup completed in 44ms
+[2026-07-13T19:06:00.824Z] [INFO] Worker map completed in 25ms
+[2026-07-13T19:06:00.829Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T19:06:00.831Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T19:06:00.832Z] [INFO] Worker audit completed in 38ms
+[2026-07-13T19:06:00.835Z] [INFO] Worker optimize completed in 26ms
+[2026-07-13T19:06:00.840Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-13T19:06:00.841Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-13T19:06:00.843Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-13T19:06:00.844Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T19:06:00.855Z] [INFO] Starting worker: map (3/2 concurrent)
+[2026-07-13T19:06:00.867Z] [INFO] Starting worker: optimize (4/2 concurrent)
+[2026-07-13T19:06:00.868Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-13T19:06:00.868Z] [INFO] Worker map completed in 15ms
+[2026-07-13T19:06:00.882Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T19:06:00.883Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T19:06:00.885Z] [INFO] Worker testgaps completed in 46ms
+[2026-07-13T19:06:00.887Z] [INFO] Worker audit completed in 46ms
+[2026-07-13T19:06:00.892Z] [INFO] Starting worker: consolidate (2/2 concurrent)
+[2026-07-13T19:06:00.893Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-13T19:06:00.896Z] [INFO] Starting worker: audit (3/2 concurrent)
+[2026-07-13T19:06:00.898Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T19:06:00.908Z] [INFO] Worker consolidate completed in 18ms
+[2026-07-13T19:06:00.913Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T19:06:00.915Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T19:06:00.916Z] [INFO] Worker audit completed in 22ms
+[2026-07-13T19:06:00.919Z] [INFO] Worker optimize completed in 54ms
+[2026-07-13T19:06:00.927Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-13T19:06:00.927Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-13T19:06:00.938Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-13T19:06:00.939Z] [INFO] Worker audit completed in 15ms
+[2026-07-13T19:06:00.943Z] [INFO] Daemon self-shutdown: max age 43200s reached
+[2026-07-13T19:06:00.946Z] [INFO] Stopped worker: map
+[2026-07-13T19:06:00.947Z] [INFO] Stopped worker: audit
+[2026-07-13T19:06:00.947Z] [INFO] Stopped worker: optimize
+[2026-07-13T19:06:00.948Z] [INFO] Stopped worker: consolidate
+[2026-07-13T19:06:00.948Z] [INFO] Stopped worker: testgaps
+[2026-07-13T19:06:00.949Z] [INFO] Stopped worker: backup
+[2026-07-13T19:06:00.949Z] [INFO] Stopped worker: harness
+[2026-07-13T19:06:00.955Z] [INFO] Daemon stopped
+[2026-07-15T13:43:18.280Z] [INFO] Scheduled map (interval: 900s, first run in 0s)
+[2026-07-15T13:43:18.280Z] [INFO] Scheduled audit (interval: 600s, first run in 120s)
+[2026-07-15T13:43:18.281Z] [INFO] Scheduled optimize (interval: 900s, first run in 240s)
+[2026-07-15T13:43:18.281Z] [INFO] Scheduled consolidate (interval: 1800s, first run in 360s)
+[2026-07-15T13:43:18.282Z] [INFO] Scheduled testgaps (interval: 1200s, first run in 480s)
+[2026-07-15T13:43:18.282Z] [INFO] Scheduled backup (interval: 86400s, first run in 600s)
+[2026-07-15T13:43:18.282Z] [INFO] Scheduled harness (interval: 21600s, first run in 720s)
+[2026-07-15T13:43:18.283Z] [INFO] Lifecycle monitor active (ttl=43200s)
+[2026-07-15T13:43:18.286Z] [INFO] Daemon started (PID: 15208, CPUs: 20, workers: 7, maxCpuLoad: 16, minFreeMemoryPercent: 10%)
+[2026-07-15T13:43:18.286Z] [INFO] Claude Code headless mode available - AI workers enabled
+[2026-07-15T13:43:18.289Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-15T13:43:18.291Z] [INFO] Worker map completed in 4ms
+[2026-07-15T13:45:18.285Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T13:45:18.286Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T13:45:21.515Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T13:45:21.516Z] [INFO] Worker audit completed in 3232ms
+[2026-07-15T13:47:18.301Z] [INFO] Worker optimize deferred: Memory too low: 5.4% free
+[2026-07-15T13:49:18.311Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-15T13:49:18.314Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-15T13:49:18.315Z] [INFO] Worker consolidate completed in 5ms
+[2026-07-15T13:49:18.317Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-15T13:49:18.317Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-15T13:49:18.323Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T13:49:18.324Z] [INFO] Worker optimize completed in 8ms
+[2026-07-15T13:51:18.320Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-15T13:51:18.320Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-15T13:51:18.326Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T13:51:18.326Z] [INFO] Worker testgaps completed in 8ms
+[2026-07-15T13:53:18.319Z] [INFO] Starting worker: backup (1/2 concurrent)
+[2026-07-15T13:53:18.325Z] [INFO] Worker backup completed in 7ms
+[2026-07-15T13:55:18.317Z] [INFO] Worker harness deferred: Memory too low: 8.3% free
+[2026-07-15T13:55:21.555Z] [INFO] Worker audit deferred: Memory too low: 8.1% free
+[2026-07-15T13:58:18.342Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-15T13:58:18.344Z] [INFO] Worker map completed in 5ms
+[2026-07-15T13:58:18.350Z] [INFO] Starting worker: harness (1/2 concurrent)
+[2026-07-15T13:58:18.442Z] [INFO] Worker harness completed in 95ms
+[2026-07-15T13:58:18.445Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T13:58:18.445Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T13:58:21.589Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T13:58:21.590Z] [INFO] Worker audit completed in 3147ms
+[2026-07-15T14:02:18.343Z] [INFO] Worker optimize deferred: Memory too low: 7.8% free
+[2026-07-15T14:05:21.584Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T14:05:21.586Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T14:05:26.519Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T14:05:26.523Z] [INFO] Worker audit completed in 4944ms
+[2026-07-15T14:05:26.534Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-15T14:05:26.535Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-15T14:05:26.553Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T14:05:26.557Z] [INFO] Worker optimize completed in 26ms
+[2026-07-15T14:11:18.379Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-15T14:11:18.381Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-15T14:11:18.405Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T14:11:18.408Z] [INFO] Worker testgaps completed in 35ms
+[2026-07-15T14:13:18.387Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-15T14:13:18.389Z] [INFO] Worker map completed in 4ms
+[2026-07-15T14:15:26.565Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T14:15:26.566Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T14:15:28.716Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T14:15:28.717Z] [INFO] Worker audit completed in 2153ms
+[2026-07-15T14:17:18.389Z] [INFO] Worker optimize deferred: Memory too low: 8.8% free
+[2026-07-15T14:19:18.382Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-15T14:19:18.387Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-15T14:19:18.389Z] [INFO] Worker consolidate completed in 10ms
+[2026-07-15T14:19:18.394Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-15T14:19:18.394Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-15T14:19:18.408Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T14:19:18.409Z] [INFO] Worker optimize completed in 18ms
+[2026-07-15T14:25:28.779Z] [INFO] Worker audit deferred: Memory too low: 6.2% free
+[2026-07-15T14:28:18.458Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-15T14:28:18.465Z] [INFO] Worker map completed in 24ms
+[2026-07-15T14:28:18.475Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T14:28:18.476Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T14:28:25.694Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T14:28:25.696Z] [INFO] Worker audit completed in 7224ms
+[2026-07-15T14:31:18.463Z] [INFO] Worker testgaps deferred: Memory too low: 4.0% free
+[2026-07-15T14:32:18.437Z] [INFO] Worker optimize deferred: Memory too low: 9.8% free
+[2026-07-15T14:35:28.801Z] [INFO] Worker audit deferred: Memory too low: 8.1% free
+[2026-07-15T14:43:18.545Z] [INFO] Worker map deferred: Memory too low: 8.1% free
+[2026-07-15T14:45:28.839Z] [INFO] Worker audit deferred: Memory too low: 6.9% free
+[2026-07-15T14:47:18.487Z] [INFO] Worker optimize deferred: Memory too low: 8.8% free
+[2026-07-15T14:49:18.469Z] [INFO] Worker consolidate deferred: Memory too low: 9.5% free
+[2026-07-15T14:51:18.519Z] [INFO] Worker testgaps deferred: Memory too low: 6.5% free
+[2026-07-15T14:55:28.868Z] [INFO] Worker audit deferred: Memory too low: 8.3% free
+[2026-07-15T14:58:18.594Z] [INFO] Worker map deferred: Memory too low: 3.2% free
+[2026-07-15T15:02:18.554Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-15T15:02:18.557Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-15T15:02:18.590Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T15:02:18.594Z] [INFO] Worker optimize completed in 51ms
+[2026-07-15T15:02:18.599Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-15T15:02:18.599Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-15T15:02:18.615Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T15:02:18.616Z] [INFO] Worker testgaps completed in 19ms
+[2026-07-15T15:02:18.621Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-15T15:02:18.622Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-15T15:02:18.643Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-15T15:02:18.643Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T15:02:24.115Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T15:02:24.117Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T15:02:24.118Z] [INFO] Worker optimize completed in 5498ms
+[2026-07-15T15:02:24.120Z] [INFO] Worker audit completed in 5480ms
+[2026-07-15T15:02:24.122Z] [INFO] Worker map deferred: Memory too low: 9.7% free
+[2026-07-15T15:02:24.122Z] [INFO] Worker audit deferred: Memory too low: 9.7% free
+[2026-07-15T15:02:24.124Z] [INFO] Worker optimize deferred: Memory too low: 9.7% free
+[2026-07-15T15:02:24.124Z] [INFO] Worker consolidate deferred: Memory too low: 9.7% free
+[2026-07-15T15:02:54.144Z] [INFO] Worker testgaps deferred: Memory too low: 8.1% free
+[2026-07-15T15:02:54.145Z] [INFO] Worker audit deferred: Memory too low: 8.1% free
+[2026-07-15T15:02:54.146Z] [INFO] Worker map deferred: Memory too low: 8.1% free
+[2026-07-15T15:02:54.146Z] [INFO] Worker map deferred: Memory too low: 8.1% free
+[2026-07-15T15:03:24.158Z] [INFO] Worker audit deferred: Memory too low: 9.3% free
+[2026-07-15T15:03:24.160Z] [INFO] Worker optimize deferred: Memory too low: 9.3% free
+[2026-07-15T15:03:24.161Z] [INFO] Worker consolidate deferred: Memory too low: 9.3% free
+[2026-07-15T15:03:24.161Z] [INFO] Worker testgaps deferred: Memory too low: 9.3% free
+[2026-07-15T15:03:54.172Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T15:03:54.175Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T15:03:56.023Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T15:03:56.024Z] [INFO] Worker audit completed in 1854ms
+[2026-07-15T15:03:56.027Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-15T15:03:56.030Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-15T15:03:56.030Z] [INFO] Worker map completed in 5ms
+[2026-07-15T15:03:56.033Z] [INFO] Worker map completed in 5ms
+[2026-07-15T15:03:56.036Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T15:03:56.036Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T15:03:56.042Z] [INFO] Starting worker: optimize (2/2 concurrent)
+[2026-07-15T15:03:56.042Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-15T15:03:56.043Z] [INFO] Starting worker: consolidate (3/2 concurrent)
+[2026-07-15T15:03:56.047Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-15T15:03:56.054Z] [INFO] Starting worker: testgaps (4/2 concurrent)
+[2026-07-15T15:03:56.055Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-15T15:03:56.058Z] [INFO] Worker consolidate completed in 16ms
+[2026-07-15T15:03:56.067Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T15:03:56.068Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T15:03:56.069Z] [INFO] Worker audit completed in 34ms
+[2026-07-15T15:03:56.072Z] [INFO] Worker optimize completed in 32ms
+[2026-07-15T15:03:56.074Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T15:03:56.075Z] [INFO] Worker testgaps completed in 22ms
+[2026-07-15T15:05:28.902Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T15:05:28.902Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T15:05:30.656Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T15:05:30.656Z] [INFO] Worker audit completed in 1756ms
+[2026-07-15T15:11:18.591Z] [INFO] Worker testgaps deferred: Memory too low: 5.7% free
+[2026-07-15T15:13:18.637Z] [INFO] Worker map deferred: Memory too low: 5.5% free
+[2026-07-15T15:15:30.698Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T15:15:30.700Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T15:15:36.998Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T15:15:37.003Z] [INFO] Worker audit completed in 6315ms
+[2026-07-15T15:15:37.011Z] [INFO] Worker testgaps deferred: Memory too low: 9.0% free
+[2026-07-15T15:16:07.015Z] [INFO] Worker map deferred: Memory too low: 9.1% free
+[2026-07-15T15:16:37.032Z] [INFO] Worker testgaps deferred: Memory too low: 9.5% free
+[2026-07-15T15:17:07.048Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-15T15:17:07.049Z] [INFO] Worker map completed in 3ms
+[2026-07-15T15:17:07.051Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-15T15:17:07.052Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-15T15:17:07.068Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T15:17:07.069Z] [INFO] Worker testgaps completed in 19ms
+[2026-07-15T15:17:18.638Z] [INFO] Worker optimize deferred: Memory too low: 9.9% free
+[2026-07-15T15:19:18.550Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-15T15:19:18.553Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-15T15:19:18.554Z] [INFO] Worker consolidate completed in 8ms
+[2026-07-15T15:19:18.558Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-15T15:19:18.559Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-15T15:19:18.568Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T15:19:18.571Z] [INFO] Worker optimize completed in 15ms
+[2026-07-15T15:25:37.034Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T15:25:37.034Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T15:25:40.552Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T15:25:40.555Z] [INFO] Worker audit completed in 3523ms
+[2026-07-15T15:28:18.672Z] [INFO] Worker map deferred: Memory too low: 9.4% free
+[2026-07-15T15:43:17.715Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-15T15:43:17.716Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-15T15:43:17.985Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T15:43:17.988Z] [INFO] Worker testgaps completed in 651ms
+[2026-07-15T15:43:17.994Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-15T15:43:17.998Z] [INFO] Worker map completed in 7ms
+[2026-07-15T15:43:18.020Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-15T15:43:18.020Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-15T15:43:18.033Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T15:43:18.036Z] [INFO] Worker optimize completed in 34ms
+[2026-07-15T15:43:18.046Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T15:43:18.046Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T15:43:44.774Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T15:43:44.780Z] [INFO] Worker audit completed in 26735ms
+[2026-07-15T15:43:44.790Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-15T15:43:44.793Z] [INFO] Worker map completed in 5ms
+[2026-07-15T17:01:15.178Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-15T17:01:15.180Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-15T17:01:15.232Z] [INFO] Worker consolidate completed in 57ms
+[2026-07-15T17:01:15.236Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T17:01:15.236Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T17:01:31.060Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T17:01:31.063Z] [INFO] Worker audit completed in 15828ms
+[2026-07-15T17:01:31.068Z] [INFO] Worker optimize deferred: Memory too low: 7.2% free
+[2026-07-15T17:01:31.070Z] [INFO] Worker map deferred: Memory too low: 7.2% free
+[2026-07-15T17:01:31.071Z] [INFO] Worker testgaps deferred: Memory too low: 7.2% free
+[2026-07-15T17:11:31.119Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T17:11:31.123Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T17:11:38.270Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T17:11:38.276Z] [INFO] Worker audit completed in 7167ms
+[2026-07-15T17:11:38.284Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-15T17:11:38.284Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-15T17:11:38.303Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T17:11:38.308Z] [INFO] Worker optimize completed in 26ms
+[2026-07-15T17:11:38.315Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-15T17:11:38.323Z] [INFO] Starting worker: testgaps (2/2 concurrent)
+[2026-07-15T17:11:38.324Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-15T17:11:38.336Z] [INFO] Worker map completed in 24ms
+[2026-07-15T17:11:38.344Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T17:11:38.346Z] [INFO] Worker testgaps completed in 26ms
+[2026-07-15T17:16:31.091Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-15T17:16:31.094Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-15T17:16:31.120Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T17:16:31.125Z] [INFO] Worker optimize completed in 37ms
+[2026-07-15T17:16:31.131Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-15T17:16:31.137Z] [INFO] Worker map completed in 8ms
+[2026-07-15T17:21:31.084Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-15T17:21:31.085Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-15T17:21:31.115Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T17:21:31.117Z] [INFO] Worker testgaps completed in 37ms
+[2026-07-15T17:21:38.288Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T17:21:38.289Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T17:21:45.023Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T17:21:45.030Z] [INFO] Worker audit completed in 6745ms
+[2026-07-15T17:31:15.402Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-15T17:31:15.440Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-15T17:31:15.449Z] [INFO] Worker consolidate completed in 191ms
+[2026-07-15T17:31:31.146Z] [INFO] Worker optimize deferred: Memory too low: 8.1% free
+[2026-07-15T17:31:31.148Z] [INFO] Worker map deferred: Memory too low: 8.1% free
+[2026-07-15T17:31:45.058Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T17:31:45.059Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T17:31:51.878Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T17:31:51.879Z] [INFO] Worker audit completed in 6825ms
+[2026-07-15T17:31:51.887Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-15T17:31:51.888Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-15T17:31:51.902Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T17:31:51.904Z] [INFO] Worker optimize completed in 21ms
+[2026-07-15T17:31:51.913Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-15T17:31:51.915Z] [INFO] Worker map completed in 5ms
+[2026-07-15T17:41:31.140Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-15T17:41:31.142Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-15T17:41:31.160Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T17:41:31.163Z] [INFO] Worker testgaps completed in 26ms
+[2026-07-15T17:41:51.892Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T17:41:51.893Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T17:41:57.752Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T17:41:57.754Z] [INFO] Worker audit completed in 5865ms
+[2026-07-15T17:46:31.153Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-15T17:46:31.156Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-15T17:46:31.170Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T17:46:31.172Z] [INFO] Worker optimize completed in 24ms
+[2026-07-15T17:46:31.178Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-15T17:46:31.180Z] [INFO] Worker map completed in 4ms
+[2026-07-15T17:51:57.763Z] [INFO] Worker audit deferred: Memory too low: 8.1% free
+[2026-07-15T18:01:15.529Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-15T18:01:15.545Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-15T18:01:15.546Z] [INFO] Worker consolidate completed in 20ms
+[2026-07-15T18:01:15.568Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T18:01:15.569Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T18:01:25.120Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T18:01:25.127Z] [INFO] Worker audit completed in 9556ms
+[2026-07-15T18:01:31.175Z] [INFO] Worker testgaps deferred: Memory too low: 8.8% free
+[2026-07-15T18:01:31.179Z] [INFO] Worker optimize deferred: Memory too low: 8.8% free
+[2026-07-15T18:01:31.191Z] [INFO] Worker map deferred: Memory too low: 8.8% free
+[2026-07-15T18:01:57.768Z] [INFO] Worker audit deferred: Memory too low: 8.3% free
+[2026-07-15T18:11:57.784Z] [INFO] Worker audit deferred: Memory too low: 6.4% free
+[2026-07-15T18:16:31.187Z] [INFO] Worker optimize deferred: Memory too low: 9.0% free
+[2026-07-15T18:16:31.204Z] [INFO] Worker map deferred: Memory too low: 9.0% free
+[2026-07-15T18:21:31.184Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-15T18:21:31.184Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-15T18:21:31.209Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T18:21:31.213Z] [INFO] Worker testgaps completed in 32ms
+[2026-07-15T18:21:31.222Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-15T18:21:31.224Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-15T18:21:31.250Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T18:21:31.252Z] [INFO] Worker testgaps completed in 34ms
+[2026-07-15T18:21:31.262Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-15T18:21:31.263Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-15T18:21:31.282Z] [INFO] Starting worker: map (2/2 concurrent)
+[2026-07-15T18:21:31.286Z] [INFO] Worker map completed in 7ms
+[2026-07-15T18:21:31.292Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-15T18:21:31.292Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T18:21:38.575Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-15T18:21:38.576Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T18:21:38.593Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T18:21:38.596Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T18:21:38.598Z] [INFO] Worker optimize completed in 7338ms
+[2026-07-15T18:21:38.601Z] [INFO] Worker audit completed in 7312ms
+[2026-07-15T18:21:38.611Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-15T18:21:38.612Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-15T18:21:38.615Z] [INFO] Starting worker: map (2/2 concurrent)
+[2026-07-15T18:21:38.632Z] [INFO] Worker map completed in 18ms
+[2026-07-15T18:21:38.640Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T18:21:38.641Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T18:21:38.643Z] [INFO] Worker optimize completed in 38ms
+[2026-07-15T18:21:38.647Z] [INFO] Worker audit completed in 76ms
+[2026-07-15T18:21:57.802Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T18:21:57.803Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T18:21:57.818Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T18:21:57.820Z] [INFO] Worker audit completed in 21ms
+[2026-07-15T19:27:07.214Z] [INFO] Worker consolidate deferred: Memory too low: 8.4% free
+[2026-07-15T19:27:07.215Z] [INFO] Worker optimize deferred: Memory too low: 8.4% free
+[2026-07-15T19:27:07.215Z] [INFO] Worker map deferred: Memory too low: 8.4% free
+[2026-07-15T19:27:07.216Z] [INFO] Worker audit deferred: Memory too low: 8.4% free
+[2026-07-15T19:27:07.216Z] [INFO] Worker testgaps deferred: Memory too low: 8.4% free
+[2026-07-15T19:37:07.237Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T19:37:07.239Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T19:37:10.104Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T19:37:10.106Z] [INFO] Worker audit completed in 2876ms
+[2026-07-15T19:37:10.109Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-15T19:37:10.111Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-15T19:37:10.112Z] [INFO] Worker consolidate completed in 4ms
+[2026-07-15T19:37:10.116Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-15T19:37:10.116Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-15T19:37:10.123Z] [INFO] Starting worker: map (2/2 concurrent)
+[2026-07-15T19:37:10.124Z] [INFO] Worker map completed in 3ms
+[2026-07-15T19:37:10.126Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-15T19:37:10.127Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T19:37:10.134Z] [INFO] Starting worker: testgaps (3/2 concurrent)
+[2026-07-15T19:37:10.134Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-15T19:37:10.140Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T19:37:10.142Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T19:37:10.142Z] [INFO] Worker optimize completed in 28ms
+[2026-07-15T19:37:10.144Z] [INFO] Worker audit completed in 19ms
+[2026-07-15T19:37:10.145Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T19:37:10.146Z] [INFO] Worker testgaps completed in 14ms
+[2026-07-15T19:42:07.225Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-15T19:42:07.226Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-15T19:42:07.235Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T19:42:07.236Z] [INFO] Worker optimize completed in 13ms
+[2026-07-15T19:42:07.241Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-15T19:42:07.242Z] [INFO] Worker map completed in 4ms
+[2026-07-15T19:47:07.226Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-15T19:47:07.226Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-15T19:47:07.231Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T19:47:07.231Z] [INFO] Worker testgaps completed in 6ms
+[2026-07-15T19:47:10.117Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T19:47:10.118Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T19:47:11.797Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T19:47:11.798Z] [INFO] Worker audit completed in 1683ms
+[2026-07-15T19:55:18.519Z] [INFO] Worker harness deferred: Memory too low: 7.7% free
+[2026-07-15T19:57:07.222Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-15T19:57:07.224Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-15T19:57:07.225Z] [INFO] Worker consolidate completed in 6ms
+[2026-07-15T19:57:07.230Z] [INFO] Starting worker: harness (1/2 concurrent)
+[2026-07-15T19:57:07.253Z] [INFO] Worker harness completed in 25ms
+[2026-07-15T19:57:07.259Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-15T19:57:07.259Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-15T19:57:07.268Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T19:57:07.269Z] [INFO] Worker optimize completed in 13ms
+[2026-07-15T19:57:07.274Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-15T19:57:07.275Z] [INFO] Worker map completed in 3ms
+[2026-07-15T19:57:11.809Z] [INFO] Worker audit deferred: Memory too low: 7.3% free
+[2026-07-15T20:07:07.239Z] [INFO] Worker testgaps deferred: Memory too low: 8.4% free
+[2026-07-15T20:07:11.826Z] [INFO] Worker audit deferred: Memory too low: 7.5% free
+[2026-07-15T20:12:07.277Z] [INFO] Worker optimize deferred: Memory too low: 8.3% free
+[2026-07-15T20:12:07.278Z] [INFO] Worker map deferred: Memory too low: 8.3% free
+[2026-07-15T20:17:11.837Z] [INFO] Worker audit deferred: Memory too low: 9.7% free
+[2026-07-15T20:27:07.239Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-15T20:27:07.241Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-15T20:27:07.242Z] [INFO] Worker consolidate completed in 6ms
+[2026-07-15T20:27:07.246Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T20:27:07.246Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T20:27:11.551Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T20:27:11.553Z] [INFO] Worker audit completed in 4309ms
+[2026-07-15T20:27:11.557Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-15T20:27:11.557Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-15T20:27:11.566Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-15T20:27:11.567Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T20:27:11.575Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T20:27:11.576Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T20:27:11.578Z] [INFO] Worker testgaps completed in 23ms
+[2026-07-15T20:27:11.581Z] [INFO] Worker audit completed in 15ms
+[2026-07-15T20:27:11.584Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-15T20:27:11.585Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-15T20:27:11.586Z] [INFO] Starting worker: map (2/2 concurrent)
+[2026-07-15T20:27:11.595Z] [INFO] Starting worker: audit (3/2 concurrent)
+[2026-07-15T20:27:11.595Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T20:27:11.602Z] [INFO] Worker map completed in 17ms
+[2026-07-15T20:27:11.605Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T20:27:11.606Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T20:27:11.608Z] [INFO] Worker optimize completed in 24ms
+[2026-07-15T20:27:11.609Z] [INFO] Worker audit completed in 16ms
+[2026-07-15T20:27:11.615Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-15T20:27:11.616Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-15T20:27:11.622Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T20:27:11.623Z] [INFO] Worker testgaps completed in 10ms
+[2026-07-15T20:27:11.626Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-15T20:27:11.627Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-15T20:27:11.634Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T20:27:11.635Z] [INFO] Worker optimize completed in 10ms
+[2026-07-15T20:27:11.638Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-15T20:27:11.639Z] [INFO] Worker map completed in 2ms
+[2026-07-15T20:27:11.849Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T20:27:11.850Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T20:27:11.856Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T20:27:11.857Z] [INFO] Worker audit completed in 10ms
+[2026-07-15T20:37:11.874Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T20:37:11.875Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T20:37:14.759Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T20:37:14.760Z] [INFO] Worker audit completed in 2888ms
+[2026-07-15T20:42:11.647Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-15T20:42:11.647Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-15T20:42:11.654Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T20:42:11.655Z] [INFO] Worker optimize completed in 10ms
+[2026-07-15T20:42:11.657Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-15T20:42:11.659Z] [INFO] Worker map completed in 3ms
+[2026-07-15T20:47:11.633Z] [INFO] Worker testgaps deferred: Memory too low: 9.5% free
+[2026-07-15T20:47:14.769Z] [INFO] Worker audit deferred: Memory too low: 9.4% free
+[2026-07-15T20:57:07.257Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-15T20:57:07.259Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-15T20:57:07.260Z] [INFO] Worker consolidate completed in 5ms
+[2026-07-15T20:57:07.263Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-15T20:57:07.264Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-15T20:57:07.273Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T20:57:07.275Z] [INFO] Worker testgaps completed in 13ms
+[2026-07-15T20:57:07.278Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T20:57:07.279Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T20:57:10.388Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T20:57:10.389Z] [INFO] Worker audit completed in 3112ms
+[2026-07-15T20:57:11.669Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-15T20:57:11.669Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-15T20:57:11.674Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T20:57:11.675Z] [INFO] Worker optimize completed in 7ms
+[2026-07-15T20:57:11.677Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-15T20:57:11.678Z] [INFO] Worker map completed in 2ms
+[2026-07-15T20:57:14.780Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-15T20:57:14.781Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-15T20:57:14.785Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-15T20:57:14.785Z] [INFO] Worker audit completed in 6ms
+[2026-07-15T22:51:07.062Z] [INFO] Worker testgaps deferred: Memory too low: 4.2% free
+[2026-07-15T22:51:07.225Z] [INFO] Worker audit deferred: Memory too low: 4.1% free
+[2026-07-15T22:51:07.226Z] [INFO] Worker optimize deferred: Memory too low: 4.1% free
+[2026-07-15T22:51:07.227Z] [INFO] Worker map deferred: Memory too low: 4.1% free
+[2026-07-15T22:51:07.227Z] [INFO] Worker consolidate deferred: Memory too low: 4.0% free
+[2026-07-16T07:03:04.749Z] [INFO] Daemon self-shutdown: max age 43200s reached
+[2026-07-16T07:03:05.111Z] [INFO] Stopped worker: map
+[2026-07-16T07:03:05.112Z] [INFO] Stopped worker: audit
+[2026-07-16T07:03:05.114Z] [INFO] Stopped worker: optimize
+[2026-07-16T07:03:05.115Z] [INFO] Stopped worker: consolidate
+[2026-07-16T07:03:05.160Z] [INFO] Stopped worker: testgaps
+[2026-07-16T07:03:05.162Z] [INFO] Stopped worker: backup
+[2026-07-16T07:03:05.188Z] [INFO] Stopped worker: harness
+[2026-07-16T07:03:05.263Z] [INFO] Daemon stopped
+[2026-07-16T11:11:20.121Z] [INFO] Scheduled map (interval: 900s, first run in 0s)
+[2026-07-16T11:11:20.121Z] [INFO] Scheduled audit (interval: 600s, first run in 120s)
+[2026-07-16T11:11:20.121Z] [INFO] Scheduled optimize (interval: 900s, first run in 240s)
+[2026-07-16T11:11:20.122Z] [INFO] Scheduled consolidate (interval: 1800s, first run in 360s)
+[2026-07-16T11:11:20.122Z] [INFO] Scheduled testgaps (interval: 1200s, first run in 480s)
+[2026-07-16T11:11:20.122Z] [INFO] Scheduled backup (interval: 86400s, first run in 9718.203s)
+[2026-07-16T11:11:20.122Z] [INFO] Scheduled harness (interval: 21600s, first run in 720s)
+[2026-07-16T11:11:20.123Z] [INFO] Lifecycle monitor active (ttl=43200s)
+[2026-07-16T11:11:20.125Z] [INFO] Daemon started (PID: 18564, CPUs: 20, workers: 7, maxCpuLoad: 16, minFreeMemoryPercent: 10%)
+[2026-07-16T11:11:20.125Z] [INFO] Claude Code headless mode available - AI workers enabled
+[2026-07-16T11:11:20.127Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-16T11:11:20.128Z] [INFO] Worker map completed in 2ms
+[2026-07-16T11:13:20.128Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T11:13:20.128Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T11:13:22.598Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T11:13:22.599Z] [INFO] Worker audit completed in 2472ms
+[2026-07-16T11:15:38.608Z] [INFO] Scheduled map (interval: 900s, first run in 641.52s)
+[2026-07-16T11:15:38.608Z] [INFO] Scheduled audit (interval: 600s, first run in 463.991s)
+[2026-07-16T11:15:38.609Z] [INFO] Scheduled optimize (interval: 900s, first run in 240s)
+[2026-07-16T11:15:38.609Z] [INFO] Scheduled consolidate (interval: 1800s, first run in 360s)
+[2026-07-16T11:15:38.609Z] [INFO] Scheduled testgaps (interval: 1200s, first run in 480s)
+[2026-07-16T11:15:38.609Z] [INFO] Scheduled backup (interval: 86400s, first run in 9459.716s)
+[2026-07-16T11:15:38.610Z] [INFO] Scheduled harness (interval: 21600s, first run in 720s)
+[2026-07-16T11:15:38.610Z] [INFO] Lifecycle monitor active (ttl=43200s)
+[2026-07-16T11:15:38.612Z] [INFO] Daemon started (PID: 35992, CPUs: 20, workers: 7, maxCpuLoad: 16, minFreeMemoryPercent: 10%)
+[2026-07-16T11:15:38.613Z] [INFO] Claude Code headless mode available - AI workers enabled
+[2026-07-16T11:19:38.613Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-16T11:19:38.615Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-16T11:19:38.634Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T11:19:38.635Z] [INFO] Worker optimize completed in 23ms
+[2026-07-16T11:21:38.612Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-16T11:21:38.613Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-16T11:21:38.614Z] [INFO] Worker consolidate completed in 3ms
+[2026-07-16T11:23:22.600Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T11:23:22.600Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T11:23:25.051Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T11:23:25.052Z] [INFO] Worker audit completed in 2454ms
+[2026-07-16T11:23:38.601Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-16T11:23:38.601Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-16T11:23:38.606Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T11:23:38.607Z] [INFO] Worker testgaps completed in 7ms
+[2026-07-16T11:26:20.110Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-16T11:26:20.111Z] [INFO] Worker map completed in 3ms
+[2026-07-16T11:27:38.580Z] [INFO] Starting worker: harness (1/2 concurrent)
+[2026-07-16T11:27:38.617Z] [INFO] Worker harness completed in 38ms
+[2026-07-16T11:33:25.021Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T11:33:25.021Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T11:33:27.221Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T11:33:27.222Z] [INFO] Worker audit completed in 2203ms
+[2026-07-16T11:34:38.601Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-16T11:34:38.601Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-16T11:34:38.608Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T11:34:38.609Z] [INFO] Worker optimize completed in 9ms
+[2026-07-16T11:41:20.093Z] [INFO] Worker map deferred: Memory too low: 9.1% free
+[2026-07-16T11:43:27.226Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T11:43:27.226Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T11:43:30.189Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T11:43:30.190Z] [INFO] Worker audit completed in 2965ms
+[2026-07-16T11:43:30.194Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-16T11:43:30.195Z] [INFO] Worker map completed in 2ms
+[2026-07-16T11:43:38.570Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-16T11:43:38.571Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-16T11:43:38.580Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T11:43:38.581Z] [INFO] Worker testgaps completed in 13ms
+[2026-07-16T11:49:38.610Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-16T11:49:38.610Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-16T11:49:38.615Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T11:49:38.615Z] [INFO] Worker optimize completed in 7ms
+[2026-07-16T11:51:38.565Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-16T11:51:38.566Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-16T11:51:38.567Z] [INFO] Worker consolidate completed in 3ms
+[2026-07-16T11:53:30.204Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T11:53:30.205Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T11:53:32.212Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T11:53:32.212Z] [INFO] Worker audit completed in 2010ms
+[2026-07-16T11:56:20.099Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-16T11:56:20.101Z] [INFO] Worker map completed in 6ms
+[2026-07-16T12:03:32.151Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T12:03:32.152Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T12:03:33.381Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T12:03:33.381Z] [INFO] Worker audit completed in 1230ms
+[2026-07-16T12:03:38.514Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-16T12:03:38.515Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-16T12:03:38.521Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T12:03:38.522Z] [INFO] Worker testgaps completed in 9ms
+[2026-07-16T12:04:38.554Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-16T12:04:38.555Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-16T12:04:38.560Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T12:04:38.560Z] [INFO] Worker optimize completed in 7ms
+[2026-07-16T12:11:20.015Z] [INFO] Worker map deferred: Memory too low: 8.8% free
+[2026-07-16T12:13:33.363Z] [INFO] Worker audit deferred: Memory too low: 5.0% free
+[2026-07-16T12:19:38.542Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-16T12:19:38.543Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-16T12:19:38.557Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T12:19:38.559Z] [INFO] Worker optimize completed in 20ms
+[2026-07-16T12:19:38.574Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-16T12:19:38.576Z] [INFO] Worker map completed in 7ms
+[2026-07-16T12:19:38.588Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T12:19:38.588Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T12:19:44.785Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T12:19:44.788Z] [INFO] Worker audit completed in 6202ms
+[2026-07-16T12:21:38.474Z] [INFO] Worker consolidate deferred: Memory too low: 7.9% free
+[2026-07-16T12:23:33.364Z] [INFO] Worker audit deferred: Memory too low: 9.8% free
+[2026-07-16T12:23:38.490Z] [INFO] Worker testgaps deferred: Memory too low: 9.5% free
+[2026-07-16T12:26:20.016Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-16T12:26:20.018Z] [INFO] Worker map completed in 5ms
+[2026-07-16T12:26:20.027Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-16T12:26:20.032Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-16T12:26:20.033Z] [INFO] Worker consolidate completed in 9ms
+[2026-07-16T12:26:20.044Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T12:26:20.047Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T12:26:25.922Z] [INFO] Starting worker: testgaps (2/2 concurrent)
+[2026-07-16T12:26:25.923Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-16T12:26:25.936Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T12:26:25.939Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T12:26:25.941Z] [INFO] Worker audit completed in 5901ms
+[2026-07-16T12:26:25.943Z] [INFO] Worker testgaps completed in 24ms
+[2026-07-16T12:33:33.341Z] [INFO] Worker audit deferred: Memory too low: 6.8% free
+[2026-07-16T12:34:38.528Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-16T12:34:38.529Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-16T12:34:38.547Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T12:34:38.550Z] [INFO] Worker optimize completed in 27ms
+[2026-07-16T12:34:38.554Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T12:34:38.555Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T12:34:45.316Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T12:34:45.319Z] [INFO] Worker audit completed in 6766ms
+[2026-07-16T12:41:19.958Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-16T12:41:19.963Z] [INFO] Worker map completed in 7ms
+[2026-07-16T12:43:34.461Z] [INFO] Scheduled map (interval: 900s, first run in 765.501s)
+[2026-07-16T12:43:34.461Z] [INFO] Scheduled audit (interval: 600s, first run in 120s)
+[2026-07-16T12:43:34.462Z] [INFO] Scheduled optimize (interval: 900s, first run in 364.088s)
+[2026-07-16T12:43:34.462Z] [INFO] Scheduled consolidate (interval: 1800s, first run in 765.571s)
+[2026-07-16T12:43:34.462Z] [INFO] Scheduled testgaps (interval: 1200s, first run in 480s)
+[2026-07-16T12:43:34.462Z] [INFO] Scheduled backup (interval: 86400s, first run in 4183.863s)
+[2026-07-16T12:43:34.462Z] [INFO] Scheduled harness (interval: 21600s, first run in 17044.155s)
+[2026-07-16T12:43:34.463Z] [INFO] Lifecycle monitor active (ttl=43200s)
+[2026-07-16T12:43:34.464Z] [INFO] Daemon started (PID: 40512, CPUs: 20, workers: 7, maxCpuLoad: 16, minFreeMemoryPercent: 10%)
+[2026-07-16T12:43:34.464Z] [INFO] Claude Code headless mode available - AI workers enabled
+[2026-07-16T12:45:34.465Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T12:45:34.465Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T12:45:36.446Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T12:45:36.447Z] [INFO] Worker audit completed in 1984ms
+[2026-07-16T12:49:38.545Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-16T12:49:38.545Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-16T12:49:38.550Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T12:49:38.551Z] [INFO] Worker optimize completed in 7ms
+[2026-07-16T12:51:34.460Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-16T12:51:34.461Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-16T12:51:34.465Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T12:51:34.465Z] [INFO] Worker testgaps completed in 6ms
+[2026-07-16T12:55:36.428Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T12:55:36.428Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T12:55:37.770Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T12:55:37.771Z] [INFO] Worker audit completed in 1345ms
+[2026-07-16T12:56:19.932Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-16T12:56:19.933Z] [INFO] Worker map completed in 2ms
+[2026-07-16T12:56:20.009Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-16T12:56:20.010Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-16T12:56:20.011Z] [INFO] Worker consolidate completed in 3ms
+[2026-07-16T13:04:38.514Z] [INFO] Worker optimize deferred: Memory too low: 6.7% free
+[2026-07-16T13:05:37.770Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T13:05:37.771Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T13:05:40.860Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T13:05:40.862Z] [INFO] Worker audit completed in 3094ms
+[2026-07-16T13:05:40.867Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-16T13:05:40.868Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-16T13:05:40.878Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T13:05:40.879Z] [INFO] Worker optimize completed in 14ms
+[2026-07-16T13:11:19.910Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-16T13:11:19.911Z] [INFO] Worker map completed in 2ms
+[2026-07-16T13:11:34.430Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-16T13:11:34.431Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-16T13:11:34.436Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T13:11:34.437Z] [INFO] Worker testgaps completed in 8ms
+[2026-07-16T13:15:40.857Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T13:15:40.857Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T13:15:42.140Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T13:15:42.141Z] [INFO] Worker audit completed in 1285ms
+[2026-07-16T13:19:38.502Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-16T13:19:38.502Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-16T13:19:38.506Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T13:19:38.506Z] [INFO] Worker optimize completed in 5ms
+[2026-07-16T13:25:42.151Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T13:25:42.152Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T13:25:45.002Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T13:25:45.003Z] [INFO] Worker audit completed in 2853ms
+[2026-07-16T13:26:19.913Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-16T13:26:19.913Z] [INFO] Worker map completed in 2ms
+[2026-07-16T13:26:19.975Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-16T13:26:19.980Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-16T13:26:19.981Z] [INFO] Worker consolidate completed in 8ms
+[2026-07-16T13:31:34.424Z] [INFO] Worker testgaps deferred: Memory too low: 6.0% free
+[2026-07-16T13:34:38.516Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-16T13:34:38.517Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-16T13:34:38.545Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T13:34:38.546Z] [INFO] Worker optimize completed in 39ms
+[2026-07-16T13:34:38.550Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-16T13:34:38.551Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-16T13:34:38.564Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T13:34:38.565Z] [INFO] Worker testgaps completed in 16ms
+[2026-07-16T13:35:45.002Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T13:35:45.003Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T13:35:47.780Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T13:35:47.781Z] [INFO] Worker audit completed in 2780ms
+[2026-07-16T13:41:19.931Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-16T13:41:19.935Z] [INFO] Worker map completed in 8ms
+[2026-07-16T13:45:47.792Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T13:45:47.792Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T13:45:49.753Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T13:45:49.754Z] [INFO] Worker audit completed in 1964ms
+[2026-07-16T13:49:38.565Z] [INFO] Worker optimize deferred: Memory too low: 8.9% free
+[2026-07-16T13:51:34.420Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-16T13:51:34.421Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-16T13:51:34.429Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T13:51:34.430Z] [INFO] Worker testgaps completed in 13ms
+[2026-07-16T13:51:34.433Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-16T13:51:34.433Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-16T13:51:34.438Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T13:51:34.439Z] [INFO] Worker optimize completed in 8ms
+[2026-07-16T13:53:18.240Z] [INFO] Worker backup deferred: Memory too low: 6.3% free
+[2026-07-16T13:55:49.779Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T13:55:49.779Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T13:55:51.245Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T13:55:51.246Z] [INFO] Worker audit completed in 1483ms
+[2026-07-16T13:55:51.248Z] [INFO] Starting worker: backup (1/2 concurrent)
+[2026-07-16T13:55:51.259Z] [INFO] Worker backup completed in 12ms
+[2026-07-16T13:56:19.940Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-16T13:56:19.941Z] [INFO] Worker map completed in 3ms
+[2026-07-16T13:56:19.970Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-16T13:56:19.972Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-16T13:56:19.973Z] [INFO] Worker consolidate completed in 3ms
+[2026-07-16T14:04:14.092Z] [INFO] Scheduled map (interval: 900s, first run in 425.849s)
+[2026-07-16T14:04:14.094Z] [INFO] Scheduled audit (interval: 600s, first run in 120s)
+[2026-07-16T14:04:14.094Z] [INFO] Scheduled optimize (interval: 900s, first run in 240s)
+[2026-07-16T14:04:14.094Z] [INFO] Scheduled consolidate (interval: 1800s, first run in 1325.879s)
+[2026-07-16T14:04:14.095Z] [INFO] Scheduled testgaps (interval: 1200s, first run in 480s)
+[2026-07-16T14:04:14.095Z] [INFO] Scheduled backup (interval: 86400s, first run in 85897.164s)
+[2026-07-16T14:04:14.095Z] [INFO] Scheduled harness (interval: 21600s, first run in 12204.522s)
+[2026-07-16T14:04:14.096Z] [INFO] Lifecycle monitor active (ttl=43200s)
+[2026-07-16T14:04:14.098Z] [INFO] Daemon started (PID: 27936, CPUs: 20, workers: 7, maxCpuLoad: 16, minFreeMemoryPercent: 10%)
+[2026-07-16T14:04:14.098Z] [INFO] Claude Code headless mode available - AI workers enabled
+[2026-07-16T14:06:14.085Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T14:06:14.085Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T14:06:16.138Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T14:06:16.139Z] [INFO] Worker audit completed in 2056ms
+[2026-07-16T14:08:14.079Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-16T14:08:14.079Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-16T14:08:14.084Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T14:08:14.085Z] [INFO] Worker optimize completed in 8ms
+[2026-07-16T14:11:19.904Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-16T14:11:19.907Z] [INFO] Worker map completed in 6ms
+[2026-07-16T14:12:14.057Z] [INFO] Worker testgaps deferred: Memory too low: 1.7% free
+[2026-07-16T14:16:16.094Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T14:16:16.095Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T14:16:17.620Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T14:16:17.621Z] [INFO] Worker audit completed in 1528ms
+[2026-07-16T14:16:17.623Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-16T14:16:17.623Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-16T14:16:17.628Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T14:16:17.628Z] [INFO] Worker testgaps completed in 6ms
+[2026-07-16T14:23:14.034Z] [INFO] Worker optimize deferred: Memory too low: 9.2% free
+[2026-07-16T14:26:17.611Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T14:26:17.611Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T14:26:19.133Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T14:26:19.133Z] [INFO] Worker audit completed in 1523ms
+[2026-07-16T14:26:19.135Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-16T14:26:19.135Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-16T14:26:19.139Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T14:26:19.139Z] [INFO] Worker optimize completed in 4ms
+[2026-07-16T14:26:19.869Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-16T14:26:19.870Z] [INFO] Worker map completed in 2ms
+[2026-07-16T14:26:19.871Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-16T14:26:19.880Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-16T14:26:19.881Z] [INFO] Worker consolidate completed in 10ms
+[2026-07-16T14:32:14.005Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-16T14:32:14.005Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-16T14:32:14.010Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T14:32:14.010Z] [INFO] Worker testgaps completed in 7ms
+[2026-07-16T14:36:19.127Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T14:36:19.127Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T14:36:20.422Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T14:36:20.423Z] [INFO] Worker audit completed in 1297ms
+[2026-07-16T14:38:14.013Z] [INFO] Worker optimize deferred: Memory too low: 6.5% free
+[2026-07-16T14:41:19.865Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-16T14:41:19.867Z] [INFO] Worker map completed in 4ms
+[2026-07-16T14:41:19.868Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-16T14:41:19.869Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-16T14:41:19.874Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T14:41:19.874Z] [INFO] Worker optimize completed in 6ms
+[2026-07-16T14:46:20.427Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T14:46:20.428Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T14:46:23.202Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T14:46:23.204Z] [INFO] Worker audit completed in 2779ms
+[2026-07-16T14:52:14.001Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-16T14:52:14.001Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-16T14:52:14.006Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T14:52:14.007Z] [INFO] Worker testgaps completed in 7ms
+[2026-07-16T14:53:14.014Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-16T14:53:14.014Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-16T14:53:14.017Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T14:53:14.018Z] [INFO] Worker optimize completed in 5ms
+[2026-07-16T14:56:19.860Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-16T14:56:19.861Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-16T14:56:19.862Z] [INFO] Worker consolidate completed in 3ms
+[2026-07-16T14:56:19.864Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-16T14:56:19.864Z] [INFO] Worker map completed in 1ms
+[2026-07-16T14:56:23.218Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T14:56:23.218Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T14:56:24.610Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T14:56:24.610Z] [INFO] Worker audit completed in 1393ms
+[2026-07-16T15:06:24.609Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T15:06:24.610Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T15:06:25.884Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T15:06:25.884Z] [INFO] Worker audit completed in 1276ms
+[2026-07-16T15:08:13.997Z] [INFO] Worker optimize deferred: Memory too low: 4.6% free
+[2026-07-16T15:11:19.817Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-16T15:11:19.818Z] [INFO] Worker map completed in 2ms
+[2026-07-16T15:11:19.820Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-16T15:11:19.820Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-16T15:11:19.824Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T15:11:19.824Z] [INFO] Worker optimize completed in 5ms
+[2026-07-16T15:12:13.947Z] [INFO] Worker testgaps deferred: Memory too low: 6.2% free
+[2026-07-16T15:16:25.807Z] [INFO] Worker audit deferred: Memory too low: 8.2% free
+[2026-07-16T15:23:13.918Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-16T15:23:13.920Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-16T15:23:13.945Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T15:23:13.947Z] [INFO] Worker optimize completed in 44ms
+[2026-07-16T15:23:13.952Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-16T15:23:13.952Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-16T15:23:13.963Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T15:23:13.965Z] [INFO] Worker testgaps completed in 15ms
+[2026-07-16T15:23:13.970Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T15:23:13.970Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T15:23:18.146Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T15:23:18.149Z] [INFO] Worker audit completed in 4182ms
+[2026-07-16T15:26:20.249Z] [INFO] Worker consolidate deferred: Memory too low: 6.5% free
+[2026-07-16T15:26:20.338Z] [INFO] Worker map deferred: Memory too low: 6.6% free
+[2026-07-16T15:26:25.774Z] [INFO] Worker audit deferred: Memory too low: 6.2% free
+[2026-07-16T15:32:13.913Z] [INFO] Worker testgaps deferred: Memory too low: 4.3% free
+[2026-07-16T16:07:57.625Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-16T16:07:57.626Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-16T16:08:04.408Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-16T16:08:04.410Z] [INFO] Worker audit completed in 6887ms
+[2026-07-16T16:08:04.419Z] [INFO] Worker consolidate deferred: Memory too low: 3.3% free
+[2026-07-16T16:08:04.423Z] [INFO] Worker optimize deferred: Memory too low: 3.3% free
+[2026-07-16T16:08:04.424Z] [INFO] Worker map deferred: Memory too low: 3.3% free
+[2026-07-16T16:08:04.425Z] [INFO] Worker testgaps deferred: Memory too low: 3.3% free
+[2026-07-16T16:08:04.425Z] [INFO] Worker consolidate deferred: Memory too low: 3.3% free
+[2026-07-17T07:08:12.132Z] [INFO] Worker map deferred: Memory too low: 8.4% free
+[2026-07-17T07:08:12.239Z] [INFO] Daemon self-shutdown: max age 43200s reached
+[2026-07-17T07:08:12.241Z] [INFO] Stopped worker: map
+[2026-07-17T07:08:12.242Z] [INFO] Stopped worker: audit
+[2026-07-17T07:08:12.242Z] [INFO] Stopped worker: optimize
+[2026-07-17T07:08:12.243Z] [INFO] Stopped worker: consolidate
+[2026-07-17T07:08:12.243Z] [INFO] Stopped worker: testgaps
+[2026-07-17T07:08:12.243Z] [INFO] Stopped worker: backup
+[2026-07-17T07:08:12.244Z] [INFO] Stopped worker: harness
+[2026-07-17T07:08:12.249Z] [INFO] Daemon stopped
+[2026-07-17T07:38:58.283Z] [INFO] Scheduled map (interval: 900s, first run in 0s)
+[2026-07-17T07:38:58.283Z] [INFO] Scheduled audit (interval: 600s, first run in 120s)
+[2026-07-17T07:38:58.284Z] [INFO] Scheduled optimize (interval: 900s, first run in 240s)
+[2026-07-17T07:38:58.284Z] [INFO] Scheduled consolidate (interval: 1800s, first run in 360s)
+[2026-07-17T07:38:58.284Z] [INFO] Scheduled testgaps (interval: 1200s, first run in 480s)
+[2026-07-17T07:38:58.285Z] [INFO] Scheduled backup (interval: 86400s, first run in 22612.975s)
+[2026-07-17T07:38:58.285Z] [INFO] Scheduled harness (interval: 21600s, first run in 720s)
+[2026-07-17T07:38:58.285Z] [INFO] Lifecycle monitor active (ttl=43200s)
+[2026-07-17T07:38:58.287Z] [INFO] Daemon started (PID: 41720, CPUs: 20, workers: 7, maxCpuLoad: 16, minFreeMemoryPercent: 10%)
+[2026-07-17T07:38:58.288Z] [INFO] Claude Code headless mode available - AI workers enabled
+[2026-07-17T07:38:58.291Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T07:38:58.292Z] [INFO] Worker map completed in 3ms
+[2026-07-17T07:40:58.287Z] [INFO] Worker audit deferred: Memory too low: 5.7% free
+[2026-07-17T07:42:58.295Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T07:42:58.295Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T07:42:58.314Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T07:42:58.315Z] [INFO] Worker optimize completed in 22ms
+[2026-07-17T07:42:58.318Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T07:42:58.318Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T07:43:01.023Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T07:43:01.023Z] [INFO] Worker audit completed in 2706ms
+[2026-07-17T07:44:58.289Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-17T07:44:58.291Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-17T07:44:58.292Z] [INFO] Worker consolidate completed in 4ms
+[2026-07-17T07:46:58.297Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-17T07:46:58.297Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T07:46:58.307Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T07:46:58.308Z] [INFO] Worker testgaps completed in 13ms
+[2026-07-17T07:50:58.293Z] [INFO] Worker harness deferred: Memory too low: 8.8% free
+[2026-07-17T07:50:58.294Z] [INFO] Worker audit deferred: Memory too low: 8.8% free
+[2026-07-17T07:53:58.299Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T07:53:58.308Z] [INFO] Worker map completed in 12ms
+[2026-07-17T07:53:58.315Z] [INFO] Starting worker: harness (1/2 concurrent)
+[2026-07-17T07:53:58.374Z] [INFO] Worker harness completed in 63ms
+[2026-07-17T07:53:58.377Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T07:53:58.377Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T07:54:00.576Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T07:54:00.577Z] [INFO] Worker audit completed in 2201ms
+[2026-07-17T07:57:58.331Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T07:57:58.331Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T07:57:58.335Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T07:57:58.336Z] [INFO] Worker optimize completed in 6ms
+[2026-07-17T08:00:58.302Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T08:00:58.303Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T08:01:00.013Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T08:01:00.014Z] [INFO] Worker audit completed in 1713ms
+[2026-07-17T08:06:58.311Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-17T08:06:58.312Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T08:06:58.317Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T08:06:58.318Z] [INFO] Worker testgaps completed in 8ms
+[2026-07-17T08:08:58.321Z] [INFO] Worker map deferred: Memory too low: 9.3% free
+[2026-07-17T08:11:00.032Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T08:11:00.033Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T08:11:02.696Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T08:11:02.698Z] [INFO] Worker audit completed in 2668ms
+[2026-07-17T08:11:02.700Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T08:11:02.702Z] [INFO] Worker map completed in 3ms
+[2026-07-17T08:12:58.350Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T08:12:58.350Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T08:12:58.358Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T08:12:58.359Z] [INFO] Worker optimize completed in 10ms
+[2026-07-17T08:14:58.302Z] [INFO] Worker consolidate deferred: Memory too low: 8.7% free
+[2026-07-17T08:21:02.711Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T08:21:02.712Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T08:21:04.420Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T08:21:04.420Z] [INFO] Worker audit completed in 1711ms
+[2026-07-17T08:21:04.422Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-17T08:21:04.425Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-17T08:21:04.426Z] [INFO] Worker consolidate completed in 5ms
+[2026-07-17T08:23:58.324Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T08:23:58.324Z] [INFO] Worker map completed in 2ms
+[2026-07-17T08:26:58.332Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-17T08:26:58.332Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T08:26:58.336Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T08:26:58.336Z] [INFO] Worker testgaps completed in 6ms
+[2026-07-17T08:27:58.373Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T08:27:58.373Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T08:27:58.377Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T08:27:58.377Z] [INFO] Worker optimize completed in 5ms
+[2026-07-17T08:31:04.428Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T08:31:04.428Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T08:31:06.047Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T08:31:06.048Z] [INFO] Worker audit completed in 1621ms
+[2026-07-17T08:38:58.329Z] [INFO] Worker map deferred: Memory too low: 8.0% free
+[2026-07-17T08:41:06.059Z] [INFO] Worker audit deferred: Memory too low: 6.3% free
+[2026-07-17T08:42:58.399Z] [INFO] Worker optimize deferred: Memory too low: 8.2% free
+[2026-07-17T08:44:58.320Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-17T08:44:58.322Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-17T08:44:58.323Z] [INFO] Worker consolidate completed in 8ms
+[2026-07-17T08:44:58.325Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T08:44:58.325Z] [INFO] Worker map completed in 1ms
+[2026-07-17T08:44:58.327Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T08:44:58.328Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T08:45:00.229Z] [INFO] Starting worker: optimize (2/2 concurrent)
+[2026-07-17T08:45:00.229Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T08:45:00.235Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T08:45:00.236Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T08:45:00.237Z] [INFO] Worker audit completed in 1911ms
+[2026-07-17T08:45:00.239Z] [INFO] Worker optimize completed in 11ms
+[2026-07-17T08:46:58.351Z] [INFO] Worker testgaps deferred: Memory too low: 9.2% free
+[2026-07-17T08:51:06.073Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T08:51:06.075Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T08:51:07.895Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T08:51:07.896Z] [INFO] Worker audit completed in 1824ms
+[2026-07-17T08:51:07.898Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-17T08:51:07.898Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T08:51:07.904Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T08:51:07.905Z] [INFO] Worker testgaps completed in 8ms
+[2026-07-17T08:53:58.331Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T08:53:58.331Z] [INFO] Worker map completed in 1ms
+[2026-07-17T08:57:58.406Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T08:57:58.407Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T08:57:58.412Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T08:57:58.413Z] [INFO] Worker optimize completed in 8ms
+[2026-07-17T09:01:07.913Z] [INFO] Worker audit deferred: Memory too low: 9.2% free
+[2026-07-17T09:06:58.362Z] [INFO] Worker testgaps deferred: Memory too low: 7.0% free
+[2026-07-17T09:08:58.340Z] [INFO] Worker map deferred: Memory too low: 8.3% free
+[2026-07-17T09:11:07.923Z] [INFO] Worker audit deferred: Memory too low: 6.2% free
+[2026-07-17T09:12:58.417Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T09:12:58.418Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T09:12:58.427Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T09:12:58.429Z] [INFO] Worker optimize completed in 14ms
+[2026-07-17T09:12:58.432Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T09:12:58.432Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T09:13:00.412Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T09:13:00.414Z] [INFO] Worker audit completed in 1983ms
+[2026-07-17T09:13:00.416Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-17T09:13:00.416Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T09:13:00.422Z] [INFO] Starting worker: map (2/2 concurrent)
+[2026-07-17T09:13:00.422Z] [INFO] Worker map completed in 1ms
+[2026-07-17T09:13:00.424Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-17T09:13:00.424Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T09:13:00.429Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T09:13:00.431Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T09:13:00.432Z] [INFO] Worker testgaps completed in 17ms
+[2026-07-17T09:13:00.433Z] [INFO] Worker audit completed in 10ms
+[2026-07-17T09:14:58.328Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-17T09:14:58.331Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-17T09:14:58.331Z] [INFO] Worker consolidate completed in 4ms
+[2026-07-17T09:21:07.930Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T09:21:07.930Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T09:21:09.356Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T09:21:09.357Z] [INFO] Worker audit completed in 1428ms
+[2026-07-17T09:23:58.342Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T09:23:58.343Z] [INFO] Worker map completed in 3ms
+[2026-07-17T09:26:58.372Z] [INFO] Worker testgaps deferred: Memory too low: 9.4% free
+[2026-07-17T09:27:58.439Z] [INFO] Worker optimize deferred: Memory too low: 6.6% free
+[2026-07-17T09:31:09.360Z] [INFO] Worker audit deferred: Memory too low: 9.1% free
+[2026-07-17T09:38:58.346Z] [INFO] Worker map deferred: Memory too low: 7.1% free
+[2026-07-17T09:41:09.363Z] [INFO] Worker audit deferred: Memory too low: 6.7% free
+[2026-07-17T09:42:58.453Z] [INFO] Worker optimize deferred: Memory too low: 5.8% free
+[2026-07-17T09:44:58.347Z] [INFO] Worker consolidate deferred: Memory too low: 5.6% free
+[2026-07-17T09:46:58.378Z] [INFO] Worker testgaps deferred: Memory too low: 8.2% free
+[2026-07-17T09:51:09.365Z] [INFO] Worker audit deferred: Memory too low: 8.1% free
+[2026-07-17T09:53:58.358Z] [INFO] Worker map deferred: Memory too low: 6.9% free
+[2026-07-17T09:57:58.461Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T09:57:58.462Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T09:57:58.483Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T09:57:58.485Z] [INFO] Worker optimize completed in 31ms
+[2026-07-17T09:57:58.488Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-17T09:57:58.488Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T09:57:58.497Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T09:57:58.498Z] [INFO] Worker testgaps completed in 11ms
+[2026-07-17T09:57:58.502Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T09:57:58.503Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T09:57:58.514Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-17T09:57:58.515Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T09:58:01.173Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T09:58:01.174Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T09:58:01.175Z] [INFO] Worker optimize completed in 2673ms
+[2026-07-17T09:58:01.178Z] [INFO] Worker audit completed in 2665ms
+[2026-07-17T09:58:01.181Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T09:58:01.183Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-17T09:58:01.183Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T09:58:01.184Z] [INFO] Starting worker: optimize (3/2 concurrent)
+[2026-07-17T09:58:01.185Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T09:58:01.192Z] [INFO] Starting worker: consolidate (4/2 concurrent)
+[2026-07-17T09:58:01.194Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-17T09:58:01.200Z] [INFO] Worker map completed in 21ms
+[2026-07-17T09:58:01.202Z] [INFO] Worker consolidate completed in 12ms
+[2026-07-17T09:58:01.204Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T09:58:01.205Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T09:58:01.205Z] [INFO] Worker audit completed in 23ms
+[2026-07-17T09:58:01.207Z] [INFO] Worker optimize completed in 23ms
+[2026-07-17T09:58:01.209Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-17T09:58:01.210Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T09:58:01.211Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-17T09:58:01.211Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T09:58:01.218Z] [INFO] Starting worker: map (3/2 concurrent)
+[2026-07-17T09:58:01.224Z] [INFO] Worker map completed in 8ms
+[2026-07-17T09:58:01.227Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T09:58:01.228Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T09:58:01.229Z] [INFO] Worker testgaps completed in 21ms
+[2026-07-17T09:58:01.230Z] [INFO] Worker audit completed in 20ms
+[2026-07-17T10:01:09.372Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T10:01:09.373Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T10:01:11.068Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T10:01:11.097Z] [INFO] Worker audit completed in 1726ms
+[2026-07-17T10:06:58.382Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-17T10:06:58.382Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T10:06:58.386Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T10:06:58.387Z] [INFO] Worker testgaps completed in 6ms
+[2026-07-17T10:08:58.366Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T10:08:58.367Z] [INFO] Worker map completed in 2ms
+[2026-07-17T10:11:11.099Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T10:11:11.100Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T10:11:12.457Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T10:11:12.458Z] [INFO] Worker audit completed in 1360ms
+[2026-07-17T10:12:58.488Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T10:12:58.489Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T10:12:58.492Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T10:12:58.493Z] [INFO] Worker optimize completed in 5ms
+[2026-07-17T10:14:58.358Z] [INFO] Worker consolidate deferred: Memory too low: 9.5% free
+[2026-07-17T10:21:12.460Z] [INFO] Worker audit deferred: Memory too low: 8.5% free
+[2026-07-17T10:23:58.370Z] [INFO] Worker map deferred: Memory too low: 6.8% free
+[2026-07-17T10:26:58.401Z] [INFO] Worker testgaps deferred: Memory too low: 9.3% free
+[2026-07-17T10:27:58.498Z] [INFO] Worker optimize deferred: Memory too low: 9.9% free
+[2026-07-17T10:31:12.464Z] [INFO] Worker audit deferred: Memory too low: 8.7% free
+[2026-07-17T10:38:58.380Z] [INFO] Worker map deferred: Memory too low: 6.4% free
+[2026-07-17T10:41:12.479Z] [INFO] Worker audit deferred: Memory too low: 7.7% free
+[2026-07-17T10:42:58.504Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T10:42:58.504Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T10:42:58.510Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T10:42:58.511Z] [INFO] Worker optimize completed in 10ms
+[2026-07-17T10:42:58.513Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-17T10:42:58.516Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-17T10:42:58.516Z] [INFO] Worker consolidate completed in 4ms
+[2026-07-17T10:42:58.518Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T10:42:58.518Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T10:43:00.015Z] [INFO] Starting worker: map (2/2 concurrent)
+[2026-07-17T10:43:00.016Z] [INFO] Worker map completed in 2ms
+[2026-07-17T10:43:00.018Z] [INFO] Starting worker: testgaps (2/2 concurrent)
+[2026-07-17T10:43:00.018Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T10:43:00.024Z] [INFO] Starting worker: optimize (3/2 concurrent)
+[2026-07-17T10:43:00.024Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T10:43:00.035Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T10:43:00.036Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T10:43:00.036Z] [INFO] Worker audit completed in 1519ms
+[2026-07-17T10:43:00.037Z] [INFO] Worker testgaps completed in 20ms
+[2026-07-17T10:43:00.040Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-17T10:43:00.040Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T10:43:00.041Z] [INFO] Starting worker: map (3/2 concurrent)
+[2026-07-17T10:43:00.046Z] [INFO] Starting worker: audit (3/2 concurrent)
+[2026-07-17T10:43:00.046Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T10:43:00.046Z] [INFO] Worker map completed in 6ms
+[2026-07-17T10:43:00.052Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T10:43:00.053Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T10:43:00.054Z] [INFO] Worker audit completed in 15ms
+[2026-07-17T10:43:00.055Z] [INFO] Worker optimize completed in 33ms
+[2026-07-17T10:43:00.057Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T10:43:00.057Z] [INFO] Worker audit completed in 12ms
+[2026-07-17T10:44:58.372Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-17T10:44:58.373Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-17T10:44:58.373Z] [INFO] Worker consolidate completed in 2ms
+[2026-07-17T10:46:58.408Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-17T10:46:58.408Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T10:46:58.412Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T10:46:58.413Z] [INFO] Worker testgaps completed in 6ms
+[2026-07-17T10:51:12.491Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T10:51:12.491Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T10:51:13.900Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T10:51:13.900Z] [INFO] Worker audit completed in 1410ms
+[2026-07-17T10:53:58.393Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T10:53:58.394Z] [INFO] Worker map completed in 2ms
+[2026-07-17T10:57:58.520Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T10:57:58.521Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T10:57:58.525Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T10:57:58.525Z] [INFO] Worker optimize completed in 6ms
+[2026-07-17T11:01:13.917Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T11:01:13.917Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T11:01:15.489Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T11:01:15.490Z] [INFO] Worker audit completed in 1574ms
+[2026-07-17T11:06:58.416Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-17T11:06:58.417Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T11:06:58.421Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T11:06:58.422Z] [INFO] Worker testgaps completed in 7ms
+[2026-07-17T11:08:58.396Z] [INFO] Worker map deferred: Memory too low: 8.5% free
+[2026-07-17T11:11:15.496Z] [INFO] Worker audit deferred: Memory too low: 7.2% free
+[2026-07-17T11:12:58.527Z] [INFO] Worker optimize deferred: Memory too low: 9.0% free
+[2026-07-17T11:14:58.388Z] [INFO] Worker consolidate deferred: Memory too low: 8.0% free
+[2026-07-17T11:21:15.508Z] [INFO] Worker audit deferred: Memory too low: 6.0% free
+[2026-07-17T11:23:58.397Z] [INFO] Worker map deferred: Memory too low: 6.4% free
+[2026-07-17T11:26:58.438Z] [INFO] Worker testgaps deferred: Memory too low: 5.6% free
+[2026-07-17T11:27:58.532Z] [INFO] Worker optimize deferred: Memory too low: 6.5% free
+[2026-07-17T11:31:15.519Z] [INFO] Worker audit deferred: Memory too low: 4.6% free
+[2026-07-17T11:38:58.405Z] [INFO] Worker map deferred: Memory too low: 6.3% free
+[2026-07-17T11:41:15.522Z] [INFO] Worker audit deferred: Memory too low: 4.5% free
+[2026-07-17T11:42:58.538Z] [INFO] Worker optimize deferred: Memory too low: 7.0% free
+[2026-07-17T11:44:58.393Z] [INFO] Worker consolidate deferred: Memory too low: 6.1% free
+[2026-07-17T11:46:58.449Z] [INFO] Worker testgaps deferred: Memory too low: 5.3% free
+[2026-07-17T11:51:15.537Z] [INFO] Worker audit deferred: Memory too low: 5.5% free
+[2026-07-17T11:53:58.419Z] [INFO] Worker map deferred: Memory too low: 8.7% free
+[2026-07-17T11:57:58.545Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T11:57:58.547Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T11:57:58.558Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T11:57:58.560Z] [INFO] Worker optimize completed in 18ms
+[2026-07-17T11:57:58.563Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T11:57:58.566Z] [INFO] Worker map completed in 5ms
+[2026-07-17T11:57:58.569Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T11:57:58.569Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T11:58:00.593Z] [INFO] Starting worker: optimize (2/2 concurrent)
+[2026-07-17T11:58:00.594Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T11:58:00.599Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T11:58:00.600Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T11:58:00.602Z] [INFO] Worker audit completed in 2033ms
+[2026-07-17T11:58:00.603Z] [INFO] Worker optimize completed in 11ms
+[2026-07-17T11:58:00.604Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-17T11:58:00.607Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-17T11:58:00.607Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T11:58:00.607Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-17T11:58:00.608Z] [INFO] Starting worker: map (3/2 concurrent)
+[2026-07-17T11:58:00.617Z] [INFO] Starting worker: testgaps (4/2 concurrent)
+[2026-07-17T11:58:00.618Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T11:58:00.623Z] [INFO] Worker consolidate completed in 19ms
+[2026-07-17T11:58:00.625Z] [INFO] Worker map completed in 17ms
+[2026-07-17T11:58:00.627Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T11:58:00.628Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T11:58:00.630Z] [INFO] Worker audit completed in 23ms
+[2026-07-17T11:58:00.631Z] [INFO] Worker testgaps completed in 15ms
+[2026-07-17T11:58:00.633Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T11:58:00.633Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T11:58:00.634Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-17T11:58:00.634Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T11:58:00.641Z] [INFO] Starting worker: map (3/2 concurrent)
+[2026-07-17T11:58:00.646Z] [INFO] Starting worker: audit (3/2 concurrent)
+[2026-07-17T11:58:00.646Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T11:58:00.647Z] [INFO] Worker map completed in 7ms
+[2026-07-17T11:58:00.652Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T11:58:00.653Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T11:58:00.654Z] [INFO] Worker optimize completed in 22ms
+[2026-07-17T11:58:00.656Z] [INFO] Worker audit completed in 23ms
+[2026-07-17T11:58:00.659Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T11:58:00.660Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T11:58:00.661Z] [INFO] Starting worker: consolidate (2/2 concurrent)
+[2026-07-17T11:58:00.661Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-17T11:58:00.665Z] [INFO] Starting worker: testgaps (3/2 concurrent)
+[2026-07-17T11:58:00.665Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T11:58:00.666Z] [INFO] Starting worker: audit (4/2 concurrent)
+[2026-07-17T11:58:00.666Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T11:58:00.666Z] [INFO] Worker consolidate completed in 6ms
+[2026-07-17T11:58:00.674Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T11:58:00.676Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T11:58:00.677Z] [INFO] Worker optimize completed in 20ms
+[2026-07-17T11:58:00.678Z] [INFO] Worker audit completed in 33ms
+[2026-07-17T11:58:00.680Z] [INFO] Starting worker: map (2/2 concurrent)
+[2026-07-17T11:58:00.681Z] [INFO] Worker map completed in 1ms
+[2026-07-17T11:58:00.683Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T11:58:00.683Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T11:58:00.684Z] [INFO] Worker testgaps completed in 20ms
+[2026-07-17T11:58:00.685Z] [INFO] Worker audit completed in 19ms
+[2026-07-17T12:01:15.555Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T12:01:15.556Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T12:01:17.480Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T12:01:17.481Z] [INFO] Worker audit completed in 1927ms
+[2026-07-17T12:06:58.463Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-17T12:06:58.463Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T12:06:58.469Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T12:06:58.470Z] [INFO] Worker testgaps completed in 9ms
+[2026-07-17T12:08:58.422Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T12:08:58.423Z] [INFO] Worker map completed in 2ms
+[2026-07-17T12:11:17.490Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T12:11:17.491Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T12:11:19.607Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T12:11:19.609Z] [INFO] Worker audit completed in 2120ms
+[2026-07-17T12:12:58.566Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T12:12:58.566Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T12:12:58.576Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T12:12:58.578Z] [INFO] Worker optimize completed in 13ms
+[2026-07-17T12:14:58.400Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-17T12:14:58.401Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-17T12:14:58.401Z] [INFO] Worker consolidate completed in 3ms
+[2026-07-17T12:21:19.628Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T12:21:19.628Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T12:21:21.349Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T12:21:21.350Z] [INFO] Worker audit completed in 1724ms
+[2026-07-17T12:23:58.438Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T12:23:58.438Z] [INFO] Worker map completed in 2ms
+[2026-07-17T12:26:58.474Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-17T12:26:58.475Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T12:26:58.479Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T12:26:58.480Z] [INFO] Worker testgaps completed in 7ms
+[2026-07-17T12:27:58.594Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T12:27:58.594Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T12:27:58.600Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T12:27:58.600Z] [INFO] Worker optimize completed in 7ms
+[2026-07-17T12:31:21.355Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T12:31:21.355Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T12:31:23.016Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T12:31:23.017Z] [INFO] Worker audit completed in 1663ms
+[2026-07-17T12:38:58.451Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T12:38:58.452Z] [INFO] Worker map completed in 2ms
+[2026-07-17T12:41:23.028Z] [INFO] Worker audit deferred: Memory too low: 8.8% free
+[2026-07-17T12:42:58.615Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T12:42:58.615Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T12:42:58.623Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T12:42:58.624Z] [INFO] Worker optimize completed in 12ms
+[2026-07-17T12:42:58.627Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T12:42:58.628Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T12:43:00.478Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T12:43:00.479Z] [INFO] Worker audit completed in 1853ms
+[2026-07-17T12:44:58.409Z] [INFO] Worker consolidate deferred: Memory too low: 9.9% free
+[2026-07-17T12:46:58.492Z] [INFO] Worker testgaps deferred: Memory too low: 6.6% free
+[2026-07-17T12:51:23.042Z] [INFO] Worker audit deferred: Memory too low: 6.5% free
+[2026-07-17T12:53:58.470Z] [INFO] Worker map deferred: Memory too low: 6.3% free
+[2026-07-17T12:57:58.628Z] [INFO] Worker optimize deferred: Memory too low: 6.8% free
+[2026-07-17T13:01:23.049Z] [INFO] Worker audit deferred: Memory too low: 4.0% free
+[2026-07-17T13:06:58.500Z] [INFO] Worker testgaps deferred: Memory too low: 6.8% free
+[2026-07-17T13:08:58.483Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T13:08:58.485Z] [INFO] Worker map completed in 4ms
+[2026-07-17T13:08:58.487Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-17T13:08:58.490Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-17T13:08:58.491Z] [INFO] Worker consolidate completed in 5ms
+[2026-07-17T13:08:58.495Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-17T13:08:58.495Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T13:08:58.510Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-17T13:08:58.510Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T13:09:00.633Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T13:09:00.635Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T13:09:00.635Z] [INFO] Worker testgaps completed in 2142ms
+[2026-07-17T13:09:00.636Z] [INFO] Worker audit completed in 2128ms
+[2026-07-17T13:09:00.639Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T13:09:00.641Z] [INFO] Starting worker: optimize (2/2 concurrent)
+[2026-07-17T13:09:00.641Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T13:09:00.642Z] [INFO] Starting worker: audit (3/2 concurrent)
+[2026-07-17T13:09:00.643Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T13:09:00.648Z] [INFO] Starting worker: testgaps (4/2 concurrent)
+[2026-07-17T13:09:00.648Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T13:09:00.656Z] [INFO] Worker map completed in 18ms
+[2026-07-17T13:09:00.660Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T13:09:00.660Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T13:09:00.661Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T13:09:00.661Z] [INFO] Worker optimize completed in 22ms
+[2026-07-17T13:09:00.663Z] [INFO] Worker audit completed in 21ms
+[2026-07-17T13:09:00.664Z] [INFO] Worker testgaps completed in 17ms
+[2026-07-17T13:11:23.057Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T13:11:23.057Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T13:11:24.492Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T13:11:24.493Z] [INFO] Worker audit completed in 1438ms
+[2026-07-17T13:12:58.640Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T13:12:58.640Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T13:12:58.644Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T13:12:58.645Z] [INFO] Worker optimize completed in 7ms
+[2026-07-17T13:14:58.423Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-17T13:14:58.423Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-17T13:14:58.424Z] [INFO] Worker consolidate completed in 2ms
+[2026-07-17T13:21:24.495Z] [INFO] Worker audit deferred: Memory too low: 7.3% free
+[2026-07-17T13:23:58.489Z] [INFO] Worker map deferred: Memory too low: 7.6% free
+[2026-07-17T13:26:58.506Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-17T13:26:58.507Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T13:26:58.511Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T13:26:58.511Z] [INFO] Worker testgaps completed in 5ms
+[2026-07-17T13:26:58.513Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T13:26:58.514Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T13:26:59.825Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T13:26:59.826Z] [INFO] Worker audit completed in 1314ms
+[2026-07-17T13:26:59.827Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T13:26:59.828Z] [INFO] Worker map completed in 1ms
+[2026-07-17T13:27:58.655Z] [INFO] Worker optimize deferred: Memory too low: 9.9% free
+[2026-07-17T13:31:24.509Z] [INFO] Worker audit deferred: Memory too low: 8.4% free
+[2026-07-17T13:38:58.492Z] [INFO] Worker map deferred: Memory too low: 8.4% free
+[2026-07-17T13:41:24.515Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T13:41:24.515Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T13:41:26.138Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T13:41:26.138Z] [INFO] Worker audit completed in 1624ms
+[2026-07-17T13:41:26.140Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T13:41:26.140Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T13:41:26.144Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T13:41:26.145Z] [INFO] Worker optimize completed in 5ms
+[2026-07-17T13:41:26.146Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T13:41:26.146Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T13:41:26.150Z] [INFO] Starting worker: map (2/2 concurrent)
+[2026-07-17T13:41:26.151Z] [INFO] Worker map completed in 2ms
+[2026-07-17T13:41:26.152Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T13:41:26.152Z] [INFO] Worker audit completed in 7ms
+[2026-07-17T13:42:58.655Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T13:42:58.656Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T13:42:58.659Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T13:42:58.660Z] [INFO] Worker optimize completed in 6ms
+[2026-07-17T13:44:58.436Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-17T13:44:58.437Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-17T13:44:58.437Z] [INFO] Worker consolidate completed in 2ms
+[2026-07-17T13:46:58.521Z] [INFO] Worker testgaps deferred: Memory too low: 7.8% free
+[2026-07-17T13:50:58.299Z] [INFO] Worker harness deferred: Memory too low: 7.1% free
+[2026-07-17T13:51:26.143Z] [INFO] Worker audit deferred: Memory too low: 5.4% free
+[2026-07-17T13:53:58.502Z] [INFO] Worker map deferred: Memory too low: 4.3% free
+[2026-07-17T13:55:51.273Z] [INFO] Starting worker: backup (1/2 concurrent)
+[2026-07-17T13:55:51.291Z] [INFO] Worker backup completed in 20ms
+[2026-07-17T13:55:51.293Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-17T13:55:51.293Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T13:55:51.299Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T13:55:51.300Z] [INFO] Worker testgaps completed in 8ms
+[2026-07-17T13:55:51.302Z] [INFO] Starting worker: harness (1/2 concurrent)
+[2026-07-17T13:55:51.304Z] [INFO] Starting worker: audit (2/2 concurrent)
+[2026-07-17T13:55:51.304Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T13:55:53.852Z] [INFO] Worker harness completed in 2551ms
+[2026-07-17T13:55:53.854Z] [INFO] Worker map deferred: Memory too low: 9.4% free
+[2026-07-17T13:55:53.854Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T13:55:53.855Z] [INFO] Worker audit completed in 2552ms
+[2026-07-17T13:55:53.856Z] [INFO] Worker map deferred: Memory too low: 9.4% free
+[2026-07-17T13:56:23.867Z] [INFO] Worker map deferred: Memory too low: 4.4% free
+[2026-07-17T13:56:53.884Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T13:56:53.884Z] [INFO] Worker map completed in 2ms
+[2026-07-17T13:57:58.670Z] [INFO] Worker optimize deferred: Memory too low: 7.4% free
+[2026-07-17T14:01:26.155Z] [INFO] Worker audit deferred: Memory too low: 4.6% free
+[2026-07-17T14:06:58.526Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-17T14:06:58.526Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T14:06:58.532Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T14:06:58.533Z] [INFO] Worker testgaps completed in 8ms
+[2026-07-17T14:06:58.535Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T14:06:58.535Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T14:06:58.542Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T14:06:58.543Z] [INFO] Worker optimize completed in 9ms
+[2026-07-17T14:06:58.545Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T14:06:58.545Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T14:07:00.164Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T14:07:00.165Z] [INFO] Worker audit completed in 1621ms
+[2026-07-17T14:08:58.516Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T14:08:58.517Z] [INFO] Worker map completed in 3ms
+[2026-07-17T14:11:26.170Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T14:11:26.170Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T14:11:28.081Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T14:11:28.081Z] [INFO] Worker audit completed in 1912ms
+[2026-07-17T14:12:58.679Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T14:12:58.679Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T14:12:58.685Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T14:12:58.685Z] [INFO] Worker optimize completed in 7ms
+[2026-07-17T14:14:58.445Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-17T14:14:58.449Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-17T14:14:58.449Z] [INFO] Worker consolidate completed in 5ms
+[2026-07-17T14:21:28.091Z] [INFO] Worker audit deferred: Memory too low: 7.7% free
+[2026-07-17T14:23:58.531Z] [INFO] Worker map deferred: Memory too low: 4.9% free
+[2026-07-17T14:26:58.539Z] [INFO] Worker testgaps deferred: Memory too low: 8.8% free
+[2026-07-17T14:27:58.695Z] [INFO] Worker optimize deferred: Memory too low: 8.4% free
+[2026-07-17T14:31:28.105Z] [INFO] Worker audit deferred: Memory too low: 6.0% free
+[2026-07-17T14:38:58.549Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T14:38:58.551Z] [INFO] Worker map completed in 3ms
+[2026-07-17T14:38:58.552Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T14:38:58.553Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T14:39:00.251Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T14:39:00.252Z] [INFO] Worker audit completed in 1700ms
+[2026-07-17T14:39:00.253Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T14:39:00.255Z] [INFO] Starting worker: testgaps (2/2 concurrent)
+[2026-07-17T14:39:00.255Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T14:39:00.259Z] [INFO] Worker map completed in 6ms
+[2026-07-17T14:39:00.260Z] [INFO] Starting worker: optimize (2/2 concurrent)
+[2026-07-17T14:39:00.260Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T14:39:00.265Z] [INFO] Starting worker: audit (3/2 concurrent)
+[2026-07-17T14:39:00.266Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T14:39:00.274Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T14:39:00.274Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T14:39:00.275Z] [INFO] Worker testgaps completed in 21ms
+[2026-07-17T14:39:00.276Z] [INFO] Worker optimize completed in 16ms
+[2026-07-17T14:39:00.277Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T14:39:00.278Z] [INFO] Worker audit completed in 14ms
+[2026-07-17T14:41:28.112Z] [INFO] Worker audit deferred: Memory too low: 5.7% free
+[2026-07-17T14:42:58.711Z] [INFO] Worker optimize deferred: Memory too low: 6.3% free
+[2026-07-17T14:44:58.458Z] [INFO] Worker consolidate deferred: Memory too low: 4.6% free
+[2026-07-17T14:46:58.540Z] [INFO] Worker testgaps deferred: Memory too low: 4.1% free
+[2026-07-17T14:51:28.119Z] [INFO] Worker audit deferred: Memory too low: 6.9% free
+[2026-07-17T14:53:58.557Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T14:53:58.557Z] [INFO] Worker map completed in 2ms
+[2026-07-17T14:53:58.559Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T14:53:58.559Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T14:53:59.973Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T14:53:59.974Z] [INFO] Worker audit completed in 1416ms
+[2026-07-17T14:53:59.975Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T14:53:59.975Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T14:53:59.981Z] [INFO] Starting worker: consolidate (2/2 concurrent)
+[2026-07-17T14:53:59.982Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-17T14:53:59.983Z] [INFO] Worker consolidate completed in 3ms
+[2026-07-17T14:53:59.984Z] [INFO] Starting worker: testgaps (2/2 concurrent)
+[2026-07-17T14:53:59.984Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T14:53:59.989Z] [INFO] Starting worker: audit (3/2 concurrent)
+[2026-07-17T14:53:59.990Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T14:53:59.994Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T14:53:59.995Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T14:53:59.995Z] [INFO] Worker optimize completed in 21ms
+[2026-07-17T14:53:59.996Z] [INFO] Worker testgaps completed in 12ms
+[2026-07-17T14:53:59.998Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T14:53:59.998Z] [INFO] Worker audit completed in 10ms
+[2026-07-17T14:57:58.722Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T14:57:58.722Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T14:57:58.726Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T14:57:58.726Z] [INFO] Worker optimize completed in 5ms
+[2026-07-17T15:01:28.130Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T15:01:28.130Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T15:01:29.590Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T15:01:29.591Z] [INFO] Worker audit completed in 1462ms
+[2026-07-17T15:06:58.549Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-17T15:06:58.550Z] [INFO] Running testgaps in headless mode (Claude Code AI)
+[2026-07-17T15:06:58.553Z] [WARN] Headless testgaps returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T15:06:58.553Z] [INFO] Worker testgaps completed in 5ms
+[2026-07-17T15:08:58.560Z] [INFO] Worker map deferred: Memory too low: 9.8% free
+[2026-07-17T15:11:29.597Z] [INFO] Worker audit deferred: Memory too low: 5.6% free
+[2026-07-17T15:12:58.734Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-17T15:12:58.734Z] [INFO] Running optimize in headless mode (Claude Code AI)
+[2026-07-17T15:12:58.739Z] [WARN] Headless optimize returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T15:12:58.740Z] [INFO] Worker optimize completed in 8ms
+[2026-07-17T15:12:58.741Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T15:12:58.742Z] [INFO] Worker map completed in 1ms
+[2026-07-17T15:12:58.743Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T15:12:58.743Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T15:13:00.313Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T15:13:00.314Z] [INFO] Worker audit completed in 1572ms
+[2026-07-17T15:14:58.460Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-17T15:14:58.461Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-17T15:14:58.462Z] [INFO] Worker consolidate completed in 3ms
+[2026-07-17T15:21:29.604Z] [INFO] Worker audit deferred: Memory too low: 8.0% free
+[2026-07-17T15:23:58.578Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-17T15:23:58.578Z] [INFO] Worker map completed in 2ms
+[2026-07-17T15:23:58.583Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-17T15:23:58.583Z] [INFO] Running audit in headless mode (Claude Code AI)
+[2026-07-17T15:24:00.087Z] [WARN] Headless audit returned success=false (spawn claude ENOENT); falling back to local mode
+[2026-07-17T15:24:00.087Z] [INFO] Worker audit completed in 1506ms
+[2026-07-17T19:42:24.094Z] [INFO] Daemon self-shutdown: max age 43200s reached
+[2026-07-17T19:42:24.103Z] [INFO] Stopped worker: map
+[2026-07-17T19:42:24.103Z] [INFO] Stopped worker: audit
+[2026-07-17T19:42:24.103Z] [INFO] Stopped worker: optimize
+[2026-07-17T19:42:24.104Z] [INFO] Stopped worker: consolidate
+[2026-07-17T19:42:24.104Z] [INFO] Stopped worker: testgaps
+[2026-07-17T19:42:24.104Z] [INFO] Stopped worker: backup
+[2026-07-17T19:42:24.105Z] [INFO] Stopped worker: harness
+[2026-07-17T19:42:24.113Z] [INFO] Daemon stopped
+[2026-07-20T08:23:11.142Z] [INFO] Scheduled map (interval: 900s, first run in 0s)
+[2026-07-20T08:23:11.143Z] [INFO] Scheduled audit (interval: 600s, first run in 120s)
+[2026-07-20T08:23:11.144Z] [INFO] Scheduled optimize (interval: 900s, first run in 240s)
+[2026-07-20T08:23:11.144Z] [INFO] Scheduled consolidate (interval: 1800s, first run in 360s)
+[2026-07-20T08:23:11.144Z] [INFO] Scheduled testgaps (interval: 1200s, first run in 480s)
+[2026-07-20T08:23:11.145Z] [INFO] Scheduled backup (interval: 86400s, first run in 600s)
+[2026-07-20T08:23:11.145Z] [INFO] Scheduled harness (interval: 21600s, first run in 720s)
+[2026-07-20T08:23:11.146Z] [INFO] Lifecycle monitor active (ttl=43200s)
+[2026-07-20T08:23:11.148Z] [INFO] Daemon started (PID: 62576, CPUs: 20, workers: 7, maxCpuLoad: 16, minFreeMemoryPercent: 10%)
+[2026-07-20T08:23:11.148Z] [INFO] Claude Code headless mode available - AI workers enabled
+[2026-07-20T08:23:11.149Z] [INFO] Worker map deferred: Memory too low: 6.2% free

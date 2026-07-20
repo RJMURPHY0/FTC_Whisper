@@ -81,6 +81,11 @@ CAPTION_MAX_CHARS = 60
 CAPTION_MAX_LINES = 5
 CAPTION_SCROLL_HOLDOFF = 4.0  # secs after a manual scroll before auto-tail resumes
 
+# The Ask-AI instruction box grows downward as the typed text wraps past the
+# right edge, up to this many visible lines, then scrolls internally.
+ASK_MAX_LINES = 6
+ASK_PLACEHOLDER = "Ask AI — e.g. 'change language to French' or 'make this shorter'"
+
 # How long the post-transcription icon badge stays before auto-dismissing, so it
 # never lingers on screen indefinitely.
 ICON_AUTO_DISMISS_SECS = 30.0
@@ -644,7 +649,7 @@ class FloatingPopup:
             w.bind("<Enter>", lambda _e: self._icon_frame.configure(bg=CP["btn_bg"]))
             w.bind("<Leave>", lambda _e: self._icon_frame.configure(bg=CP["bg"]))
 
-        self._space_hook = None
+        self._dismiss_hooks = []
 
     # ── Refinement frame ───────────────────────────────────────────────────────
 
@@ -703,35 +708,53 @@ class FloatingPopup:
         ask_row = tk.Frame(f, bg=CP["bg"])
         ask_row.pack(fill="x", pady=(0, 6))
 
-        self._ask_var = tk.StringVar()
-        self._ask_entry = tk.Entry(
+        # Multi-line, word-wrapping instruction box: starts one line high and
+        # grows downward (up to ASK_MAX_LINES) as the text wraps past the right
+        # edge — Text, not Entry, because Entry is single-line and scrolls
+        # horizontally instead of expanding.
+        self._ask_lines = 1
+        self._ask_showing_placeholder = True
+        self._ask_entry = tk.Text(
             ask_row,
-            textvariable=self._ask_var,
+            height=1,
+            wrap="word",
             bg=CP["btn_bg"],
-            fg=CP["text"],
+            fg=CP["subtext"],
             insertbackground=CP["text"],
             relief="flat",
             font=("Segoe UI", 10),
             bd=0,
+            padx=6,
+            pady=4,
+            highlightthickness=0,
         )
-        self._ask_entry.pack(side="left", fill="x", expand=True, ipady=5, padx=(0, 4))
-        self._ask_entry.insert(0, "Ask AI — e.g. 'change language to French' or 'make this shorter'")
-        self._ask_entry.configure(fg=CP["subtext"])
+        self._ask_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self._ask_entry.insert("1.0", ASK_PLACEHOLDER)
 
-        def _clear_placeholder(e):
-            if self._ask_entry.get() == "Ask AI — e.g. 'change language to French' or 'make this shorter'":
-                self._ask_entry.delete(0, "end")
+        def _clear_placeholder(_e=None):
+            if self._ask_showing_placeholder:
+                self._ask_entry.delete("1.0", "end")
                 self._ask_entry.configure(fg=CP["text"])
+                self._ask_showing_placeholder = False
+                self._autosize_ask()
 
-        def _restore_placeholder(e):
-            if not self._ask_entry.get().strip():
-                self._ask_entry.delete(0, "end")
-                self._ask_entry.insert(0, "Ask AI — e.g. 'change language to French' or 'make this shorter'")
+        def _restore_placeholder(_e=None):
+            if not self._ask_entry.get("1.0", "end-1c").strip():
+                self._ask_entry.delete("1.0", "end")
+                self._ask_entry.insert("1.0", ASK_PLACEHOLDER)
                 self._ask_entry.configure(fg=CP["subtext"])
+                self._ask_showing_placeholder = True
+                self._autosize_ask()
+
+        def _on_return(_e):
+            self._run_ai_custom()
+            return "break"  # submit on Enter — don't insert a newline
 
         self._ask_entry.bind("<FocusIn>", _clear_placeholder)
         self._ask_entry.bind("<FocusOut>", _restore_placeholder)
-        self._ask_entry.bind("<Return>", lambda _e: self._run_ai_custom())
+        self._ask_entry.bind("<Return>", _on_return)
+        self._ask_entry.bind("<Shift-Return>", lambda _e: self._autosize_ask())
+        self._ask_entry.bind("<KeyRelease>", lambda _e: self._autosize_ask())
 
         self._mic_btn = tk.Label(
             ask_row,
@@ -1062,29 +1085,39 @@ class FloatingPopup:
             )
 
     def _register_space_dismiss(self) -> None:
+        # In the post-insert icon badge, Space OR Enter dismisses it — the user
+        # carries on typing (space) or sends/newlines (enter) in the target app
+        # and the badge gets out of the way. suppress=False so the keypress still
+        # reaches the app. NOT active in the refinement panel, where Enter submits
+        # the Ask box (_expand_to_panel unhooks these first).
         try:
             import keyboard as kb
 
             self._unregister_space_dismiss()
 
-            def _on_space(_e):
+            def _on_dismiss_key(_e):
                 self._unregister_space_dismiss()
                 if self.root:
                     self.root.after(0, self._do_hide)
 
-            self._space_hook = kb.on_press_key("space", _on_space, suppress=False)
+            self._dismiss_hooks = [
+                kb.on_press_key("space", _on_dismiss_key, suppress=False),
+                kb.on_press_key("enter", _on_dismiss_key, suppress=False),
+            ]
         except Exception:
             pass
 
     def _unregister_space_dismiss(self) -> None:
-        if self._space_hook is not None:
+        if self._dismiss_hooks:
             try:
                 import keyboard as kb
 
-                kb.unhook(self._space_hook)
+                for hook in self._dismiss_hooks:
+                    if hook is not None:
+                        kb.unhook(hook)
             except Exception:
                 pass
-            self._space_hook = None
+            self._dismiss_hooks = []
 
     def _do_hide(self) -> None:
         self._set_no_activate(True)
@@ -1273,9 +1306,42 @@ class FloatingPopup:
         self.root.after(500, self._mic_pulse_tick)
 
     def _set_ask_entry(self, text: str) -> None:
-        self._ask_entry.delete(0, "end")
-        self._ask_entry.insert(0, text)
+        self._ask_entry.delete("1.0", "end")
+        self._ask_entry.insert("1.0", text)
         self._ask_entry.configure(fg=CP["text"])
+        self._ask_showing_placeholder = False
+        self._autosize_ask()
+
+    def _autosize_ask(self) -> None:
+        """Grow/shrink the Ask box to fit its wrapped text (1..ASK_MAX_LINES lines).
+
+        Uses displaylines so word-wrapped text counts each visual row, not just
+        newline-delimited lines. Repositions the panel when the height changes so
+        it stays anchored to the bottom of the screen as it grows upward.
+        """
+        try:
+            self._ask_entry.update_idletasks()
+            res = self._ask_entry.count("1.0", "end-1c", "displaylines")
+            if isinstance(res, (tuple, list)):
+                n = res[0] if res else 1
+            elif res is None:
+                n = 1
+            else:
+                n = int(res)
+            n = max(1, min(int(n), ASK_MAX_LINES))
+        except Exception:
+            n = 1
+        if n == self._ask_lines:
+            return
+        self._ask_lines = n
+        self._ask_entry.configure(height=n)
+        # Panel is anchored bottom-centre (y = bottom - height - 60), so a taller
+        # box must be re-placed or it would grow down into the taskbar.
+        if self._mode == "refinement":
+            try:
+                self._reposition(self._status_cx, self._status_cy)
+            except Exception:
+                pass
 
     def _finish_mic(self) -> None:
         self._mic_recording = False
@@ -1312,9 +1378,8 @@ class FloatingPopup:
 
     def _run_ai_custom(self) -> None:
         """Run AI refinement with a custom instruction typed by the user."""
-        instruction = self._ask_var.get().strip()
-        placeholder = "Ask AI — e.g. 'change language to French' or 'make this shorter'"
-        if not instruction or instruction == placeholder:
+        instruction = "" if self._ask_showing_placeholder else self._ask_entry.get("1.0", "end-1c").strip()
+        if not instruction:
             self._ai_status.configure(text="⚠  Type an instruction first")
             self._ai_status.pack(anchor="w")
             return
