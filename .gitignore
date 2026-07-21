@@ -40,3 +40,6 @@ backup-dream-*/
 
 # Headless audit run logs — 800+ regenerating prompt/result dumps, not source
 .claude-flow/logs/headless/
+
+# graphify knowledge graph — generated locally from AST, rebuild free with /graphify .
+graphify-out/
