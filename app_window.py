@@ -68,6 +68,19 @@ def show_toast(root: tk.Misc, message: str, duration_ms: int = 5000) -> None:
     y = toast.winfo_screenheight() - h - 60
     toast.geometry(f"{w}x{h}+{x}+{y}")
 
+    # Borderless Toplevels get square corners by default, so the toast needs the
+    # same DWM treatment as the floating popup or it reads as a different app.
+    # Must run after update_idletasks()/geometry(): before the window is realised
+    # GetAncestor(GA_ROOT) resolves to the wrong handle and the call is a silent
+    # no-op that still returns S_OK. Imported lazily because popup.py pulls
+    # _rr/RoundedButton from this module — a module-level import closes the cycle.
+    toast.update_idletasks()
+    try:
+        from popup import _apply_popup_corners
+        _apply_popup_corners(toast.winfo_id())
+    except Exception:
+        pass
+
     def _fade(alpha: float, step: float):
         try:
             alpha = max(0.0, min(1.0, alpha + step))
