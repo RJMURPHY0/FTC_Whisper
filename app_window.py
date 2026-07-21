@@ -688,8 +688,8 @@ class AppWindow:
                 self._root.bind_all("<MouseWheel>", self._hist_scroll)
         elif name == "settings":
             if self._root and hasattr(self, "_settings_cv"):
-                self._root.bind_all("<MouseWheel>", lambda e: self._settings_cv.yview_scroll(
-                    int(-1 * (e.delta / 40)), "units"))
+                self._root.bind_all("<MouseWheel>",
+                                    lambda e: self._wheel_scroll(self._settings_cv, e))
             if hasattr(self, "_update_check_btn") and hasattr(self, "_do_update_check"):
                 # Don't clobber an in-flight check — resetting the label here
                 # both swallowed the pending result and re-armed the button for
@@ -700,8 +700,8 @@ class AppWindow:
                     self._update_check_btn.bind("<Button-1>", self._do_update_check)
         elif name == "hotkey":
             if self._root and hasattr(self, "_hk_cv"):
-                self._root.bind_all("<MouseWheel>", lambda e: self._hk_cv.yview_scroll(
-                    int(-1 * (e.delta / 40)), "units"))
+                self._root.bind_all("<MouseWheel>",
+                                    lambda e: self._wheel_scroll(self._hk_cv, e))
         else:
             if self._root:
                 try:
@@ -816,20 +816,21 @@ class AppWindow:
 
     def _build_hotkey_tab(self, parent: tk.Frame) -> None:
         # Scrollable container
-        self._hk_cv = tk.Canvas(parent, bg=C["bg"], highlightthickness=0, bd=0)
+        self._hk_cv = tk.Canvas(parent, bg=C["bg"], highlightthickness=0, bd=0,
+                                yscrollincrement=24)
         _hk_cv = self._hk_cv
-        _hk_sb = ModernScrollbar(parent, command=_hk_cv.yview)
+        _hk_sb = ModernScrollbar(
+            parent, command=lambda *a: (_hk_cv.yview(*a), self._repaint(_hk_cv)))
         _hk_cv.configure(yscrollcommand=_hk_sb.set)
         _hk_sb.pack(side="right", fill="y")
         _hk_cv.pack(side="left", fill="both", expand=True)
         _hk_inner = tk.Frame(_hk_cv, bg=C["bg"])
         _hk_win = _hk_cv.create_window(0, 0, window=_hk_inner, anchor="nw")
-        _hk_inner.bind("<Configure>", lambda _e: _hk_cv.configure(
-            scrollregion=_hk_cv.bbox("all")))
+        _hk_inner.bind("<Configure>",
+                       lambda _e: self._queue_scrollregion_sync(_hk_cv))
         _hk_cv.bind("<Configure>", lambda e: _hk_cv.itemconfigure(
             _hk_win, width=e.width))
-        _hk_cv.bind("<MouseWheel>", lambda e: _hk_cv.yview_scroll(
-            int(-1 * (e.delta / 40)), "units"))
+        _hk_cv.bind("<MouseWheel>", lambda e: self._wheel_scroll(_hk_cv, e))
         parent = _hk_inner
 
         # ── Dictation hotkey ─────────────────────────────────────────────────────
@@ -848,9 +849,14 @@ class AppWindow:
 
         tk.Frame(card1, bg=C["border"], height=1).pack(fill="x", pady=(0, 10))
 
+        # Mode state must exist before the description below — its wording
+        # depends on hold vs toggle.
+        _init_mode = getattr(self._config, "mode", "hold") if self._config else "hold"
+        self._mode_toggle_on = (_init_mode == "toggle")
+
         self._hotkey_record_msg = tk.Label(
             card1,
-            text="Press  Change Shortcut  then press any key combo (e.g. F9, Alt+V).",
+            text=self._hotkey_help_text(),
             fg=C["subtext"], bg=C["surface"],
             font=("Segoe UI", 9), justify="left", anchor="w", wraplength=340,
         )
@@ -870,12 +876,10 @@ class AppWindow:
         )
         self._save_btn.pack(side="left")
 
-        # Compact toggle switch — inline with the buttons
+        # Compact toggle switch — inline with the buttons (mode state was
+        # initialised above, before the description label).
         _mode_right = tk.Frame(btn_row, bg=C["surface"])
         _mode_right.pack(side="right")
-
-        _init_mode = getattr(self._config, "mode", "hold") if self._config else "hold"
-        self._mode_toggle_on = (_init_mode == "toggle")
 
         self._mode_lbl = tk.Label(
             _mode_right, text="Toggle",
@@ -891,6 +895,11 @@ class AppWindow:
             self._mode_lbl.configure(
                 fg=C["text"] if new_val else C["subtext"]
             )
+            # Description follows the mode — but never clobber the "press your
+            # new key…" prompt while a shortcut recording is in progress.
+            if not self._recording_hotkey:
+                self._hotkey_record_msg.configure(
+                    text=self._hotkey_help_text(), fg=C["subtext"])
             if hasattr(self, "_home_mode_hint_lbl"):
                 self._home_mode_hint_lbl.configure(
                     text=" press to start/stop" if new_val else " hold to dictate"
@@ -951,6 +960,15 @@ class AppWindow:
         )
         self._refine_save_btn.pack(side="left")
 
+    def _hotkey_help_text(self) -> str:
+        """Description under the shortcut — wording tracks hold vs toggle mode."""
+        hk = (self._hotkey or "ALT+V").upper()
+        if getattr(self, "_mode_toggle_on", True):
+            return (f"Press {hk} once to start recording, again to stop and "
+                    "insert. Press  Change Shortcut  to set a new key combo.")
+        return (f"Hold {hk} while you speak, release to insert. "
+                "Press  Change Shortcut  to set a new key combo.")
+
     def _toggle_hotkey_recording(self) -> None:
         if self._recording_hotkey:
             self._stop_hotkey_recording(cancelled=True)
@@ -1006,9 +1024,7 @@ class AppWindow:
         if cancelled or not self._pending_hotkey:
             self._hotkey_display_lbl.configure(text=self._hotkey or "—")
             self._hotkey_record_msg.configure(
-                text="Press  Change Shortcut  then press any key combo (e.g. F9, Alt+V).",
-                fg=C["subtext"],
-            )
+                text=self._hotkey_help_text(), fg=C["subtext"])
             self._save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
         else:
             self._hotkey_display_lbl.configure(text=self._pending_hotkey.upper())
@@ -1036,6 +1052,18 @@ class AppWindow:
             text=f"Shortcut updated to {self._hotkey}.",
             fg=C["success"],
         )
+
+        # Let the confirmation flash, then settle back to the mode-aware help.
+        def _restore_help():
+            try:
+                if not self._recording_hotkey:
+                    self._hotkey_record_msg.configure(
+                        text=self._hotkey_help_text(), fg=C["subtext"])
+            except tk.TclError:
+                pass
+        if self._root:
+            self._root.after(4000, _restore_help)
+
         threading.Thread(
             target=self._on_hotkey_change, args=(new_hotkey,), daemon=True
         ).start()
@@ -1251,13 +1279,16 @@ class AppWindow:
 
         # Scrollable list canvas — fills the whole card (no scrollbar inside now)
         self._hist_cv = tk.Canvas(card_inner, bg=C["surface"],
-                                  highlightthickness=0, bd=0)
+                                  highlightthickness=0, bd=0,
+                                  yscrollincrement=24)
         self._hist_cv.pack(fill="both", expand=True)
 
         # External scrollbar on the window background, to the RIGHT of the card.
         # Packed (side=right) before the card is packed (side=left, expand) so it
         # claims the right edge; the card then fills the remaining width.
-        self._hist_sb = ModernScrollbar(mid, command=self._hist_cv.yview)
+        self._hist_sb = ModernScrollbar(
+            mid, command=lambda *a: (self._hist_cv.yview(*a),
+                                     self._repaint(self._hist_cv)))
         self._hist_cv.configure(yscrollcommand=self._hist_sb.set)
         self._hist_sb.pack(side="right", fill="y")
         # Right pad 8 so the card's right edge lines up with the search bar (W-20),
@@ -1269,15 +1300,53 @@ class AppWindow:
         self._hist_items_win = self._hist_cv.create_window(
             0, 0, window=self._hist_items, anchor="nw")
 
-        self._hist_items.bind("<Configure>", lambda _e: self._hist_cv.configure(
-            scrollregion=self._hist_cv.bbox("all")))
+        self._hist_items.bind("<Configure>",
+                              lambda _e: self._queue_scrollregion_sync(self._hist_cv))
         self._hist_cv.bind("<Configure>", lambda e: self._hist_cv.itemconfigure(
             self._hist_items_win, width=e.width))
 
 
+    @staticmethod
+    def _repaint(widget) -> None:
+        """Windows: a tk.Canvas scrolls by blitting its pixels, but embedded row
+        Frames are real child windows — fast wheel scrolling leaves torn "ghost"
+        copies of rows in the uncovered regions (the expose pass never repaints
+        them). Force a clean repaint of the canvas and every child after each
+        scroll step. RDW_INVALIDATE|RDW_ALLCHILDREN (0x81) WITHOUT erase:
+        repaint-over, so no background flash."""
+        try:
+            ctypes.windll.user32.RedrawWindow(widget.winfo_id(), None, None, 0x81)
+        except Exception:
+            pass
+
+    def _wheel_scroll(self, cv, event) -> None:
+        """Shared mousewheel handler for the scrollable tabs — smooth fixed-pixel
+        steps (yscrollincrement) plus the anti-ghosting repaint."""
+        try:
+            cv.yview_scroll(int(-1 * (event.delta / 40)), "units")
+        except tk.TclError:
+            return
+        self._repaint(cv)
+
+    @staticmethod
+    def _queue_scrollregion_sync(cv) -> None:
+        """Recompute a scroll canvas's scrollregion once geometry has settled.
+        A bbox taken mid-layout (e.g. the moment the update banner packs in)
+        under-reports the content height, leaving the page bottom cut off and
+        unreachable — after_idle re-measures when the layout is final."""
+        def _sync():
+            try:
+                cv.configure(scrollregion=cv.bbox("all"))
+            except tk.TclError:
+                pass  # canvas destroyed mid-shutdown
+        try:
+            cv.after_idle(_sync)
+        except tk.TclError:
+            pass
+
     def _hist_scroll(self, event) -> None:
         if hasattr(self, "_hist_cv"):
-            self._hist_cv.yview_scroll(int(-1 * (event.delta / 40)), "units")
+            self._wheel_scroll(self._hist_cv, event)
 
     def _load_history(self) -> None:
         if getattr(self, "_history_loading", False):
@@ -1672,16 +1741,19 @@ class AppWindow:
 
     def _build_settings_tab(self, parent: tk.Frame) -> None:
         # Scrollable container
-        self._settings_cv = tk.Canvas(parent, bg=C["bg"], highlightthickness=0, bd=0)
-        self._settings_sb = ModernScrollbar(parent, command=self._settings_cv.yview)
+        self._settings_cv = tk.Canvas(parent, bg=C["bg"], highlightthickness=0,
+                                      bd=0, yscrollincrement=24)
+        self._settings_sb = ModernScrollbar(
+            parent, command=lambda *a: (self._settings_cv.yview(*a),
+                                        self._repaint(self._settings_cv)))
         self._settings_cv.configure(yscrollcommand=self._settings_sb.set)
         self._settings_sb.pack(side="right", fill="y")
         self._settings_cv.pack(side="left", fill="both", expand=True)
 
         inner = tk.Frame(self._settings_cv, bg=C["bg"])
         _win = self._settings_cv.create_window(0, 0, window=inner, anchor="nw")
-        inner.bind("<Configure>", lambda _e: self._settings_cv.configure(
-            scrollregion=self._settings_cv.bbox("all")))
+        inner.bind("<Configure>",
+                   lambda _e: self._queue_scrollregion_sync(self._settings_cv))
         self._settings_cv.bind("<Configure>", lambda e: self._settings_cv.itemconfigure(
             _win, width=e.width))
 
@@ -2412,6 +2484,14 @@ class AppWindow:
             _btns.append(ver_btn)
 
             self._ver_update_row.pack(fill="x", pady=(8, 0))
+
+        # The banner just grew the settings page. Re-measure the scroll range
+        # once layout settles — with the stale region the page bottom stayed
+        # cut off by exactly the banner's height.
+        cv = getattr(self, "_settings_cv", None)
+        if cv is not None:
+            self._queue_scrollregion_sync(cv)
+            self._repaint(cv)
 
     # ── Auth callbacks ────────────────────────────────────────────────────────
 
