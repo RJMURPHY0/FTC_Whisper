@@ -35,6 +35,7 @@ from recorder import Recorder
 from transcriber import Transcriber
 from asr_engine import ParakeetTranscriber, model_files_present, download_model
 from stream_session import StreamingSession
+from spoken_commands import apply_spoken_commands
 from injector import Injector, _release_modifiers
 from hotkey_manager import HotkeyManager, TriggerHotkeyManager, AppState
 from feedback import Feedback
@@ -85,7 +86,10 @@ class WhisperFlowApp:
         # than whisper-large-v3 at ~20x realtime on CPU with punctuation built
         # in. English only; whisper pipeline remains the fallback (other
         # languages, or model not yet downloaded).
-        self.parakeet = ParakeetTranscriber(auto_punctuate=_ap)
+        self.parakeet = ParakeetTranscriber(
+            auto_punctuate=_ap,
+            vad_gate=bool(getattr(config, "noise_gate", True)),
+        )
         self._recording_timer: threading.Timer | None = None
         self.recorder = Recorder(
             sample_rate=config.sample_rate,
@@ -879,6 +883,15 @@ class WhisperFlowApp:
             self.hotkey_manager.set_idle()
             return
 
+        # Spoken symbol commands: "slash settings" -> "/settings". Applied once
+        # here so injection, the popup, history logging, the upgrade passes and
+        # the live-typing reconcile all see the same converted text.
+        if transcribed_text and getattr(self.config, "spoken_punctuation", True):
+            _sc = apply_spoken_commands(transcribed_text)
+            if _sc != transcribed_text:
+                print(f"[App] Spoken symbols: '{transcribed_text}' -> '{_sc}'")
+                transcribed_text = _sc
+
         # ── Injection — isolated so a failure never prevents the popup ──────────
         # Whole block in try/finally: even if focus/release/inject/feedback throw,
         # set_idle() ALWAYS fires, so the "Transcribing…" pill is never orphaned
@@ -1047,6 +1060,10 @@ class WhisperFlowApp:
                     if not accurate:
                         self.popup.clear_upgrading(session=_seq)
                         return
+                    # Same spoken-symbol conversion as the injected text — the
+                    # upgrade must not undo "/settings" back into "slash settings".
+                    if getattr(self.config, "spoken_punctuation", True):
+                        accurate = apply_spoken_commands(accurate)
                     offered = False
                     # Show Whisper result immediately so the upgrade button appears fast
                     if accurate != _ft:

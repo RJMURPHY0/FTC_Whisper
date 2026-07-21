@@ -67,6 +67,8 @@ class Config:
     warm_mic: bool = True  # Keep mic stream open with ~1.5s pre-roll: instant start, first syllable never lost
     auto_update: bool = True  # Silently download new releases and install them when the app is idle
     use_parakeet: bool = True  # Parakeet TDT engine (near-instant, high accuracy, English) with whisper fallback
+    noise_gate: bool = True  # Silero VAD gate on the Parakeet engine — background noise never reaches the model (whisper path has its own)
+    spoken_punctuation: bool = True  # Convert dictated symbol names ("slash", "underscore", "hashtag") into the characters themselves
     custom_vocabulary: str = ""  # Comma-separated terms to boost in Whisper (names, acronyms, domain words)
     auto_punctuate: bool = True   # Add trailing period when Whisper output has no terminal punctuation
     live_captions: bool = False   # Show live text of what you're saying (replaces the waveform bar while recording)

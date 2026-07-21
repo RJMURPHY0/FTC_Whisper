@@ -111,9 +111,12 @@ class ParakeetTranscriber:
     replaced with the user's canonical casing (e.g. "ftc" -> "FTC").
     """
 
-    def __init__(self, auto_punctuate: bool = True, cpu_threads: int = 4):
+    def __init__(self, auto_punctuate: bool = True, cpu_threads: int = 4,
+                 vad_gate: bool = True):
         self.auto_punctuate = auto_punctuate
         self._cpu_threads = cpu_threads
+        self._vad_gate = vad_gate
+        self._vad_failed = False
         self._model = None
         self._load_lock = threading.Lock()
         self._transcribe_lock = threading.Lock()
@@ -194,6 +197,12 @@ class ParakeetTranscriber:
         if not acquired:
             return ""
         try:
+            # VAD gate inside the lock so non-blocking caption ticks that bail
+            # out above never pay for it.
+            if self._vad_gate:
+                audio = self._vad_clip(audio)
+                if audio is None:
+                    return ""  # no speech anywhere in the clip
             text = self._recognize_long(audio)
         except Exception as e:
             print(f"[ParakeetEngine] Inference error: {e}")
@@ -205,6 +214,43 @@ class ParakeetTranscriber:
         return self.polish(text) if finalize_text else text
 
     # -- internals ----------------------------------------------------------
+
+    # VAD gate — the whisper fallback filters non-speech through Silero VAD
+    # (vad_filter=True) but Parakeet received the raw capture: steady background
+    # noise (TV, traffic, machinery) sails over the peak floor above and the
+    # transducer decodes it into a confident, fluent sentence the user never
+    # said. Reuse faster-whisper's bundled Silero model so only speech regions
+    # reach the model; noise-only clips transcribe to nothing at all.
+    # threshold 0.40 is more permissive than the whisper path's 0.45 — quiet
+    # real speech must survive the gate; pad 200ms protects word onsets.
+    _VAD_OPTS = dict(threshold=0.40, min_speech_duration_ms=50,
+                     min_silence_duration_ms=400, speech_pad_ms=200)
+    _VAD_JOIN_GAP = 0.15      # silence re-inserted between spliced speech chunks
+
+    def _vad_clip(self, audio: np.ndarray) -> Optional[np.ndarray]:
+        """Return only the speech regions of 16 kHz `audio`; None when Silero
+        found no speech at all; the input unchanged if VAD is unavailable."""
+        if self._vad_failed:
+            return audio
+        try:
+            from faster_whisper.vad import VadOptions, get_speech_timestamps
+            chunks = get_speech_timestamps(audio, VadOptions(**self._VAD_OPTS))
+        except Exception as e:
+            print(f"[ParakeetEngine] VAD unavailable ({e}) — gate disabled.")
+            self._vad_failed = True
+            return audio
+        if not chunks:
+            return None
+        kept = sum(c["end"] - c["start"] for c in chunks)
+        if kept >= 0.9 * len(audio):
+            return audio  # nearly all speech — keep natural timing, skip the splice
+        gap = np.zeros(int(self._VAD_JOIN_GAP * _MODEL_SAMPLE_RATE), dtype=np.float32)
+        parts: list = []
+        for c in chunks:
+            if parts:
+                parts.append(gap)
+            parts.append(audio[c["start"]:c["end"]])
+        return np.concatenate(parts)
 
     _CHUNK_SECONDS = 60.0     # split very long clips (encoder attention is O(n^2))
     _CHUNK_SEARCH = 15.0      # search window for the quietest split point
