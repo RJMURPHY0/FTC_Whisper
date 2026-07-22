@@ -663,7 +663,7 @@ class AppWindow:
         self._email_display.pack(side="left", fill="x", expand=True)
 
         self._ghost_btn(footer, "Quit", self._do_quit).pack(side="right", padx=(8, 0))
-        self._sign_btn = self._ghost_btn(footer, "Sign Out", self._do_sign_out)
+        self._sign_btn = self._ghost_btn(footer, "Sign Out", self._do_sign_action)
         self._sign_btn.pack(side="right")
 
         tk.Frame(parent, bg=C["divider"], height=1).pack(fill="x", before=footer)
@@ -702,6 +702,8 @@ class AppWindow:
             if self._root:
                 self._root.bind_all("<MouseWheel>", self._hist_scroll)
         elif name == "settings":
+            # The session can finish restoring after these widgets were built.
+            self._apply_auth_ui()
             if self._root and hasattr(self, "_settings_cv"):
                 self._root.bind_all("<MouseWheel>",
                                     lambda e: self._wheel_scroll(self._settings_cv, e))
@@ -752,8 +754,9 @@ class AppWindow:
     def _show_dashboard(self) -> None:
         self._dash_frame.pack(fill="both", expand=True)
         self._resize(WINDOW_W, DASH_H)
-        if hasattr(self, "_email_display"):
-            self._email_display.configure(text=self._auth.user_email or "")
+        # Session restore happens in a background thread, so labels populated
+        # while the dashboard was built may contain the pre-restore state.
+        self._apply_auth_ui()
         # Cards may be stale after a missed midnight (laptop asleep) or an
         # account switch — recompute whenever the dashboard is shown.
         self._refresh_impact()
@@ -1959,7 +1962,80 @@ class AppWindow:
         parent = inner
         cfg = self._config
 
-        # Placeholder shown when an update is available (populated by show_update_banner)
+        # ── Updates — deliberately first in Settings ─────────────────────────
+        ver_card = self._card(parent, margin=(0, 4))
+        ver_header = tk.Frame(ver_card, bg=C["surface"])
+        ver_header.pack(fill="x")
+        tk.Label(ver_header, text="Updates",
+                 fg=C["subtext"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(
+                     side="left", fill="x", expand=True)
+
+        self._update_check_btn = tk.Label(
+            ver_header, text="Check for Updates",
+            fg=C["accent"], bg=C["surface"],
+            font=("Segoe UI", 9), cursor="hand2", anchor="e",
+        )
+        self._update_check_btn.pack(side="right")
+
+        ver_lbl_text = f"Version {self._version}" if self._version else "FTC Whisper"
+        tk.Label(ver_card, text=ver_lbl_text,
+                 fg=C["text"], bg=C["surface"],
+                 font=("Segoe UI", 10), anchor="w").pack(fill="x", pady=(6, 0))
+
+        # Status gets its own full-width line so even failure messages remain
+        # completely readable at the app's narrow fixed width.
+        self._update_status_lbl = tk.Label(
+            ver_card, text="", fg=C["success"], bg=C["surface"],
+            font=("Segoe UI", 9), anchor="w", justify="left", wraplength=320,
+        )
+
+        def _show_update_status(text, colour):
+            self._update_status_lbl.configure(text=text, fg=colour)
+            self._update_status_lbl.pack(fill="x", pady=(5, 0))
+
+        def _restore_check_btn():
+            self._update_check_btn.configure(
+                text="Check for Updates", fg=C["accent"], cursor="hand2")
+            self._update_check_btn.bind("<Button-1>", _check_now)
+
+        def _check_now(_e=None):
+            self._update_check_btn.configure(text="Checking...", fg=C["subtext"], cursor="")
+            self._update_check_btn.unbind("<Button-1>")
+            self._update_status_lbl.pack_forget()
+
+            def _check_worker():
+                from updater import get_latest_release, is_newer
+                info = get_latest_release()
+
+                def _apply():
+                    if info is None:
+                        _show_update_status(
+                            "Check failed — no connection? You can try again.", C["subtext"])
+                        _restore_check_btn()
+                    elif is_newer(info["version"], self._version):
+                        _show_update_status(
+                            f"Update {info['version']} is available.", C["accent"])
+                        _restore_check_btn()
+                        self.show_update_banner(info["version"], info["download_url"])
+                    else:
+                        _show_update_status("You're up to date ✓", C["success"])
+                        _restore_check_btn()
+                self._ui_after(0, _apply)
+
+            threading.Thread(target=_check_worker, daemon=True,
+                             name="manual-update-check").start()
+
+        self._do_update_check = _check_now
+        self._update_check_btn.bind("<Button-1>", _check_now)
+        self._update_check_btn.bind("<Enter>",
+            lambda _e: self._update_check_btn.configure(fg=C["accent_hover"]))
+        self._update_check_btn.bind("<Leave>",
+            lambda _e: self._update_check_btn.configure(fg=C["accent"]))
+
+        self._ver_update_row = tk.Frame(ver_card, bg=C["surface"])
+
+        # Detailed available-update notice appears immediately below the card.
         self._update_banner_frame = tk.Frame(parent, bg=C["bg"])
         self._update_banner_frame.pack(fill="x")
 
@@ -2375,88 +2451,12 @@ class AppWindow:
                      "Send Enter after injecting (useful for chat / search boxes)", False)
         _toggle_card("live_inject", "Live Typing (Beta)",
                      "Type each word into the app as you speak instead of all at once. "
-                     "Self-corrects when you finish. Parakeet engine only.", False)
+                     "Self-corrects when you finish. Available for English dictation.", False)
         _toggle_card("warm_mic", "Instant Mic Start",
                      "Keep the microphone warm so recording starts instantly and the "
                      "first word is never clipped (mic indicator stays on; audio is "
                      "only kept for 1.5s and never stored)", True)
 
-
-        # ── Version / update card ─────────────────────────────────────────────
-        ver_card = self._card(parent, margin=(0, 4))
-        ver_row = tk.Frame(ver_card, bg=C["surface"])
-        ver_row.pack(fill="x")
-
-        ver_lbl_text = f"Version {self._version}" if self._version else "FTC Whisper"
-        tk.Label(ver_row, text=ver_lbl_text,
-                 fg=C["text"], bg=C["surface"],
-                 font=("Segoe UI", 10), anchor="w").pack(side="left")
-
-        # "Check for Updates" button — always visible and clickable
-        self._update_check_btn = tk.Label(
-            ver_row, text="Check for Updates",
-            fg=C["accent"], bg=C["surface"],
-            font=("Segoe UI", 9), cursor="hand2", anchor="e",
-        )
-        self._update_check_btn.pack(side="right")
-
-        # Status label — shows "Up to date ✓" or "Update available: X.X.X"
-        self._update_status_lbl = tk.Label(
-            ver_row, text="",
-            fg=C["success"], bg=C["surface"],
-            font=("Segoe UI", 9), anchor="e",
-        )
-        self._update_status_lbl.pack(side="right", padx=(0, 8))
-
-        def _restore_check_btn():
-            self._update_check_btn.configure(
-                text="Check for Updates", fg=C["accent"], cursor="hand2")
-            self._update_check_btn.bind("<Button-1>", _check_now)
-
-        def _check_now(_e=None):
-            self._update_check_btn.configure(text="Checking...", fg=C["subtext"], cursor="")
-            self._update_check_btn.unbind("<Button-1>")
-            self._update_status_lbl.configure(text="")
-
-            # Three honest outcomes: update / up-to-date / CHECK FAILED. The old
-            # flow only had a "found update" callback plus a blind 6s timer that
-            # showed "Up to date ✓" — so being offline reported "Up to date ✓"
-            # and a real pending update was silently missed.
-            def _check_worker():
-                from updater import get_latest_release, is_newer
-                info = get_latest_release()
-
-                def _apply():
-                    if info is None:
-                        self._update_status_lbl.configure(
-                            text="Check failed — no connection? Retrying works.",
-                            fg=C["subtext"])
-                        _restore_check_btn()
-                    elif is_newer(info["version"], self._version):
-                        self._update_status_lbl.configure(
-                            text=f"Update available: {info['version']}", fg=C["accent"])
-                        _restore_check_btn()
-                        # show_update_banner creates tk widgets — it must run on
-                        # the UI thread, not the updater worker thread.
-                        self.show_update_banner(info["version"], info["download_url"])
-                    else:
-                        self._update_status_lbl.configure(
-                            text="Up to date ✓", fg=C["success"])
-                        _restore_check_btn()
-                self._ui_after(0, _apply)
-
-            threading.Thread(target=_check_worker, daemon=True,
-                             name="manual-update-check").start()
-
-        self._do_update_check = _check_now
-        self._update_check_btn.bind("<Button-1>", _check_now)
-        self._update_check_btn.bind("<Enter>",
-            lambda _e: self._update_check_btn.configure(fg=C["accent_hover"]))
-        self._update_check_btn.bind("<Leave>",
-            lambda _e: self._update_check_btn.configure(fg=C["accent"]))
-
-        # Inline update-action row — shown by show_update_banner when update found
-        self._ver_update_row = tk.Frame(ver_card, bg=C["surface"])
 
         # ── Account card ──────────────────────────────────────────────────────
         acct_card = self._card(parent, margin=(0, 4))
@@ -2482,11 +2482,13 @@ class AppWindow:
             font=("Segoe UI", 9), cursor="hand2", anchor="e",
         )
         self._settings_auth_btn.pack(side="right")
-        self._settings_auth_btn.bind("<Button-1>", lambda _e: self._do_sign_out())
+        self._settings_auth_btn.bind("<Button-1>", lambda _e: self._do_sign_action())
         self._settings_auth_btn.bind("<Enter>",
-            lambda _e: self._settings_auth_btn.configure(fg="#ff8888"))
+            lambda _e: self._settings_auth_btn.configure(
+                fg="#ff8888" if self._auth.user_email else C["accent_hover"]))
         self._settings_auth_btn.bind("<Leave>",
-            lambda _e: self._settings_auth_btn.configure(fg=C["error"]))
+            lambda _e: self._settings_auth_btn.configure(
+                fg=C["error"] if self._auth.user_email else C["accent"]))
 
         # ── Save button ───────────────────────────────────────────────────────
         save_wrap = tk.Frame(parent, bg=C["bg"])
@@ -2638,26 +2640,27 @@ class AppWindow:
 
             card = self._card(self._update_banner_frame, margin=(0, 4))
 
-            top_row = tk.Frame(card, bg=C["surface"])
-            top_row.pack(fill="x")
-
-            banner_text = (f"Update {version} installing automatically…" if auto
-                           else f"Update available → {version}")
+            banner_text = (
+                f"Update {version} is ready and will install automatically "
+                "when FTC Whisper is idle."
+                if auto else f"Update {version} is ready to install."
+            )
             tk.Label(
-                top_row,
+                card,
                 text=banner_text,
                 fg=C["accent"], bg=C["surface"],
-                font=("Segoe UI", 10, "bold"), anchor="w",
-            ).pack(side="left")
+                font=("Segoe UI", 10, "bold"), anchor="w", justify="left",
+                wraplength=320,
+            ).pack(fill="x")
 
             banner_btn = RoundedButton(
-                top_row,
+                card,
                 text="Update Now",
                 fg=C["bg"], fill=C["accent"],
                 font=("Segoe UI", 9, "bold"),
                 padx=14, pady=5,
             )
-            banner_btn.pack(side="right")
+            banner_btn.pack(anchor="e", pady=(8, 0))
             banner_btn.bind("<Button-1>", _do_update)
             banner_btn.bind("<Enter>", lambda _e: banner_btn.configure(bg=C["accent_hover"]))
             banner_btn.bind("<Leave>", lambda _e: banner_btn.configure(bg=C["accent"]))
@@ -2737,13 +2740,13 @@ class AppWindow:
         self._fire_authenticated()
 
     def _do_sign_action(self) -> None:
-        if self._auth.user_email:
+        if self._auth.is_authenticated and self._auth.user_email:
             self._do_sign_out()
         else:
             self._do_sign_in()
 
     def _do_sign_out(self) -> None:
-        if not self._auth.user_email:
+        if not (self._auth.is_authenticated and self._auth.user_email):
             return
         import tkinter.messagebox as mb
         if not mb.askyesno("Sign Out", "Are you sure you want to sign out?",
@@ -2779,16 +2782,20 @@ class AppWindow:
         LoginWindow(self._auth, on_success=_on_success, on_cancel=_on_cancel).run(parent=self._root)
 
     def _apply_auth_ui(self) -> None:
-        """Update footer email display after login. Safe to call via after()."""
+        """Synchronise every account control with the live auth state."""
         email = self._auth.user_email or ""
+        signed_in = bool(self._auth.is_authenticated and email)
+        account_text = email if signed_in else "Not signed in"
+        action_text = "Sign Out" if signed_in else "Sign In"
         if hasattr(self, "_email_display"):
-            self._email_display.configure(text=email if email else "")
+            self._email_display.configure(text=account_text)
         if hasattr(self, "_settings_email_lbl"):
-            self._settings_email_lbl.configure(text=email)
+            self._settings_email_lbl.configure(text=account_text)
         if hasattr(self, "_sign_btn"):
-            self._sign_btn.configure(text="Sign Out")
+            self._sign_btn.configure(text=action_text)
         if hasattr(self, "_settings_auth_btn"):
-            self._settings_auth_btn.configure(text="Sign Out", fg=C["error"])
+            self._settings_auth_btn.configure(
+                text=action_text, fg=C["error"] if signed_in else C["accent"])
 
     def _do_sign_in(self) -> None:
         from login_window import LoginWindow

@@ -47,7 +47,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.25"
+APP_VERSION = "1.6.26"
 
 
 class WhisperFlowApp:
