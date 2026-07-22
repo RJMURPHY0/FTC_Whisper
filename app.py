@@ -43,6 +43,7 @@ from tray import TrayApp
 from popup import FloatingPopup
 from ai_refiner import AIRefiner
 from supabase_client import SupabaseLogger
+from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
@@ -105,6 +106,7 @@ class WhisperFlowApp:
             or AIRefiner.DEFAULT_OPENROUTER_MODEL,
         )
         self.db = SupabaseLogger(url=config.supabase_url, key=config.supabase_key)
+        self.stats = StatsStore(db=self.db)
 
         # ── UI components ──────────────────────────────────────────────
         self.app_window = AppWindow(
@@ -118,6 +120,7 @@ class WhisperFlowApp:
             on_refine_hotkey_change=self._on_refine_hotkey_change,
             on_settings_change=self._on_settings_change,
             db=self.db,
+            stats=self.stats,
             hotkey=config.hotkey,
             refine_hotkey=config.refine_hotkey,
             config=config,
@@ -289,6 +292,7 @@ class WhisperFlowApp:
         if auth._client:
             self.db.set_client(auth._client)
         self.db.set_user(auth.user_id)
+        self.stats.set_user(auth.user_id)
         self.tray.set_user_email(auth.user_email or "")
 
         print(f"[App] Authenticated as {auth.user_email}")
@@ -995,6 +999,16 @@ class WhisperFlowApp:
                 kb.send("enter")
 
             self.feedback.transcription_complete(transcribed_text)
+            # Impact stats: count this dictation for the signed-in account.
+            # total_samples is the monotonic capture length, so the duration
+            # is the user's real speaking time on either engine path.
+            try:
+                self.stats.record_dictation(
+                    len(transcribed_text.split()),
+                    total_samples / float(capture_rate or 1),
+                )
+            except Exception as e:
+                print(f"[Stats] record failed (non-fatal): {e}")
             _app = getattr(self, "_recording_app", None) or {}
             threading.Thread(
                 target=self.db.log_transcription,
@@ -1662,6 +1676,7 @@ class WhisperFlowApp:
         if auth._client:
             self.db.set_client(auth._client)
         self.db.set_user(auth.user_id)
+        self.stats.set_user(auth.user_id)
         self.tray.set_user_email(auth.user_email or "")
         print(f"[App] Signed in as {auth.user_email}")
         if self.db.is_enabled:
@@ -1674,6 +1689,7 @@ class WhisperFlowApp:
         self._auth.sign_out()
         self._auth.sign_in_offline()   # back to offline state immediately
         self.db.set_user(None)
+        self.stats.set_user(None)
         self.tray.set_user_email("")
         if self.app_window._root:
             self.app_window._root.after(0, self.app_window._apply_auth_ui)

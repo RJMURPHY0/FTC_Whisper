@@ -9,7 +9,7 @@ import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Optional
 import ctypes
 
@@ -41,7 +41,7 @@ C = {
 }
 
 WINDOW_W = 420
-DASH_H   = 560
+DASH_H   = 600
 
 
 def show_toast(root: tk.Misc, message: str, duration_ms: int = 5000) -> None:
@@ -337,6 +337,7 @@ class AppWindow:
         on_settings_change: Callable = None,
         on_sign_in: Callable = None,
         db=None,
+        stats=None,
         hotkey: str = "alt+v",
         refine_hotkey: str = "alt+r",
         config=None,
@@ -356,6 +357,7 @@ class AppWindow:
         self._on_settings_change      = on_settings_change
         self._on_sign_in              = on_sign_in
         self._db                      = db
+        self._stats                   = stats
         self._config                  = config
         self._get_input_devices       = get_input_devices
         self._recorder                = recorder
@@ -408,6 +410,15 @@ class AppWindow:
 
             self._login_frame = tk.Frame(self._root, bg=C["bg"])
             self._build_embedded_login()
+
+            # Impact cards follow the stats store: refresh after every
+            # dictation/sync (marshalled to the tk thread) and at midnight.
+            if self._stats is not None and not getattr(self, "_stats_listener_added", False):
+                self._stats.add_listener(
+                    lambda: self._ui_after(0, self._refresh_impact))
+                self._stats_listener_added = True
+            self._refresh_impact()
+            self._schedule_midnight_refresh()
 
             if self._auth.is_authenticated:
                 self._switch_to_dashboard()
@@ -739,6 +750,9 @@ class AppWindow:
         self._resize(WINDOW_W, DASH_H)
         if hasattr(self, "_email_display"):
             self._email_display.configure(text=self._auth.user_email or "")
+        # Cards may be stale after a missed midnight (laptop asleep) or an
+        # account switch — recompute whenever the dashboard is shown.
+        self._refresh_impact()
 
     # ── Home tab ──────────────────────────────────────────────────────────────
 
@@ -797,20 +811,186 @@ class AppWindow:
             font=("Segoe UI", 10),
         ).pack(side="left")
 
-        # Instructions card
-        ic = self._card(parent, margin=(0, 0))
-        _ic_mode = getattr(self._config, "mode", "hold") if self._config else "hold"
-        _ic_text = (
-            "Hold the hotkey and speak.\nRelease to transcribe into your cursor."
-            if _ic_mode != "toggle" else
-            "Press the hotkey to start recording.\nPress again to stop and transcribe."
+        # Your impact — live per-account stats (replaces the old instructions
+        # card so Home still fits on one page without scrolling)
+        self._build_impact_section(parent)
+
+    # ── Your impact section ───────────────────────────────────────────────────
+
+    def _build_impact_section(self, parent: tk.Frame) -> None:
+        tk.Label(
+            parent, text="Your impact",
+            fg=C["text"], bg=C["bg"],
+            font=("Segoe UI", 12, "bold"), anchor="w",
+        ).pack(fill="x", padx=20, pady=(10, 8))
+
+        row = tk.Frame(parent, bg=C["bg"])
+        row.pack(fill="x", padx=20)
+        for i in range(3):
+            row.grid_columnconfigure(i, weight=1, uniform="impact")
+
+        self._impact_font_value = tkfont.Font(family="Segoe UI", size=16, weight="bold")
+        self._impact_font_unit  = tkfont.Font(family="Segoe UI", size=9)
+
+        self._impact_cards = {}
+        specs = [
+            ("time",   "TIME SAVED",      self._draw_icon_clock),
+            ("speed",  "DICTATION SPEED", self._draw_icon_bolt),
+            ("streak", "DAY STREAK",      self._draw_icon_flame),
+        ]
+        for i, (key, label, icon_fn) in enumerate(specs):
+            cv = tk.Canvas(row, bg=C["bg"], highlightthickness=0, bd=0,
+                           height=116, width=120)
+            cv.grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else 8, 0))
+            self._impact_cards[key] = {
+                "cv": cv, "icon": icon_fn, "label": label,
+                "value": "", "unit": "", "sub": "",
+            }
+            cv.bind("<Configure>", lambda _e, k=key: self._layout_impact_card(k))
+
+        # The speed card is the product constant, not a measurement.
+        self._set_impact_card("speed", "160", "wpm", "4× faster than typing")
+
+        # Today bar
+        bar = self._card(parent, inner_pad=(14, 10), margin=(8, 0))
+        brow = tk.Frame(bar, bg=C["surface"])
+        brow.pack(fill="x")
+        icv = tk.Canvas(brow, bg=C["surface"], highlightthickness=0, bd=0,
+                        width=18, height=18)
+        icv.pack(side="left")
+        _rr(icv, 3, 1, 15, 17, 3, fill=C["surface"], outline=C["subtext"], width=1.4)
+        icv.create_line(6, 7, 12, 7, fill=C["subtext"], width=1.4)
+        icv.create_line(6, 11, 12, 11, fill=C["subtext"], width=1.4)
+        tk.Label(
+            brow, text="Today", fg=C["text"], bg=C["surface"],
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side="left", padx=(9, 0))
+        self._impact_today_lbl = tk.Label(
+            brow, text="·  0 words dictated",
+            fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 10),
         )
-        self._home_instructions_lbl = tk.Label(
-            ic, text=_ic_text,
-            fg=C["subtext"], bg=C["surface"],
-            font=("Segoe UI", 10), justify="left", anchor="w",
-        )
-        self._home_instructions_lbl.pack(fill="x")
+        self._impact_today_lbl.pack(side="left", padx=(6, 0))
+
+        self._refresh_impact()
+
+    def _set_impact_card(self, key: str, value: str, unit: str, sub: str) -> None:
+        card = self._impact_cards.get(key)
+        if not card:
+            return
+        card["value"], card["unit"], card["sub"] = value, unit, sub
+        self._layout_impact_card(key)
+
+    def _layout_impact_card(self, key: str) -> None:
+        card = self._impact_cards.get(key)
+        if not card:
+            return
+        cv = card["cv"]
+        w = cv.winfo_width()
+        h = 116
+        if w < 40:
+            return
+        cv.delete("all")
+        _rr(cv, 0, 0, w - 1, h - 1, 10, fill=C["surface"], outline=C["border"])
+        cx = w // 2
+        card["icon"](cv, cx, 28)
+        cv.create_text(cx, 52, text=card["label"], fill=C["subtext"],
+                       font=("Segoe UI", 7, "bold"))
+        # Value + unit centred as a pair, bottoms aligned on one baseline
+        vw = self._impact_font_value.measure(card["value"])
+        uw = self._impact_font_unit.measure(card["unit"]) if card["unit"] else 0
+        gap = 4 if card["unit"] else 0
+        x0 = cx - (vw + gap + uw) // 2
+        cv.create_text(x0, 79, text=card["value"], fill=C["text"],
+                       font=self._impact_font_value, anchor="sw")
+        if card["unit"]:
+            cv.create_text(x0 + vw + gap, 79, text=card["unit"],
+                           fill=C["subtext"], font=self._impact_font_unit,
+                           anchor="sw")
+        cv.create_text(cx, 98, text=card["sub"], fill=C["subtext"],
+                       font=("Segoe UI", 8))
+
+    @staticmethod
+    def _draw_icon_clock(cv, cx, cy):
+        r = 10
+        cv.create_oval(cx - r, cy - r, cx + r, cy + r,
+                       outline=C["accent"], width=2)
+        cv.create_line(cx, cy, cx, cy - 5.5, fill=C["accent"], width=2,
+                       capstyle="round")
+        cv.create_line(cx, cy, cx + 4.5, cy + 2, fill=C["accent"], width=2,
+                       capstyle="round")
+
+    @staticmethod
+    def _draw_icon_bolt(cv, cx, cy):
+        pts = [(2, -11), (-6.5, 1.5), (-1, 1.5), (-2, 11), (6.5, -1.5), (1, -1.5)]
+        cv.create_polygon([(cx + dx, cy + dy) for dx, dy in pts],
+                          fill=C["success"], outline="")
+
+    @staticmethod
+    def _draw_icon_flame(cv, cx, cy):
+        pts = [(0, -10.5), (-4.5, -4), (-6.5, 2), (-5.5, 7), (-2, 10.5),
+               (3, 10.5), (6.5, 6.5), (6.5, 1.5), (4.5, -3.5), (2.5, 0.5),
+               (0, -10.5)]
+        cv.create_line([(cx + dx, cy + dy) for dx, dy in pts],
+                       fill=C["accent"], width=2, smooth=1,
+                       capstyle="round", joinstyle="round")
+
+    def _refresh_impact(self) -> None:
+        """Recompute the impact cards from the stats store. Main thread only —
+        background callers must come through _ui_after."""
+        if not getattr(self, "_stats", None) or not hasattr(self, "_impact_cards"):
+            return
+        try:
+            snap = self._stats.snapshot()
+        except Exception as e:
+            print(f"[AppWindow] Impact refresh failed: {e}")
+            return
+
+        m = snap["saved_minutes"]
+        if m < 1:
+            v, u, s = "< 1", "min", "A tiny moment"
+        elif m < 10:
+            v, u, s = str(int(m)), "min", "Every word counts"
+        elif m < 60:
+            v, u, s = str(int(m)), "min", "Adding up nicely"
+        elif m < 600:
+            v, u, s = f"{m / 60:.1f}", "hrs", "Real time back"
+        else:
+            v, u, s = str(int(round(m / 60))), "hrs", "Real time back"
+        self._set_impact_card("time", v, u, s)
+
+        n = snap["streak_days"]
+        if n == 0:
+            sub = "Dictate today to begin"
+        elif snap["streak_active_today"]:
+            sub = "Keep it going"
+        else:
+            sub = "Dictate to keep it"
+        self._set_impact_card("streak", str(n), "day" if n == 1 else "days", sub)
+
+        tw = snap["today_words"]
+        if hasattr(self, "_impact_today_lbl"):
+            self._impact_today_lbl.configure(
+                text=f"·  {tw:,} word{'' if tw == 1 else 's'} dictated")
+
+    def _schedule_midnight_refresh(self) -> None:
+        """Roll the cards over at local midnight so Today resets and the
+        streak flips without a restart."""
+        root = self._root
+        if not root:
+            return
+        now = datetime.now()
+        nxt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=5,
+                                                microsecond=0)
+        ms = max(1000, int((nxt - now).total_seconds() * 1000))
+
+        def _roll():
+            self._refresh_impact()
+            self._schedule_midnight_refresh()
+
+        try:
+            root.after(ms, _roll)
+        except Exception:
+            pass
 
     # ── Hotkey tab ────────────────────────────────────────────────────────────
 
@@ -903,14 +1083,6 @@ class AppWindow:
             if hasattr(self, "_home_mode_hint_lbl"):
                 self._home_mode_hint_lbl.configure(
                     text=" press to start/stop" if new_val else " hold to dictate"
-                )
-            if hasattr(self, "_home_instructions_lbl"):
-                self._home_instructions_lbl.configure(
-                    text=(
-                        "Press the hotkey to start recording.\nPress again to stop and transcribe."
-                        if new_val else
-                        "Hold the hotkey and speak.\nRelease to transcribe into your cursor."
-                    )
                 )
             if self._on_settings_change:
                 self._on_settings_change("mode", mode)
