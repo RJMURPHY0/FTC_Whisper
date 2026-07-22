@@ -9,12 +9,35 @@ import os
 import threading
 import datetime
 from queue import Queue, Full
-from typing import Optional
+from typing import Callable, Optional
 
 # Table name in Supabase
 _TABLE = "transcriptions"
 
+_HISTORY_SELECT_SHAPES = (
+    "id, transcribed_text, refined_text, created_at, app_name, app_exe",
+    "transcribed_text, refined_text, created_at, app_name, app_exe",
+    "transcribed_text, refined_text, created_at",
+)
+_CURRENT_USER = object()
+
 _local_history_lock = threading.Lock()
+
+
+def _is_missing_column_error(exc, *column_names: str) -> bool:
+    """True only for a confirmed Postgres/PostgREST missing-column response."""
+    code = str(getattr(exc, "code", "") or "")
+    parts = [str(exc), str(getattr(exc, "message", "") or "")]
+    text = " ".join(parts).casefold()
+    missing = (
+        code in {"42703", "PGRST204"}
+        or ("column" in text and (
+            "does not exist" in text or "schema cache" in text
+        ))
+    )
+    if not missing:
+        return False
+    return not column_names or any(name.casefold() in text for name in column_names)
 
 
 def _local_history_path() -> str:
@@ -44,6 +67,17 @@ class SupabaseLogger:
         self._write_queue: Queue[dict] = Queue(maxsize=200)
         self._worker_started = False
         self._worker_lock = threading.Lock()
+        # History is local-first: callers can paint this cache immediately while
+        # a remote refresh runs. Every cache bucket is account-scoped so a slow
+        # response from one sign-in can never leak into the next account.
+        self._history_lock = threading.RLock()
+        self._history_cache: dict[Optional[str], list] = {}
+        self._history_listeners: set[Callable[[list], None]] = set()
+        self._history_refreshing: set[str] = set()
+        # Once a select shape succeeds, reuse it for the life of this client.
+        # Legacy schemas otherwise cost two guaranteed 400 responses per click.
+        self._history_select_cols: Optional[str] = None
+        self._app_columns_supported: Optional[bool] = None
 
     @property
     def is_enabled(self) -> bool:
@@ -52,10 +86,21 @@ class SupabaseLogger:
     def set_user(self, user_id: Optional[str]) -> None:
         """Set the authenticated user ID to include in all log entries."""
         self._user_id = user_id
+        items = self.get_cached_history(200)
+        with self._history_lock:
+            listeners = tuple(self._history_listeners)
+        for callback in listeners:
+            try:
+                callback([dict(r) for r in items])
+            except Exception as exc:
+                print(f"[History] Listener failed: {exc}")
 
     def set_client(self, client) -> None:
         """Share an already-authenticated Supabase client (bypasses RLS)."""
         self._client = client
+        with self._history_lock:
+            self._history_select_cols = None
+            self._app_columns_supported = None
 
     def _get_client(self):
         if self._client is None:
@@ -71,22 +116,31 @@ class SupabaseLogger:
     def log_transcription(self, text: str, app_name: str = "",
                           app_exe: str = "") -> None:
         """Save a new transcription record (with the app it was injected into)."""
-        self._append_local(text, app_name=app_name, app_exe=app_exe)
+        owner = self._history_owner()
+        # One timestamp is the durable local/remote identity. Previously the two
+        # calls to now() differed, forcing fuzzy timestamp matching forever.
+        created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        record = self._append_local(
+            text, app_name=app_name, app_exe=app_exe,
+            created_at=created_at, user_id=owner,
+        )
+        self._remember_local_record(owner, record)
         if not self._enabled:
             return
         payload = {
             "transcribed_text": text,
-            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "created_at": created_at,
         }
         if app_name:
             payload["app_name"] = app_name
         if app_exe:
             payload["app_exe"] = app_exe
-        if self._user_id and self._user_id != "local":
-            payload["user_id"] = self._user_id
+        if owner:
+            payload["user_id"] = owner
         self._run(payload)
 
-    def log_refinement(self, original: str, refined: str, mode: str) -> None:
+    def log_refinement(self, original: str, refined: str, mode: str,
+                       app_name: str = "", app_exe: str = "") -> None:
         """Insert a refinement record."""
         if not self._enabled:
             return
@@ -96,8 +150,13 @@ class SupabaseLogger:
             "refinement_mode": mode,
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }
-        if self._user_id and self._user_id != "local":
-            payload["user_id"] = self._user_id
+        if app_name:
+            payload["app_name"] = app_name
+        if app_exe:
+            payload["app_exe"] = app_exe
+        owner = self._history_owner()
+        if owner:
+            payload["user_id"] = owner
         self._run(payload)
 
     def log_update_event(self, stage: str, from_version: str = "",
@@ -159,108 +218,266 @@ class SupabaseLogger:
         t.join(timeout=8.0)
         return result[0]
 
+    def set_app_setting(self, key: str, value: str) -> None:
+        """Fire-and-forget upsert into app_settings. RLS only grants writes to
+        the super-admin account, so this is a silent no-op for everyone else."""
+        if not self._enabled:
+            return
+
+        def _upsert():
+            try:
+                (self._get_client()
+                 .table("app_settings")
+                 .upsert({"key": key, "value": value})
+                 .execute())
+                print(f"[Supabase] app_setting saved: {key}")
+            except Exception as e:
+                print(f"[Supabase] set_app_setting({key!r}) failed (non-fatal): {e}")
+
+        threading.Thread(target=_upsert, daemon=True,
+                         name="app-setting-save").start()
+
+    # ------------------------------------------------------------------
+    # Local-first history cache / refresh listeners
+    # ------------------------------------------------------------------
+
+    def _history_owner(self, user_id=_CURRENT_USER) -> Optional[str]:
+        value = self._user_id if user_id is _CURRENT_USER else user_id
+        return value if value and value != "local" else None
+
+    def add_history_listener(self, callback: Callable[[list], None], *,
+                             replay: bool = False, limit: int = 100) -> None:
+        """Subscribe to refreshed history snapshots.
+
+        Callbacks run on the worker that changed the cache; tkinter consumers
+        must marshal the snapshot through ``root.after``. ``replay`` emits the
+        current local/in-memory snapshot immediately.
+        """
+        with self._history_lock:
+            self._history_listeners.add(callback)
+        if replay:
+            callback(self.get_cached_history(limit))
+
+    def remove_history_listener(self, callback: Callable[[list], None]) -> None:
+        with self._history_lock:
+            self._history_listeners.discard(callback)
+
+    def get_cached_history(self, limit: int = 30) -> list:
+        """Return an account-scoped local/in-memory snapshot without networking."""
+        return self._cached_history_for_owner(self._history_owner(), limit)
+
+    def _cached_history_for_owner(self, owner: Optional[str], limit: int) -> list:
+        """Read disk once per account, then serve the maintained memory cache."""
+        with self._history_lock:
+            if owner in self._history_cache:
+                return [dict(r) for r in self._history_cache[owner][:limit]]
+        local = self._local_snapshot(owner, max(200, limit))
+        self._store_history(owner, local, notify=False)
+        return [dict(r) for r in local[:limit]]
+
     def fetch_history(self, limit: int = 30) -> list:
-        """Fetch recent transcriptions (synchronous, 10 s timeout).
-        Falls back to the local history file if Supabase is unavailable or empty."""
-        # Opportunistic upkeep: remote-delete tombstones past their 30-day grace.
+        """Return local/cached history immediately and refresh remote in flight.
+
+        A listener receives the merged remote result. This keeps tab navigation
+        independent of network latency while preserving remote-only records.
+        """
+        items = self.get_cached_history(limit)
         threading.Thread(target=self._purge_expired_tombstones,
                          daemon=True, name="tombstone-purge").start()
+        self.refresh_history_async(limit=max(200, limit))
+        return items
 
-        # Remote history is strictly per-account. Without an authenticated
-        # user an unfiltered query would return EVERY user's transcriptions —
-        # so signed-out sessions read only the local file.
-        if (not self._enabled or not self._user_id
-                or self._user_id == "local"):
-            return self._filter_tombstoned(self._fetch_local(limit))
+    def refresh_history_async(self, limit: int = 200) -> None:
+        owner = self._history_owner()
+        if not self._enabled or owner is None:
+            return
+        with self._history_lock:
+            if owner in self._history_refreshing:
+                return
+            self._history_refreshing.add(owner)
 
-        result: list = [None]
-        error: list = [None]
-
-        def _fetch() -> None:
-            # Try with id + app columns first; fall back for remote tables
-            # that don't have the newer columns yet.
-            for cols in (
-                "id, transcribed_text, refined_text, created_at, app_name, app_exe",
-                "transcribed_text, refined_text, created_at, app_name, app_exe",
-                "transcribed_text, refined_text, created_at",
-            ):
-                try:
-                    q = (
-                        self._get_client()
-                        .table(_TABLE)
-                        .select(cols)
-                        .eq("user_id", self._user_id)
-                        .order("created_at", desc=True)
-                        .limit(limit)
-                    )
-                    result[0] = q.execute().data or []
-                    error[0] = None
-                    return
-                except Exception as e:
-                    error[0] = e
-
-        t = threading.Thread(target=_fetch, daemon=True)
-        t.start()
-        t.join(timeout=10.0)
-
-        if t.is_alive():
-            print("[Supabase] Fetch history timed out — using local history")
-            return self._filter_tombstoned(self._fetch_local(limit))
-        if error[0]:
-            print(f"[Supabase] Fetch history failed: {error[0]} — using local history")
-            return self._filter_tombstoned(self._fetch_local(limit))
-        if not result[0]:
-            return self._filter_tombstoned(self._fetch_local(limit))
-        return self._filter_tombstoned(self._enrich_from_local(result[0]))
-
-    def _enrich_from_local(self, remote: list) -> list:
-        """Fill in app_name/app_exe from the local file for remote rows that
-        lack them (remote table without the columns, or rows logged before
-        app capture existed). Matched by text + close timestamp."""
-        if all(r.get("app_name") for r in remote):
-            return remote
-        local = self._fetch_local(200)
-        if not local:
-            return remote
-
-        def _ts(rec):
+        def _worker() -> None:
             try:
-                return datetime.datetime.fromisoformat(
-                    (rec.get("created_at") or "").replace("Z", "+00:00"))
-            except Exception:
-                return None
+                self.refresh_history(limit=limit, user_id=owner)
+            finally:
+                with self._history_lock:
+                    self._history_refreshing.discard(owner)
 
-        for r in remote:
-            if r.get("app_name"):
+        threading.Thread(target=_worker, daemon=True,
+                         name="history-refresh").start()
+
+    def refresh_history(self, limit: int = 200, *, user_id=_CURRENT_USER) -> list:
+        """Synchronously refresh one account; normally use ``fetch_history``."""
+        owner = self._history_owner(user_id)
+        if not self._enabled or owner is None:
+            return self._cached_history_for_owner(owner, limit)
+
+        remote, error = self._fetch_remote_history(owner, limit)
+        if error is not None:
+            print(f"[Supabase] Fetch history failed: {error} — keeping local cache")
+            local = self._local_snapshot(owner, max(200, limit))
+            with self._history_lock:
+                cached = [dict(r) for r in self._history_cache.get(owner, [])]
+            merged = self._merge_history(cached, local, max(200, limit))
+            return [dict(r) for r in merged[:limit]]
+
+        local = self._fetch_local(max(200, limit), user_id=owner)
+        merged = self._filter_tombstoned(
+            self._merge_history(remote, local, max(200, limit)), owner)
+        self._store_history(owner, merged, notify=True)
+        return [dict(r) for r in merged[:limit]]
+
+    def _fetch_remote_history(self, owner: str, limit: int) -> tuple[list, object]:
+        with self._history_lock:
+            cached_cols = self._history_select_cols
+        shapes = (cached_cols,) if cached_cols else _HISTORY_SELECT_SHAPES
+        error = None
+        for cols in shapes:
+            try:
+                q = (
+                    self._get_client()
+                    .table(_TABLE)
+                    .select(cols)
+                    .eq("user_id", owner)
+                    .order("created_at", desc=True)
+                    .limit(limit)
+                )
+                rows = q.execute().data or []
+                with self._history_lock:
+                    self._history_select_cols = cols
+                    self._app_columns_supported = (
+                        "app_name" in cols and "app_exe" in cols)
+                return [dict(r) for r in rows], None
+            except Exception as exc:
+                error = exc
+                # A connection/RLS/server failure is not schema evidence. Stop
+                # instead of issuing more guaranteed-failing select shapes or
+                # downgrading metadata capability for the rest of the process.
+                if not _is_missing_column_error(exc):
+                    return [], exc
+        return [], error
+
+    @staticmethod
+    def _parse_history_time(record: dict):
+        try:
+            dt = datetime.datetime.fromisoformat(
+                (record.get("created_at") or "").replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            return dt
+        except Exception:
+            return None
+
+    @classmethod
+    def _same_history_event(cls, left: dict, right: dict) -> bool:
+        """Conservative legacy identity: exact text and exact/near timestamp.
+
+        New rows share the exact same timestamp. The ten-second tolerance exists
+        only for already-shipped builds that called ``now()`` twice; no semantic
+        or nearest-neighbour guessing is performed.
+        """
+        if left.get("transcribed_text") != right.get("transcribed_text"):
+            return False
+        lraw = left.get("created_at") or ""
+        rraw = right.get("created_at") or ""
+        if lraw and lraw == rraw:
+            return True
+        lt, rt = cls._parse_history_time(left), cls._parse_history_time(right)
+        return bool(lt and rt and abs((lt - rt).total_seconds()) <= 10)
+
+    def _enrich_from_local(self, remote: list, local: Optional[list] = None) -> list:
+        """Fill each missing app field from an exact local event match only."""
+        rows = [dict(r) for r in remote]
+        if all(r.get("app_name") and r.get("app_exe") for r in rows):
+            return rows
+        if local is None:
+            local = self._fetch_local(200)
+        for row in rows:
+            need_name = not row.get("app_name")
+            need_exe = not row.get("app_exe")
+            if not need_name and not need_exe:
                 continue
-            rt = _ts(r)
-            for l in local:
-                if not l.get("app_name"):
+            for candidate in local:
+                if not self._same_history_event(row, candidate):
                     continue
-                if l.get("transcribed_text") != r.get("transcribed_text"):
-                    continue
-                lt = _ts(l)
-                if rt and lt and abs((rt - lt).total_seconds()) > 10:
-                    continue
-                r["app_name"] = l.get("app_name", "")
-                r["app_exe"] = l.get("app_exe", "")
-                break
-        return remote
+                if need_name and candidate.get("app_name"):
+                    row["app_name"] = candidate["app_name"]
+                    need_name = False
+                if need_exe and candidate.get("app_exe"):
+                    row["app_exe"] = candidate["app_exe"]
+                    need_exe = False
+                if not need_name and not need_exe:
+                    break
+        return rows
+
+    def _merge_history(self, remote: list, local: list, limit: int) -> list:
+        rows = self._enrich_from_local(remote, local)
+        used_local: set[int] = set()
+        for row in rows:
+            for index, candidate in enumerate(local):
+                if index not in used_local and self._same_history_event(row, candidate):
+                    used_local.add(index)
+                    break
+        rows.extend(dict(row) for index, row in enumerate(local)
+                    if index not in used_local)
+
+        def _sort_key(row):
+            dt = self._parse_history_time(row)
+            return dt.timestamp() if dt else float("-inf")
+
+        rows.sort(key=_sort_key, reverse=True)
+        return rows[:limit]
+
+    def _local_snapshot(self, owner: Optional[str], limit: int) -> list:
+        return self._filter_tombstoned(
+            self._fetch_local(limit, user_id=owner), owner)
+
+    def _store_history(self, owner: Optional[str], items: list, *,
+                       notify: bool) -> None:
+        snapshot = [dict(r) for r in items]
+        with self._history_lock:
+            changed = self._history_cache.get(owner) != snapshot
+            self._history_cache[owner] = snapshot
+            listeners = tuple(self._history_listeners) if changed and notify else ()
+        # Never emit an old account's slow response into the current account UI.
+        if owner != self._history_owner():
+            return
+        for callback in listeners:
+            try:
+                callback([dict(r) for r in snapshot])
+            except Exception as exc:
+                print(f"[History] Listener failed: {exc}")
+
+    def _publish_history(self, owner: Optional[str], items: list) -> None:
+        self._store_history(
+            owner, self._filter_tombstoned(items, owner), notify=True)
+
+    def _remember_local_record(self, owner: Optional[str], record: dict) -> None:
+        with self._history_lock:
+            initialized = owner in self._history_cache
+            cached = [dict(r) for r in self._history_cache.get(owner, [])]
+        # Once primed, the cache is maintained by log/delete/clear operations;
+        # adding one record should not re-read and re-parse the whole JSON file.
+        local = [record] if initialized else self._local_snapshot(owner, 200)
+        merged = self._merge_history(cached, local, 200)
+        self._publish_history(owner, merged)
 
     def clear_history(self) -> bool:
         """Soft-clear: history disappears from the app immediately; the actual
         Supabase rows are deleted after a 30-day grace period (tombstone),
         so an accidental clear is recoverable server-side."""
-        local_ok = self._clear_local()
+        owner = self._history_owner()
+        local_ok = self._clear_local(owner)
         now = datetime.datetime.now(datetime.timezone.utc)
         stone = {
             "all_before": now.isoformat(),
             "purge_after": (now + datetime.timedelta(
                 days=_TOMBSTONE_GRACE_DAYS)).isoformat(),
         }
-        if self._user_id and self._user_id != "local":
-            stone["user_id"] = self._user_id
+        if owner:
+            stone["user_id"] = owner
         self._add_tombstone(stone)
+        self._publish_history(owner, [])
         return local_ok or True
 
     def delete_transcription(self, item: dict) -> bool:
@@ -276,8 +493,9 @@ class SupabaseLogger:
             "purge_after": (now + datetime.timedelta(
                 days=_TOMBSTONE_GRACE_DAYS)).isoformat(),
         }
-        if self._user_id and self._user_id != "local":
-            stone["user_id"] = self._user_id
+        owner = self._history_owner()
+        if owner:
+            stone["user_id"] = owner
         self._add_tombstone(stone)
         # Remove from the local history file too.
         try:
@@ -286,13 +504,27 @@ class SupabaseLogger:
                 if os.path.exists(path):
                     with open(path, "r", encoding="utf-8") as f:
                         entries = json.load(f)
-                    entries = [e for e in entries
-                               if not (e.get("transcribed_text") == text
-                                       and e.get("created_at") == created)]
+                    entries = [
+                        e for e in entries
+                        if not (
+                            ((e.get("user_id") == owner) if owner
+                             else not e.get("user_id"))
+                            and e.get("transcribed_text") == text
+                            and e.get("created_at") == created
+                        )
+                    ]
                     with open(path, "w", encoding="utf-8") as f:
                         json.dump(entries, f, ensure_ascii=False)
         except Exception as e:
             print(f"[LocalHistory] Delete failed: {e}")
+        with self._history_lock:
+            cached = [dict(row) for row in self._history_cache.get(owner, [])]
+        cached = [row for row in cached
+                  if not ((item.get("id") is not None
+                           and row.get("id") == item.get("id"))
+                          or (row.get("transcribed_text") == text
+                              and row.get("created_at") == created))]
+        self._publish_history(owner, cached)
         return True
 
     # ── Tombstones (deferred remote deletes) ──────────────────────────
@@ -320,14 +552,14 @@ class SupabaseLogger:
             stones.append(stone)
             self._save_tombstones(stones)
 
-    def _filter_tombstoned(self, items: list) -> list:
+    def _filter_tombstoned(self, items: list, user_id=_CURRENT_USER) -> list:
         """Hide rows the user deleted (individually or via Clear) from any
         fetched result — remote rows survive up to 30 days after deletion."""
         stones = self._load_tombstones()
         # A tombstone only hides rows for the account that created it — a
         # Clear by one person must not blank another person's history on a
         # shared machine.
-        uid = self._user_id if (self._user_id and self._user_id != "local") else None
+        uid = self._history_owner(user_id)
         stones = [s for s in stones if s.get("user_id") == uid]
         if not stones or not items:
             return items
@@ -412,20 +644,41 @@ class SupabaseLogger:
         finally:
             self._purge_running = False
 
-    def _clear_local(self) -> bool:
+    def _clear_local(self, owner: Optional[str]) -> bool:
         try:
             path = _local_history_path()
             with _local_history_lock:
                 if os.path.exists(path):
+                    try:
+                        with open(path, "r", encoding="utf-8") as f:
+                            entries = json.load(f) or []
+                    except Exception:
+                        entries = []
+                    if owner:
+                        entries = [e for e in entries
+                                   if e.get("user_id") != owner]
+                    else:
+                        entries = [e for e in entries if e.get("user_id")]
                     with open(path, "w", encoding="utf-8") as f:
-                        json.dump([], f)
+                        json.dump(entries, f, ensure_ascii=False)
             return True
         except Exception as e:
             print(f"[LocalHistory] Clear failed: {e}")
             return False
 
     def _append_local(self, text: str, app_name: str = "",
-                      app_exe: str = "") -> None:
+                      app_exe: str = "", created_at: str = "",
+                      user_id=_CURRENT_USER) -> dict:
+        owner = self._history_owner(user_id)
+        record = {
+            "transcribed_text": text,
+            "created_at": created_at or datetime.datetime.now(
+                datetime.timezone.utc).isoformat(),
+            "app_name": app_name,
+            "app_exe": app_exe,
+        }
+        if owner:
+            record["user_id"] = owner
         try:
             path = _local_history_path()
             with _local_history_lock:
@@ -436,24 +689,15 @@ class SupabaseLogger:
                             entries = json.load(f)
                     except Exception:
                         entries = []
-                record = {
-                    "transcribed_text": text,
-                    "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    "app_name": app_name,
-                    "app_exe": app_exe,
-                }
-                # Tag with the signed-in user so history stays per-person even
-                # when several accounts share this Windows machine.
-                if self._user_id and self._user_id != "local":
-                    record["user_id"] = self._user_id
                 entries.insert(0, record)
                 entries = entries[:200]
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(entries, f, ensure_ascii=False)
         except Exception as e:
             print(f"[LocalHistory] Write failed: {e}")
+        return record
 
-    def _fetch_local(self, limit: int = 30) -> list:
+    def _fetch_local(self, limit: int = 30, user_id=_CURRENT_USER) -> list:
         try:
             path = _local_history_path()
             if not os.path.exists(path):
@@ -461,12 +705,13 @@ class SupabaseLogger:
             with _local_history_lock:
                 with open(path, "r", encoding="utf-8") as f:
                     entries = json.load(f)
-            # Per-person: a signed-in user sees their own entries (plus legacy
-            # untagged ones written before tagging existed); signed-out sees
-            # only untagged local entries.
-            if self._user_id and self._user_id != "local":
-                entries = [e for e in entries
-                           if e.get("user_id") in (self._user_id, None, "")]
+            # Strict account separation: authenticated users see only their own
+            # tagged rows. Untagged legacy rows remain available only offline;
+            # assigning them to an arbitrary account would be a privacy leak on
+            # a shared Windows profile.
+            owner = self._history_owner(user_id)
+            if owner:
+                entries = [e for e in entries if e.get("user_id") == owner]
             else:
                 entries = [e for e in entries if not e.get("user_id")]
             return entries[:limit]
@@ -512,17 +757,32 @@ class SupabaseLogger:
                 self._write_queue.task_done()
 
     def _insert(self, payload: dict) -> None:
+        has_app_fields = "app_name" in payload or "app_exe" in payload
+        with self._history_lock:
+            app_columns_supported = self._app_columns_supported
+        if has_app_fields and app_columns_supported is False:
+            payload = {k: v for k, v in payload.items()
+                       if k not in ("app_name", "app_exe")}
+            has_app_fields = False
         try:
             self._get_client().table(_TABLE).insert(payload).execute()
             print(f"[Supabase] Logged: {list(payload.keys())}")
+            if has_app_fields:
+                with self._history_lock:
+                    self._app_columns_supported = True
         except Exception as e:
-            # Remote table may not have the app columns yet — retry without
-            # them rather than losing the whole record.
+            # A legacy table may lack the app columns; preserve the record when
+            # the server explicitly reports that schema, but not for outages.
             stripped = {k: v for k, v in payload.items()
                         if k not in ("app_name", "app_exe")}
-            if stripped != payload:
+            # Only a confirmed legacy-schema response warrants a metadata-free
+            # retry. A timeout/5xx/RLS error must not disable app fields forever.
+            if (stripped != payload
+                    and _is_missing_column_error(e, "app_name", "app_exe")):
                 try:
                     self._get_client().table(_TABLE).insert(stripped).execute()
+                    with self._history_lock:
+                        self._app_columns_supported = False
                     print(f"[Supabase] Logged (no app cols): {list(stripped.keys())}")
                     return
                 except Exception as e2:

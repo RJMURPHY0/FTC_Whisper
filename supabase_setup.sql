@@ -92,12 +92,16 @@ create table if not exists public.transcriptions (
     transcribed_text text,
     refined_text     text,
     refinement_mode  text,
+    app_name         text,
+    app_exe          text,
     created_at       timestamptz not null default now(),
     user_id          uuid references auth.users(id) on delete cascade
 );
 
 alter table public.transcriptions
-    add column if not exists user_id uuid references auth.users(id) on delete cascade;
+    add column if not exists user_id  uuid references auth.users(id) on delete cascade,
+    add column if not exists app_name text,
+    add column if not exists app_exe  text;
 
 alter table public.transcriptions
     alter column user_id    set default auth.uid(),

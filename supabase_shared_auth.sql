@@ -34,8 +34,16 @@ create table if not exists public.transcriptions (
   transcribed_text text,
   refined_text     text,
   refinement_mode  text,
+  app_name         text,
+  app_exe          text,
   created_at       timestamptz not null default now()
 );
+
+-- Existing shared-project installs pre-date app attribution. Keep this
+-- migration additive and idempotent so the script is safe to re-run.
+alter table public.transcriptions
+  add column if not exists app_name text,
+  add column if not exists app_exe  text;
 
 alter table public.transcriptions enable row level security;
 

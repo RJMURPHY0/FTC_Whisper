@@ -5,6 +5,7 @@ Dashboard: Home / Hotkey / History tabs.
 Dark theme with rounded-corner cards via Canvas.
 """
 
+import bisect
 import threading
 import time
 import tkinter as tk
@@ -42,6 +43,15 @@ C = {
 
 WINDOW_W = 420
 DASH_H   = 640
+
+# Resizable-window bounds. Content reflows down to MIN_W; anything narrower
+# would clip the impact cards and the hotkey pills.
+MIN_W = 400
+MIN_H = 520
+
+# The account whose resizes become the shipped install default (pushed to the
+# app_settings table; every fresh install reads it once at first sign-in).
+SUPER_ADMIN_EMAIL = "ryan.murphy@ftc-ss.com"
 
 # Impact card box height — must fit icon, caption, value and sub-label with
 # the reference's breathing room; the layout draws against this constant.
@@ -127,6 +137,12 @@ class ModernScrollbar(tk.Canvas):
         self._last = 1.0
         self._hover = False
         self._drag_dy = 0
+        # Keep three persistent canvas items instead of deleting/recreating the
+        # thumb on every animated yview update.  At 60+ updates/second the old
+        # implementation generated avoidable Tcl object churn.
+        self._thumb_top = self.create_oval(0, 0, 0, 0, outline="", state="hidden")
+        self._thumb_mid = self.create_rectangle(0, 0, 0, 0, outline="", state="hidden")
+        self._thumb_bottom = self.create_oval(0, 0, 0, 0, outline="", state="hidden")
         self.bind("<Configure>", lambda _e: self._redraw())
         self.bind("<Enter>", lambda _e: self._set_hover(True))
         self.bind("<Leave>", lambda _e: self._set_hover(False))
@@ -147,9 +163,10 @@ class ModernScrollbar(tk.Canvas):
         return self._first * h, self._last * h
 
     def _redraw(self):
-        self.delete("all")
         # Fully visible content → no thumb (nothing to scroll)
         if self._first <= 0.0 and self._last >= 1.0:
+            for item in (self._thumb_top, self._thumb_mid, self._thumb_bottom):
+                self.itemconfigure(item, state="hidden")
             return
         w = self.winfo_width()
         pad = 2
@@ -160,7 +177,12 @@ class ModernScrollbar(tk.Canvas):
             y1 = y0 + 16
         r = (w - 2 * pad) / 2
         color = self.THUMB_HOVER if self._hover else self.THUMB
-        self._round_rect(pad, y0, w - pad, y1, r, fill=color)
+        items = (self._thumb_top, self._thumb_mid, self._thumb_bottom)
+        self.coords(self._thumb_top, pad, y0, w - pad, y0 + 2 * r)
+        self.coords(self._thumb_mid, pad, y0 + r, w - pad, y1 - r)
+        self.coords(self._thumb_bottom, pad, y1 - 2 * r, w - pad, y1)
+        for item in items:
+            self.itemconfigure(item, fill=color, state="normal")
 
     def _round_rect(self, x0, y0, x1, y1, r, **kw):
         r = max(0, min(r, (y1 - y0) / 2))
@@ -370,6 +392,29 @@ class AppWindow:
         self._refine_hotkey           = refine_hotkey.upper()
         self._root: Optional[tk.Tk] = None
 
+        # One coalesced animation state per scroll canvas. Wheel input updates a
+        # pixel target; a single scheduled frame eases toward it.
+        self._scroll_states = {}
+        self._scrollregion_jobs = {}
+
+        # Per-account window sizing. _applied_size is the last size WE set
+        # programmatically, so its Configure echo is never mistaken for a user
+        # resize. _dash_visible gates persistence: login-screen resizes are
+        # transient and never saved.
+        self._applied_size = None
+        self._dash_visible = False
+        self._win_save_job = None
+        self._install_default_checked = False
+
+        # History is cache-first and refreshed without clearing the visible rows.
+        self._hist_all = []
+        self._history_loading = False
+        self._history_last_fetch_started = 0.0
+        self._history_dirty = True
+        self._history_pending_render = False
+        self._history_rendered_once = False
+        self._history_fingerprint = None
+
         # Hotkey recorder state
         self._recording_hotkey        = False
         self._pending_hotkey: Optional[str] = None
@@ -401,8 +446,13 @@ class AppWindow:
         except Exception:
             pass
         self._root.configure(bg=C["bg"])
-        self._root.resizable(False, False)
+        # Fully resizable: edges, corners and the maximize box all work. The
+        # layout reflows to fill whatever size the user drags to, and the size
+        # is remembered per signed-in account (see _on_root_configure).
+        self._root.resizable(True, True)
+        self._root.minsize(MIN_W, MIN_H)
         self._root.protocol("WM_DELETE_WINDOW", self._hide)
+        self._root.bind("<Configure>", self._on_root_configure, add="+")
 
         self._apply_dark_titlebar()
 
@@ -468,6 +518,10 @@ class AppWindow:
         # Re-apply after the window is mapped — DWM caption attributes set while
         # the window was withdrawn don't always stick, leaving a white title bar.
         self._apply_dark_titlebar()
+
+        # Pre-draw cached History shortly after first paint so its first click is
+        # only a frame raise, not a network request plus widget construction.
+        self._root.after(75, self._prime_history)
 
         self._root.mainloop()
         # Destroy after mainloop exits (quit() was called on sign-out)
@@ -559,6 +613,17 @@ class AppWindow:
             # Windows 10, which doesn't support these two attributes).
             _set(DWMWA_CAPTION_COLOR, self._colorref(self._TITLEBAR_GREY))
             _set(DWMWA_TEXT_COLOR, self._colorref("#ffffff"))
+
+            # WS_EX_COMPOSITED: Windows double-buffers the whole child-window
+            # tree, painting each frame in one atomic pass. This is what stops
+            # the scroll/resize tearing where embedded card Frames left ghost
+            # copies of themselves (duplicated rows, stray floating labels) on
+            # the Settings and Hotkey tabs.
+            GWL_EXSTYLE = -20
+            WS_EX_COMPOSITED = 0x02000000
+            style = u32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            if not (style & WS_EX_COMPOSITED):
+                u32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_COMPOSITED)
         except Exception:
             pass
 
@@ -650,6 +715,18 @@ class AppWindow:
         self._build_history_tab(self._history_frame)
         self._build_settings_tab(self._settings_frame)
 
+        # Route wheel input exactly once. The previous local + bind_all Hotkey
+        # bindings handled the same event twice when the pointer was over Canvas.
+        self._root.bind_all("<MouseWheel>", self._route_mousewheel)
+
+        if self._db is not None and hasattr(self._db, "add_history_listener"):
+            try:
+                self._db.add_history_listener(
+                    lambda items: self._ui_after(
+                        0, self._on_history_cache_changed, items))
+            except Exception:
+                pass
+
         # Footer
         footer = tk.Frame(parent, bg=C["bg"], padx=24, pady=10)
         footer.pack(fill="x", side="bottom")
@@ -671,6 +748,7 @@ class AppWindow:
         self._switch_dash_tab("home")
 
     def _switch_dash_tab(self, name: str) -> None:
+        previous = getattr(self, "_current_tab", None)
         self._current_tab = name
 
         tab_frames = {
@@ -694,19 +772,17 @@ class AppWindow:
         is_settings = (name == "settings")
         self._gear_btn.configure(fg=C["accent"] if is_settings else C["subtext"])
 
-        # Bind scroll to the appropriate scrollable area
+        # History is stale-while-revalidate: its already-drawn cache remains on
+        # screen, and a repeat click on the active tab is intentionally a no-op.
         if name == "history":
-            # Always refetch — a cached list goes stale as soon as the next
-            # dictation lands, which reads as "history not working".
-            self._load_history()
-            if self._root:
-                self._root.bind_all("<MouseWheel>", self._hist_scroll)
+            if self._history_pending_render:
+                self._history_pending_render = False
+                self._root.after(16, self._render_history)
+            if previous != "history":
+                self._load_history()
         elif name == "settings":
             # The session can finish restoring after these widgets were built.
             self._apply_auth_ui()
-            if self._root and hasattr(self, "_settings_cv"):
-                self._root.bind_all("<MouseWheel>",
-                                    lambda e: self._wheel_scroll(self._settings_cv, e))
             if hasattr(self, "_update_check_btn") and hasattr(self, "_do_update_check"):
                 # Don't clobber an in-flight check — resetting the label here
                 # both swallowed the pending result and re-armed the button for
@@ -715,16 +791,6 @@ class AppWindow:
                     self._update_check_btn.configure(
                         text="Check for Updates", fg=C["accent"], cursor="hand2")
                     self._update_check_btn.bind("<Button-1>", self._do_update_check)
-        elif name == "hotkey":
-            if self._root and hasattr(self, "_hk_cv"):
-                self._root.bind_all("<MouseWheel>",
-                                    lambda e: self._wheel_scroll(self._hk_cv, e))
-        else:
-            if self._root:
-                try:
-                    self._root.unbind_all("<MouseWheel>")
-                except Exception:
-                    pass
 
     def _build_embedded_login(self) -> None:
         from login_window import LoginWindow
@@ -739,6 +805,7 @@ class AppWindow:
         self._login_ui.embed(self._login_frame)
 
     def _switch_to_login(self) -> None:
+        self._dash_visible = False
         self._header_outer.pack_forget()
         self._dash_frame.pack_forget()
         self._login_frame.pack(fill="both", expand=True)
@@ -753,13 +820,148 @@ class AppWindow:
 
     def _show_dashboard(self) -> None:
         self._dash_frame.pack(fill="both", expand=True)
-        self._resize(WINDOW_W, DASH_H)
+        self._resize(*self._saved_dash_size())
+        self._dash_visible = True
+        # Fresh installs read the super-admin default size once (never again
+        # after any size exists locally).
+        self._maybe_fetch_install_default()
         # Session restore happens in a background thread, so labels populated
         # while the dashboard was built may contain the pre-restore state.
         self._apply_auth_ui()
         # Cards may be stale after a missed midnight (laptop asleep) or an
         # account switch — recompute whenever the dashboard is shown.
         self._refresh_impact()
+
+    # ── Per-account window sizing ─────────────────────────────────────────────
+
+    def _account_size_key(self) -> str:
+        email = (getattr(self._auth, "user_email", "") or "").strip().lower()
+        return email or "_default"
+
+    @staticmethod
+    def _parse_size(raw) -> Optional[tuple]:
+        """'WxH' string to a sane (w, h) tuple, or None."""
+        try:
+            w_s, h_s = str(raw).lower().split("x")
+            w, h = int(w_s), int(h_s)
+        except (ValueError, AttributeError):
+            return None
+        if MIN_W <= w <= 5120 and MIN_H <= h <= 3200:
+            return (w, h)
+        return None
+
+    def _saved_dash_size(self) -> tuple:
+        """Resolve the dashboard size: this account's saved size, else the
+        install default, else the built-in default. Clamped to the screen."""
+        sizes = getattr(self._config, "window_sizes", None) if self._config else None
+        size = None
+        if isinstance(sizes, dict):
+            size = (self._parse_size(sizes.get(self._account_size_key()))
+                    or self._parse_size(sizes.get("_default")))
+        w, h = size or (WINDOW_W, DASH_H)
+        try:
+            sw = self._root.winfo_screenwidth()
+            sh = self._root.winfo_screenheight()
+            w = min(w, sw)
+            h = min(h, sh - 40)
+        except tk.TclError:
+            pass
+        return max(w, MIN_W), max(h, MIN_H)
+
+    def _on_root_configure(self, event) -> None:
+        """Debounced per-account size save. The root's name is in every
+        descendant's bindtags, so filter to the toplevel's own events."""
+        if event.widget is not self._root or not self._dash_visible:
+            return
+        if (event.width, event.height) == self._applied_size:
+            return
+        if self._win_save_job is not None:
+            try:
+                self._root.after_cancel(self._win_save_job)
+            except tk.TclError:
+                pass
+        self._win_save_job = self._root.after(600, self._persist_window_size)
+
+    def _persist_window_size(self) -> None:
+        self._win_save_job = None
+        if not self._root or not self._dash_visible or not self._config:
+            return
+        try:
+            # A maximised window is a state, not a chosen size: restoring the
+            # saved WxH must bring back the pre-maximise geometry.
+            if self._root.state() == "zoomed":
+                return
+            w, h = self._root.winfo_width(), self._root.winfo_height()
+        except tk.TclError:
+            return
+        if w < MIN_W or h < MIN_H:
+            return
+        key = self._account_size_key()
+        sizes = getattr(self._config, "window_sizes", None)
+        sizes = dict(sizes) if isinstance(sizes, dict) else {}
+        value = f"{w}x{h}"
+        if sizes.get(key) == value:
+            return
+        sizes[key] = value
+        self._config.window_sizes = sizes
+        try:
+            self._config.save_async()
+        except Exception as e:
+            print(f"[AppWindow] Window size save failed: {e}")
+        # Baseline moves to what the user chose, so only further drags re-save.
+        self._applied_size = (w, h)
+        # The super-admin account's size becomes the fleet-wide install
+        # default. Existing installs are untouched (they only read it once,
+        # at first sign-in with no local size).
+        if key == SUPER_ADMIN_EMAIL and self._db is not None \
+                and hasattr(self._db, "set_app_setting"):
+            try:
+                self._db.set_app_setting("default_window_size", value)
+            except Exception as e:
+                print(f"[AppWindow] Default size push failed: {e}")
+
+    def _maybe_fetch_install_default(self) -> None:
+        """Fresh install only: pull the super-admin's default window size and
+        lock it in as this install's starting size. Runs at most once per
+        session and never once any local size exists."""
+        if self._install_default_checked or not self._config:
+            return
+        sizes = getattr(self._config, "window_sizes", None)
+        if isinstance(sizes, dict) and sizes:
+            self._install_default_checked = True
+            return
+        if self._db is None or not hasattr(self._db, "fetch_app_setting"):
+            return
+        self._install_default_checked = True
+
+        def _fetch():
+            try:
+                raw = self._db.fetch_app_setting("default_window_size")
+            except Exception:
+                raw = ""
+            size = self._parse_size(raw)
+            if size:
+                self._ui_after(0, self._adopt_install_default, size)
+
+        threading.Thread(target=_fetch, daemon=True,
+                         name="install-default-size").start()
+
+    def _adopt_install_default(self, size: tuple) -> None:
+        """Main thread: store the fetched default; apply it only if the user
+        hasn't resized or been given a size in the meantime."""
+        if not self._config:
+            return
+        sizes = getattr(self._config, "window_sizes", None)
+        if isinstance(sizes, dict) and sizes:
+            return  # a size appeared while fetching — never overwrite it
+        self._config.window_sizes = {"_default": f"{size[0]}x{size[1]}"}
+        try:
+            self._config.save_async()
+        except Exception:
+            pass
+        if (self._dash_visible and self._win_save_job is None
+                and self._applied_size == (WINDOW_W, DASH_H)):
+            self._resize(*self._saved_dash_size())
 
     # ── Home tab ──────────────────────────────────────────────────────────────
 
@@ -905,19 +1107,26 @@ class AppWindow:
         # the reference's tracked-out caption look.
         cv.create_text(cx, 66, text=" ".join(card["label"]),
                        fill=C["subtext"], font=("Segoe UI", 7, "bold"))
-        # Value + unit centred as a pair, bottoms aligned on one baseline.
+        # Value + unit centred as a pair, sharing one text baseline.
         # The figure is the card's focal point: wide gap above it, and it sits
         # tight to the description below.
         vw = self._impact_font_value.measure(card["value"])
         uw = self._impact_font_unit.measure(card["unit"]) if card["unit"] else 0
         gap = 5 if card["unit"] else 0
         x0 = cx - (vw + gap + uw) // 2
-        cv.create_text(x0, 110, text=card["value"], fill=C["text"],
+        # anchor="sw" pins the bounding-box bottom, and that box includes the
+        # font's descender. The 18pt figure descends 6px and the 10pt unit only
+        # 3px, so pinning both to the same y left "hrs"/"wpm"/"days" sitting 3px
+        # low. Offset each by its own descent so the glyphs share a baseline.
+        baseline = 110 - self._impact_font_value.metrics("descent")
+        cv.create_text(x0, baseline + self._impact_font_value.metrics("descent"),
+                       text=card["value"], fill=C["text"],
                        font=self._impact_font_value, anchor="sw")
         if card["unit"]:
-            cv.create_text(x0 + vw + gap, 110, text=card["unit"],
-                           fill=C["subtext"], font=self._impact_font_unit,
-                           anchor="sw")
+            cv.create_text(x0 + vw + gap,
+                           baseline + self._impact_font_unit.metrics("descent"),
+                           text=card["unit"], fill=C["subtext"],
+                           font=self._impact_font_unit, anchor="sw")
         cv.create_text(cx, 127, text=card["sub"], fill=C["subtext"],
                        font=("Segoe UI", 8))
 
@@ -1026,10 +1235,10 @@ class AppWindow:
     def _build_hotkey_tab(self, parent: tk.Frame) -> None:
         # Scrollable container
         self._hk_cv = tk.Canvas(parent, bg=C["bg"], highlightthickness=0, bd=0,
-                                yscrollincrement=24)
+                                yscrollincrement=1)
         _hk_cv = self._hk_cv
         _hk_sb = ModernScrollbar(
-            parent, command=lambda *a: (_hk_cv.yview(*a), self._repaint(_hk_cv)))
+            parent, command=lambda *a: self._scrollbar_command(_hk_cv, *a))
         _hk_cv.configure(yscrollcommand=_hk_sb.set)
         _hk_sb.pack(side="right", fill="y")
         _hk_cv.pack(side="left", fill="both", expand=True)
@@ -1039,7 +1248,6 @@ class AppWindow:
                        lambda _e: self._queue_scrollregion_sync(_hk_cv))
         _hk_cv.bind("<Configure>", lambda e: _hk_cv.itemconfigure(
             _hk_win, width=e.width))
-        _hk_cv.bind("<MouseWheel>", lambda e: self._wheel_scroll(_hk_cv, e))
         parent = _hk_inner
 
         # ── Dictation hotkey ─────────────────────────────────────────────────────
@@ -1070,6 +1278,7 @@ class AppWindow:
             font=("Segoe UI", 9), justify="left", anchor="w", wraplength=340,
         )
         self._hotkey_record_msg.pack(fill="x", pady=(0, 8))
+        self._autowrap(self._hotkey_record_msg)
 
         btn_row = tk.Frame(card1, bg=C["surface"])
         btn_row.pack(fill="x")
@@ -1146,6 +1355,7 @@ class AppWindow:
             font=("Segoe UI", 9), justify="left", anchor="w", wraplength=340,
         )
         self._refine_record_msg.pack(fill="x", pady=(0, 8))
+        self._autowrap(self._refine_record_msg)
 
         btn_row2 = tk.Frame(card2, bg=C["surface"])
         btn_row2.pack(fill="x")
@@ -1177,6 +1387,10 @@ class AppWindow:
             self._start_hotkey_recording()
 
     def _start_hotkey_recording(self) -> None:
+        # Both recorders share the root <KeyPress> binding — only one can be
+        # live, or stopping either would strand the other mid-recording.
+        if self._recording_refine_hotkey:
+            self._stop_refine_hotkey_recording(cancelled=True)
         self._recording_hotkey = True
         self._pending_hotkey = None
         self._record_btn.configure(text="Cancel", bg=C["error"], fg=C["text"])
@@ -1278,6 +1492,8 @@ class AppWindow:
             self._start_refine_hotkey_recording()
 
     def _start_refine_hotkey_recording(self) -> None:
+        if self._recording_hotkey:
+            self._stop_hotkey_recording(cancelled=True)
         self._recording_refine_hotkey = True
         self._pending_refine_hotkey = None
         self._refine_record_btn.configure(text="Cancel", bg=C["error"], fg=C["text"])
@@ -1374,7 +1590,9 @@ class AppWindow:
                  fg=C["subtext"], bg=C["bg"],
                  font=("Segoe UI", 9)).pack(side="left")
 
-        self._ghost_btn(top, "↻ Refresh", self._load_history).pack(side="right")
+        self._ghost_btn(
+            top, "↻ Refresh", lambda: self._load_history(force=True)
+        ).pack(side="right")
         self._ghost_btn(top, "✕ Clear",   self._confirm_clear_history).pack(side="right", padx=(0, 8))
 
         # Search bar — rounded (matches the history card), filters the fetched
@@ -1436,7 +1654,13 @@ class AppWindow:
         def _sf_key(_e):
             v = self._hist_search.get()
             self._hist_query = "" if v == _PLACEHOLDER else v.strip().lower()
-            self._render_history()
+            old_job = getattr(self, "_hist_search_job", None)
+            if old_job is not None:
+                try:
+                    self._root.after_cancel(old_job)
+                except tk.TclError:
+                    pass
+            self._hist_search_job = self._root.after(90, self._apply_history_search)
 
         self._hist_search.bind("<FocusIn>", _sf_in)
         self._hist_search.bind("<FocusOut>", _sf_out)
@@ -1456,7 +1680,6 @@ class AppWindow:
         card_cv = tk.Canvas(mid, bg=C["bg"], highlightthickness=0, bd=0)
 
         def _redraw_card(_e=None):
-            card_cv.update_idletasks()
             cw, ch = card_cv.winfo_width(), card_cv.winfo_height()
             if cw < 2 or ch < 2:
                 return
@@ -1470,7 +1693,6 @@ class AppWindow:
         card_win = card_cv.create_window(1, 1, window=card_inner, anchor="nw")
 
         def _sync_card(_e=None):
-            card_cv.update_idletasks()
             cw, ch = card_cv.winfo_width(), card_cv.winfo_height()
             if cw > 2 and ch > 2:
                 card_cv.itemconfigure(card_win, width=cw - 2, height=ch - 2)
@@ -1481,30 +1703,34 @@ class AppWindow:
         # Scrollable list canvas — fills the whole card (no scrollbar inside now)
         self._hist_cv = tk.Canvas(card_inner, bg=C["surface"],
                                   highlightthickness=0, bd=0,
-                                  yscrollincrement=24)
+                                  yscrollincrement=1)
         self._hist_cv.pack(fill="both", expand=True)
 
         # External scrollbar on the window background, to the RIGHT of the card.
         # Packed (side=right) before the card is packed (side=left, expand) so it
         # claims the right edge; the card then fills the remaining width.
         self._hist_sb = ModernScrollbar(
-            mid, command=lambda *a: (self._hist_cv.yview(*a),
-                                     self._repaint(self._hist_cv)))
+            mid, command=lambda *a: self._scrollbar_command(self._hist_cv, *a))
         self._hist_cv.configure(yscrollcommand=self._hist_sb.set)
         self._hist_sb.pack(side="right", fill="y")
         # Right pad 8 so the card's right edge lines up with the search bar (W-20),
         # while the 12px scrollbar sits flush at the window edge just beyond it.
         card_cv.pack(side="left", fill="both", expand=True, padx=(0, 8))
 
-        # Inner frame that holds one Frame per history row
-        self._hist_items = tk.Frame(self._hist_cv, bg=C["surface"])
-        self._hist_items_win = self._hist_cv.create_window(
-            0, 0, window=self._hist_items, anchor="nw")
-
-        self._hist_items.bind("<Configure>",
-                              lambda _e: self._queue_scrollregion_sync(self._hist_cv))
-        self._hist_cv.bind("<Configure>", lambda e: self._hist_cv.itemconfigure(
-            self._hist_items_win, width=e.width))
+        # History rows are native Canvas items, not a thousand embedded HWND
+        # widgets.  One surface eliminates child-window ghosting and keeps fast
+        # scroll repaint cost essentially constant as history grows.
+        self._hist_layout = []
+        self._hist_row_starts = []
+        self._hist_drawn_rows = {}
+        self._hist_icon_refs = []
+        self._hist_hover_index = None
+        self._hist_expanded_key = None
+        self._hist_confirm_key = None
+        self._hist_cv.bind("<Configure>", self._on_history_canvas_configure)
+        self._hist_cv.bind("<Motion>", self._on_history_motion)
+        self._hist_cv.bind("<Leave>", lambda _e: self._set_history_hover(None))
+        self._hist_cv.bind("<Button-1>", self._on_history_click)
 
 
     @staticmethod
@@ -1520,61 +1746,278 @@ class AppWindow:
         except Exception:
             pass
 
-    def _wheel_scroll(self, cv, event) -> None:
-        """Shared mousewheel handler for the scrollable tabs — smooth fixed-pixel
-        steps (yscrollincrement) plus the anti-ghosting repaint."""
-        try:
-            cv.yview_scroll(int(-1 * (event.delta / 40)), "units")
-        except tk.TclError:
-            return
-        self._repaint(cv)
+    def _route_mousewheel(self, event):
+        """Route each Windows wheel event once to the active scroll surface."""
+        cv = None
+        if self._current_tab == "history":
+            cv = getattr(self, "_hist_cv", None)
+        elif self._current_tab == "settings":
+            cv = getattr(self, "_settings_cv", None)
+        elif self._current_tab == "hotkey":
+            cv = getattr(self, "_hk_cv", None)
+        if cv is not None:
+            return self._wheel_scroll(cv, event)
+        return None
 
     @staticmethod
-    def _queue_scrollregion_sync(cv) -> None:
+    def _scroll_metrics(cv):
+        """Return (content_height, max_top, current_top) in canvas pixels.
+
+        Height comes from the configured scrollregion, not bbox("all"). bbox
+        walks every item on the canvas, so on a long history it got slower the
+        more rows existed — and it ran on every wheel event AND every animation
+        frame. The scrollregion is already maintained by whoever fills the
+        canvas and reading it is O(1) regardless of row count.
+        """
+        try:
+            region = str(cv.cget("scrollregion")).split()
+            content_h = max(float(region[3]) - float(region[1]), 1.0)
+        except (tk.TclError, AttributeError, IndexError, ValueError):
+            bbox = cv.bbox("all")
+            if not bbox:
+                return 1.0, 0.0, 0.0
+            content_h = max(float(bbox[3] - bbox[1]), 1.0)
+        viewport_h = max(float(cv.winfo_height()), 1.0)
+        max_top = max(content_h - viewport_h, 0.0)
+        try:
+            current = float(cv.yview()[0]) * content_h
+        except (tk.TclError, IndexError, TypeError):
+            current = 0.0
+        return content_h, max_top, max(0.0, min(max_top, current))
+
+    # Scroll feel. The target is where the wheel says you are; the animation
+    # only smooths the last hop to it, it never adds momentum — stop turning
+    # the wheel and motion stops inside ~50ms rather than coasting.
+    _SCROLL_PX_PER_DELTA = 0.75    # one notch (delta=120) = 90px ≈ 1.7 rows
+    _SCROLL_EASE = 0.5             # fraction of the remaining gap per frame
+    _SCROLL_MAX_STEP = 120.0       # px/frame ceiling for a fast wheel spin
+    _SCROLL_SNAP = 1.0             # within 1px, land on the target and stop
+
+    def _wheel_scroll(self, cv, event):
+        """Accumulate precise wheel deltas and animate one pixel target.
+
+        A standard Windows notch (delta=120) travels 90px over ~4 frames.
+        Precision touchpad deltas are retained instead of truncated.
+        """
+        try:
+            delta = float(event.delta)
+            content_h, max_top, actual = self._scroll_metrics(cv)
+        except (tk.TclError, TypeError, ValueError):
+            return "break"
+        if max_top <= 0.0 or delta == 0.0:
+            return "break"
+
+        state = self._scroll_states.setdefault(
+            cv, {"current": actual, "target": actual, "job": None})
+        if state["job"] is None or abs(state["current"] - actual) > 2.0:
+            state["current"] = actual
+            state["target"] = actual
+        state["target"] = max(
+            0.0, min(max_top, state["target"] - delta * self._SCROLL_PX_PER_DELTA))
+
+        if cv is getattr(self, "_hist_cv", None):
+            self._set_history_hover(None)
+        if state["job"] is None:
+            state["job"] = cv.after(0, self._animate_scroll, cv)
+        return "break"
+
+    def _animate_scroll(self, cv) -> None:
+        state = self._scroll_states.get(cv)
+        if not state:
+            return
+        state["job"] = None
+        try:
+            content_h, max_top, _actual = self._scroll_metrics(cv)
+        except tk.TclError:
+            self._scroll_states.pop(cv, None)
+            return
+        state["target"] = max(0.0, min(max_top, state["target"]))
+        state["current"] = max(0.0, min(max_top, state["current"]))
+        diff = state["target"] - state["current"]
+        if abs(diff) <= self._SCROLL_SNAP:
+            state["current"] = state["target"]
+        else:
+            cap = self._SCROLL_MAX_STEP
+            step = max(-cap, min(cap, diff * self._SCROLL_EASE))
+            # Collapse the tail instead of creeping the last few px — a slow
+            # crawl after the wheel stops is what reads as lag.
+            if abs(step) < 2.0:
+                step = 2.0 if diff > 0 else -2.0
+            state["current"] += step
+        try:
+            cv.yview_moveto(state["current"] / content_h)
+            # History is one native canvas and needs no descendant repaint.
+            if cv is not getattr(self, "_hist_cv", None):
+                self._repaint(cv)
+        except tk.TclError:
+            self._scroll_states.pop(cv, None)
+            return
+
+        if abs(state["target"] - state["current"]) > self._SCROLL_SNAP:
+            state["job"] = cv.after(12, self._animate_scroll, cv)
+        elif cv is getattr(self, "_hist_cv", None):
+            cv.after(16, self._refresh_history_hover)
+
+    def _cancel_smooth_scroll(self, cv) -> None:
+        state = self._scroll_states.get(cv)
+        if state and state.get("job") is not None:
+            try:
+                cv.after_cancel(state["job"])
+            except tk.TclError:
+                pass
+        self._scroll_states.pop(cv, None)
+
+    def _scrollbar_command(self, cv, *args) -> None:
+        """Thumb/track motion remains direct and one-to-one with the pointer."""
+        self._cancel_smooth_scroll(cv)
+        try:
+            cv.yview(*args)
+        except tk.TclError:
+            return
+        if cv is not getattr(self, "_hist_cv", None):
+            self._repaint(cv)
+
+    def _queue_scrollregion_sync(self, cv) -> None:
         """Recompute a scroll canvas's scrollregion once geometry has settled.
         A bbox taken mid-layout (e.g. the moment the update banner packs in)
         under-reports the content height, leaving the page bottom cut off and
         unreachable — after_idle re-measures when the layout is final."""
+        old_job = self._scrollregion_jobs.get(cv)
+        if old_job is not None:
+            try:
+                cv.after_cancel(old_job)
+            except tk.TclError:
+                pass
+
         def _sync():
+            self._scrollregion_jobs.pop(cv, None)
             try:
                 cv.configure(scrollregion=cv.bbox("all"))
             except tk.TclError:
                 pass  # canvas destroyed mid-shutdown
         try:
-            cv.after_idle(_sync)
+            self._scrollregion_jobs[cv] = cv.after_idle(_sync)
         except tk.TclError:
             pass
 
-    def _hist_scroll(self, event) -> None:
-        if hasattr(self, "_hist_cv"):
-            self._wheel_scroll(self._hist_cv, event)
+    @staticmethod
+    def _history_item_key(item: dict) -> str:
+        return str(item.get("id") or "|".join((
+            item.get("created_at") or "",
+            item.get("transcribed_text") or "",
+            item.get("refined_text") or "",
+        )))
 
-    def _load_history(self) -> None:
-        if getattr(self, "_history_loading", False):
-            return  # a fetch is already in flight (rapid tab switching)
-        self._history_loading = True
-        self._hist_set_placeholder("Loading…")
-        def _fetch():
+    def _apply_history_search(self) -> None:
+        self._hist_search_job = None
+        if getattr(self, "_current_tab", "") == "history":
+            self._render_history()
+        else:
+            self._history_pending_render = True
+
+    @staticmethod
+    def _history_items_fingerprint(items: list) -> tuple:
+        return tuple((
+            item.get("id"), item.get("created_at"),
+            item.get("transcribed_text"), item.get("refined_text"),
+            item.get("app_name"), item.get("app_exe"),
+        ) for item in items)
+
+    def _prime_history(self) -> None:
+        """Draw local/in-memory rows after first paint, then refresh remotely."""
+        if not self._root or not hasattr(self, "_hist_cv"):
+            return
+        try:
+            cached = (self._db.get_cached_history(limit=200)
+                      if self._db and hasattr(self._db, "get_cached_history")
+                      else [])
+        except Exception:
+            cached = []
+        if cached:
+            self._populate_history(cached, render=True)
+        self._load_history(force=True)
+
+    def _on_history_cache_changed(self, cached=None) -> None:
+        """A new local dictation is available; show it without waiting for sync."""
+        if not self._db or not hasattr(self._db, "get_cached_history"):
+            self._history_dirty = True
+            return
+        if cached is None:
             try:
-                items = self._db.fetch_history(limit=100) if self._db else []
-            except Exception as e:
-                print(f"[AppWindow] History fetch failed: {e}")
-                items = []
-            self._ui_after(0, self._populate_history, items)
-        threading.Thread(target=_fetch, daemon=True).start()
+                cached = self._db.get_cached_history(limit=200)
+            except Exception:
+                self._history_dirty = True
+                return
+        self._history_dirty = True
+        self._populate_history(
+            cached, render=(getattr(self, "_current_tab", "") == "history"))
+
+    def _load_history(self, force: bool = False) -> None:
+        if self._history_loading or not self._db:
+            return
+        now = time.monotonic()
+        if (not force and not self._history_dirty
+                and now - self._history_last_fetch_started < 2.0):
+            return
+        self._history_loading = True
+        self._history_last_fetch_started = now
+        if not self._hist_all:
+            self._hist_set_placeholder("Loading…")
+
+        def _fetch():
+            error = None
+            try:
+                items = self._db.fetch_history(limit=200)
+            except Exception as exc:
+                print(f"[AppWindow] History fetch failed: {exc}")
+                items, error = [], exc
+            self._ui_after(0, self._finish_history_fetch, items, error)
+
+        threading.Thread(
+            target=_fetch, daemon=True, name="history-fetch").start()
+
+    def _finish_history_fetch(self, items: list, error=None) -> None:
+        self._history_loading = False
+        if error is not None:
+            if not self._hist_all:
+                self._hist_set_placeholder("History unavailable offline.")
+            return
+        self._history_dirty = False
+        self._populate_history(items)
 
     def _hist_set_placeholder(self, msg: str) -> None:
-        for w in self._hist_items.winfo_children():
-            w.destroy()
-        tk.Label(self._hist_items, text=msg,
-                 fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 10, "italic"),
-                 padx=12, pady=16).pack(fill="x")
+        cv = self._hist_cv
+        cv.delete("all")
+        cv.create_text(14, 16, text=msg, fill=C["subtext"],
+                       font=("Segoe UI", 10, "italic"), anchor="nw")
+        cv.configure(scrollregion=(0, 0, max(cv.winfo_width(), 1), 52))
+        self._hist_layout = []
+        self._hist_row_starts = []
+        self._hist_drawn_rows = {}
+        self._hist_icon_refs = []
+        # Stale hover state against an empty canvas would point at a row that
+        # no longer exists.
+        self._hist_hover_index = None
+        self._hist_bin_hot = False
+        try:
+            cv.configure(cursor="")
+        except tk.TclError:
+            pass
 
-    def _populate_history(self, items: list) -> None:
-        self._history_loading = False
-        self._hist_all = items or []
-        self._render_history()
+    def _populate_history(self, items: list, render=None) -> None:
+        items = items or []
+        fingerprint = self._history_items_fingerprint(items)
+        changed = fingerprint != self._history_fingerprint
+        self._hist_all = items
+        self._history_fingerprint = fingerprint
+        if not changed and self._history_rendered_once:
+            return
+        if render is None:
+            render = (getattr(self, "_current_tab", "") == "history")
+        if render or not self._history_rendered_once:
+            self._render_history()
+        else:
+            self._history_pending_render = True
 
     @staticmethod
     def _hist_date_label(dt_local) -> str:
@@ -1590,8 +2033,15 @@ class AppWindow:
         return label
 
     def _render_history(self) -> None:
-        for w in self._hist_items.winfo_children():
-            w.destroy()
+        self._hist_search_job = None
+        self._hist_clear_confirm = False
+        cv = self._hist_cv
+        width = cv.winfo_width()
+        if width <= 10:
+            self._history_pending_render = True
+            return
+        old_query = getattr(self, "_hist_render_query", None)
+        old_top = self._scroll_metrics(cv)[2]
         items = getattr(self, "_hist_all", [])
         q = getattr(self, "_hist_query", "")
         if q:
@@ -1602,10 +2052,17 @@ class AppWindow:
         if not items:
             self._hist_set_placeholder(
                 "No matches." if q else "No transcriptions yet.")
+            self._hist_render_query = q
+            self._history_rendered_once = True
             return
-
+        cv.delete("all")
+        self._hist_layout = []
+        self._hist_row_starts = []      # y0 per row, sorted — see _history_index_at_y
+        self._hist_drawn_rows = {}
+        self._hist_icon_refs = []
+        self._hist_hover_index = None
         last_group = None
-        first_in_group = True
+        y = 0
         for item in items:
             raw_ts = item.get("created_at") or ""
             try:
@@ -1615,291 +2072,378 @@ class AppWindow:
             except Exception:
                 dt, group = None, "Earlier"
             if group != last_group:
-                tk.Label(self._hist_items, text=group.upper(),
-                         fg=C["subtext"], bg=C["surface"],
-                         font=("Segoe UI", 8, "bold"), anchor="w",
-                         ).pack(fill="x", padx=14,
-                                pady=((12 if last_group is None else 14), 4))
+                y += 11 if last_group is None else 13
+                cv.create_text(14, y, text=group.upper(), fill=C["subtext"],
+                               font=("Segoe UI", 8, "bold"), anchor="nw")
+                y += 22
                 last_group = group
-                first_in_group = True
-            self._make_history_row(item, dt, first_in_group)
-            first_in_group = False
+            elif y > 0:
+                cv.create_line(10, y, width - 10, y, fill=C["divider"])
 
-    def _make_history_row(self, item: dict, dt, first_in_group: bool) -> None:
-        text = item.get("refined_text") or item.get("transcribed_text") or ""
-        time_str = dt.strftime("%H:%M") if dt else ""
+            key = self._history_item_key(item)
+            expanded = key in (self._hist_expanded_key, self._hist_confirm_key)
+            text = item.get("refined_text") or item.get("transcribed_text") or ""
+            # Expanded rows drop the preview line, so the full text starts just
+            # under the app name instead of below a 52px header. While the
+            # Cancel/Delete pair is up it needs to clear the button (which ends
+            # at y0+36), so the text starts lower.
+            detail_y = 46 if key == self._hist_confirm_key else 34
+            row_h = (detail_y + self._history_detail_height(
+                        text, max(width - 72, 80))
+                     if expanded else 52)
+            index = len(self._hist_layout)
+            entry = {"index": index, "item": item, "key": key, "dt": dt,
+                     "y0": y, "y1": y + row_h, "detail_y": detail_y}
+            self._hist_layout.append(entry)
+            self._hist_row_starts.append(y)
+            self._draw_history_canvas_row(entry, width)
+            y += row_h
+
+        total_h = max(y + 8, cv.winfo_height())
+        cv.configure(scrollregion=(0, 0, width, total_h))
+        if old_query == q and old_top > 0:
+            cv.yview_moveto(min(old_top / max(total_h, 1), 1.0))
+        else:
+            cv.yview_moveto(0.0)
+        self._hist_render_query = q
+        self._history_rendered_once = True
+        self._history_pending_render = False
+        # Expand/collapse/delete re-render under a stationary pointer; restore
+        # the hover highlight immediately instead of waiting for mouse motion.
+        cv.after(16, self._refresh_history_hover)
+
+    def _history_detail_height(self, text: str, width: int) -> int:
+        font = getattr(self, "_hist_body_font", None)
+        if font is None:
+            font = self._hist_body_font = tkfont.Font(family="Segoe UI", size=9)
+        # Ask the same Canvas renderer used for the real detail text. This also
+        # handles long URLs/tokens that Tk wraps between characters rather than
+        # at spaces, which a word-count approximation under-sized badly.
+        probe = self._hist_cv.create_text(
+            -10000, -10000, text=text or " ", font=font, anchor="nw",
+            width=max(width, 1))
+        try:
+            bbox = self._hist_cv.bbox(probe)
+            rendered_h = (bbox[3] - bbox[1]) if bbox else font.metrics("linespace")
+        finally:
+            self._hist_cv.delete(probe)
+        return max(38, rendered_h + 16)
+
+    def _history_elide(self, text: str, width: int, *, size: int) -> tuple[str, object]:
+        """Return one measured line that cannot overlap the metadata below it."""
+        attr = f"_hist_elide_font_{size}"
+        font = getattr(self, attr, None)
+        if font is None:
+            font = tkfont.Font(family="Segoe UI", size=size)
+            setattr(self, attr, font)
+        value = " ".join((text or "").split())
+        cache = getattr(self, "_hist_elide_cache", None)
+        if cache is None:
+            cache = self._hist_elide_cache = {}
+        cache_key = (value, int(width), size)
+        if cache_key in cache:
+            return cache[cache_key], font
+        full_width = font.measure(value)
+        if full_width <= width:
+            if len(cache) >= 1000:
+                cache.clear()
+            cache[cache_key] = value
+            return value, font
+        suffix = "…"
+        suffix_attr = f"_hist_elide_suffix_width_{size}"
+        suffix_width = getattr(self, suffix_attr, None)
+        if suffix_width is None:
+            suffix_width = font.measure(suffix)
+            setattr(self, suffix_attr, suffix_width)
+        available = max(width - suffix_width, 0)
+        # Start from the full-string average width, then shrink only if the
+        # prefix happens to contain wider glyphs. This needs one or two Tcl font
+        # calls instead of a binary-search call for every history row.
+        count = max(0, min(len(value), int(len(value) * available / full_width)))
+        while count > 0:
+            prefix = value[:count].rstrip()
+            measured = font.measure(prefix)
+            if measured <= available:
+                result = prefix + suffix
+                if len(cache) >= 1000:
+                    cache.clear()
+                cache[cache_key] = result
+                return result, font
+            scaled = int(count * available / max(measured, 1))
+            count = min(count - 1, scaled)
+        cache[cache_key] = suffix
+        return suffix, font
+
+    def _history_icon(self, item: dict, bg: str):
         app_name = item.get("app_name") or ""
         app_exe = item.get("app_exe") or ""
+        return (get_brand_icon(app_name, bg)
+                or get_app_icon(app_exe, bg)
+                or get_monogram_icon(app_name, bg)
+                or get_fallback_icon(bg))
 
-        if not first_in_group:
-            tk.Frame(self._hist_items, bg=C["divider"], height=1).pack(
-                fill="x", padx=10)
+    def _draw_history_canvas_row(self, entry: dict, width: int) -> None:
+        cv = self._hist_cv
+        item, y0, y1 = entry["item"], entry["y0"], entry["y1"]
+        text = item.get("refined_text") or item.get("transcribed_text") or ""
+        app_name = item.get("app_name") or "Unknown app"
+        time_str = entry["dt"].strftime("%H:%M") if entry["dt"] else ""
+        bg_id = cv.create_rectangle(0, y0, width, y1, fill=C["surface"],
+                                    outline="")
 
-        row = tk.Frame(self._hist_items, bg=C["surface"])
-        row.pack(fill="x")
+        icon_n = self._history_icon(item, C["surface"])
+        icon_id = cv.create_image(11, y0 + 8, image=icon_n, anchor="nw")
+        self._hist_icon_refs.append(icon_n)
 
-        header = tk.Frame(row, bg=C["surface"])
-        # pady 4 (was 8): the 36px icon now spans the row's vertical space that
-        # the old padding used to occupy, so the row height is unchanged (44px)
-        # and the two-line text block keeps the same distance to the row edge.
-        header.pack(fill="x", padx=10, pady=4)
+        confirming = (entry["key"] == self._hist_confirm_key)
+        expanded = entry["key"] in (self._hist_expanded_key,
+                                    self._hist_confirm_key)
+        # While the Cancel/Delete pair is showing it eats into the header, so the
+        # header text has to stop well short of it or it renders underneath.
+        text_width = max((width - 227) if confirming else (width - 154), 80)
 
-        # App icon (real exe icon; generic tile for pre-capture rows).
-        # Two variants per exe — normal and hover row background.
-        # Fidelity order: real bundled brand logo (only way to get the correct
-        # icon for a browser-hosted web app) → real exe icon (native apps) →
-        # coloured monogram → generic tile.
-        icon_n = (get_brand_icon(app_name, C["surface"])
-                  or get_app_icon(app_exe, C["surface"])
-                  or get_monogram_icon(app_name, C["surface"])
-                  or get_fallback_icon(C["surface"]))
-        icon_h = (get_brand_icon(app_name, C["surface_hover"])
-                  or get_app_icon(app_exe, C["surface_hover"])
-                  or get_monogram_icon(app_name, C["surface_hover"])
-                  or get_fallback_icon(C["surface_hover"]))
-        icon_lbl = tk.Label(header, bg=C["surface"])
-        if icon_n is not None:
-            icon_lbl.configure(image=icon_n)
-            icon_lbl._image_refs = (icon_n, icon_h)  # keep tk references alive
-        icon_lbl.pack(side="left", padx=(0, 10))
+        if expanded:
+            # One block of text per state: the full text is drawn below, so the
+            # truncated preview is dropped and the app name takes the top slot.
+            app_label, app_font = self._history_elide(
+                app_name, text_width, size=8)
+            cv.create_text(57, y0 + 12, text=app_label, fill=C["subtext"],
+                           font=app_font, anchor="nw")
+        else:
+            preview, preview_font = self._history_elide(
+                text, text_width, size=9)
+            app_label, app_font = self._history_elide(
+                app_name, text_width, size=8)
+            cv.create_text(57, y0 + 8, text=preview, fill=C["text"],
+                           font=preview_font, anchor="nw")
+            cv.create_text(57, y0 + 28, text=app_label, fill=C["subtext"],
+                           font=app_font, anchor="nw")
 
-        # Right side packed first so the middle column can never push it off.
-        copy_cv = tk.Canvas(header, width=22, height=22, bg=C["surface"],
-                            highlightthickness=0, bd=0, cursor="hand2")
-        copy_cv.pack(side="right", padx=(6, 0))
+        time_id = None
+        confirm_items = []
+        if confirming:
+            confirm_items.append(cv.create_text(
+                width - 139, y0 + 18, text="Cancel", fill=C["subtext"],
+                font=("Segoe UI", 9), anchor="center"))
+            confirm_items.append(_rr(
+                cv, width - 109, y0 + 8, width - 48, y0 + 36, 7,
+                fill=C["error"], outline=""))
+            confirm_items.append(cv.create_text(
+                width - 78, y0 + 22, text="Delete", fill=C["bg"],
+                font=("Segoe UI", 9, "bold"), anchor="center"))
+        else:
+            time_id = cv.create_text(width - 51, y0 + 20, text=time_str,
+                                     fill=C["subtext"], font=("Segoe UI", 8),
+                                     anchor="center")
 
-        copy_state = {"bg": C["surface"], "fg": C["subtext"], "busy": False}
+        # Copy glyph is always stable in the far-right action slot.
+        copy_items = [
+            cv.create_rectangle(width - 22, y0 + 13, width - 12, y0 + 23,
+                                outline=C["subtext"], width=1),
+            cv.create_rectangle(width - 26, y0 + 17, width - 16, y0 + 27,
+                                fill=C["surface"], outline=C["subtext"], width=1),
+        ]
 
-        def _draw_copy():
-            if copy_state["busy"]:
-                return
-            copy_cv.delete("all")
-            copy_cv.configure(bg=copy_state["bg"])
-            _rr(copy_cv, 8, 3, 18, 13, 3, fill="", outline=copy_state["fg"])
-            _rr(copy_cv, 4, 7, 14, 17, 3, fill=copy_state["bg"],
-                outline=copy_state["fg"])
-        _draw_copy()
-
-        def _copied_feedback():
-            copy_state["busy"] = True
-            copy_cv.delete("all")
-            copy_cv.create_line(5, 12, 9, 16, 17, 6, fill=C["success"],
-                                width=2, capstyle="round", joinstyle="round")
-            def _restore():
-                copy_state["busy"] = False
-                _draw_copy()
-            copy_cv.after(1400, _restore)
-
-        copy_cv.bind("<Button-1>",
-                     lambda _e, t=text: (self._copy_to_clipboard(t),
-                                         _copied_feedback()))
-        copy_cv.bind("<Enter>", lambda _e: (copy_state.update(fg=C["accent"]),
-                                            _draw_copy()))
-        copy_cv.bind("<Leave>", lambda _e: (copy_state.update(fg=C["subtext"]),
-                                            _draw_copy()))
-
-        # Timestamp (display only).
-        time_lbl = tk.Label(header, text=time_str, fg=C["subtext"],
-                            bg=C["surface"], font=("Segoe UI", 8), width=5)
-        time_lbl.pack(side="right", padx=(6, 0))
-        confirming = [False]
-
-        # Delete control — a clean line-art trash-can (drawn, not an emoji). It
-        # is HIDDEN by default and appears (left of the timestamp) only while the
-        # row is hovered. Clicking it expands the row so the full text is visible
-        # and drops a clear "Delete this transcription?  Delete / Cancel" bar
-        # underneath. Delete removes the row from the UI immediately (the
-        # Supabase row follows 30 days later).
-        del_cv = tk.Canvas(header, width=22, height=22, bg=C["surface"],
-                           highlightthickness=0, bd=0, cursor="hand2")
-        # NOT packed here — on hover it REPLACES the timestamp in its slot.
-        del_state = {"bg": C["surface"], "fg": C["subtext"]}
-
-        def _draw_trash():
-            del_cv.delete("all")
-            del_cv.configure(bg=del_state["bg"])
-            c = del_state["fg"]
-            # handle + lid
-            del_cv.create_line(8, 5, 14, 5, fill=c, width=2, capstyle="round")
-            del_cv.create_line(4, 7, 18, 7, fill=c, width=2, capstyle="round")
-            # bucket body (rounded bottom)
-            del_cv.create_line(6, 8, 7, 17, 15, 17, 16, 8, fill=c, width=2,
-                               capstyle="round", joinstyle="round")
+        # Line-art trash can (never an emoji glyph — those render inconsistently
+        # and clip). It occupies the TIMESTAMP's slot rather than a slot of its
+        # own: on hover the time hides and the bin takes its place, so the header
+        # never gets wider and nothing to its left can be pushed out or overlapped.
+        # Items are drawn once and only toggled visible, so scrolling under the
+        # pointer causes no geometry churn.
+        bx, by = width - 62, y0 + 9      # top-left of the 22x22 glyph box
+        delete_items = [
+            # handle
+            cv.create_line(bx + 8, by + 5, bx + 14, by + 5, fill=C["subtext"],
+                           width=2, capstyle="round", state="hidden"),
+            # lid
+            cv.create_line(bx + 4, by + 7, bx + 18, by + 7, fill=C["subtext"],
+                           width=2, capstyle="round", state="hidden"),
+            # bucket body
+            cv.create_line(bx + 6, by + 8, bx + 7, by + 17, bx + 15, by + 17,
+                           bx + 16, by + 8, fill=C["subtext"], width=2,
+                           capstyle="round", joinstyle="round", state="hidden"),
+        ] + [
             # inner stripes
-            for x in (9, 11, 13):
-                del_cv.create_line(x, 9, x, 15, fill=c, width=1,
-                                   capstyle="round")
-        _draw_trash()
+            cv.create_line(bx + x, by + 9, bx + x, by + 15, fill=C["subtext"],
+                           width=1, capstyle="round", state="hidden")
+            for x in (9, 11, 13)
+        ]
 
-        def _show_bin():
-            # Bin REPLACES the timestamp in its slot (packed right after the
-            # copy icon so it keeps the timestamp's priority over the text
-            # column — this is why it shows even on long-text rows, where a
-            # last-packed widget would be clipped out of the full header).
-            if confirming[0] or del_cv.winfo_ismapped():
-                return
-            time_lbl.pack_forget()
-            del_cv.pack(side="right", padx=(6, 0), after=copy_cv)
+        if expanded:
+            cv.create_text(57, y0 + entry["detail_y"], text=text,
+                           fill=C["text"], font=("Segoe UI", 9), anchor="nw",
+                           width=max(width - 72, 80))
 
-        def _hide_bin():
-            if del_cv.winfo_ismapped():
-                del_cv.pack_forget()
-            if not confirming[0] and not time_lbl.winfo_ismapped():
-                time_lbl.pack(side="right", padx=(6, 0), after=copy_cv)
+        self._hist_drawn_rows[entry["index"]] = {
+            "bg": bg_id, "icon": icon_id, "icon_n": icon_n,
+            "copy": copy_items, "delete": delete_items,
+            "time": time_id, "confirm": confirm_items,
+        }
 
-        mid = tk.Frame(header, bg=C["surface"])
-        mid.pack(side="left", fill="x", expand=True)
+    def _history_index_at_y(self, canvas_y: float):
+        """Row under a canvas y, in O(log n).
 
-        preview = (text[:64] + "…") if len(text) > 64 else text
-        prev_lbl = tk.Label(mid, text=preview, fg=C["text"], bg=C["surface"],
-                            font=("Segoe UI", 9), anchor="w", justify="left")
-        prev_lbl.pack(fill="x")
+        Rows are laid out top-to-bottom so their y0 values are already sorted;
+        a linear scan here ran on every single mouse-motion event and got
+        slower the longer the history was.
+        """
+        starts = self._hist_row_starts
+        if not starts:
+            return None
+        i = bisect.bisect_right(starts, canvas_y) - 1
+        if i < 0:
+            return None
+        entry = self._hist_layout[i]
+        return entry["index"] if canvas_y < entry["y1"] else None
 
-        app_lbl = None
-        if app_name:
-            app_lbl = tk.Label(mid, text=app_name, fg=C["subtext"],
-                               bg=C["surface"], font=("Segoe UI", 8),
-                               anchor="w", justify="left")
-            app_lbl.pack(fill="x")
+    def _set_history_hover(self, index) -> None:
+        if index == self._hist_hover_index:
+            return
+        cv = getattr(self, "_hist_cv", None)
+        if cv is None:
+            return
+        old = self._hist_drawn_rows.get(self._hist_hover_index)
+        if old:
+            cv.itemconfigure(old["bg"], fill=C["surface"])
+            cv.itemconfigure(old["icon"], image=old["icon_n"])
+            for part in old["delete"]:
+                # Reset the colour too — a bin left red would come back red the
+                # next time this row is hovered.
+                cv.itemconfigure(part, state="hidden", fill=C["subtext"])
+            if old["time"] is not None:      # timestamp comes back
+                cv.itemconfigure(old["time"], state="normal")
+        self._hist_bin_hot = False
+        self._hist_hover_index = index
+        row = self._hist_drawn_rows.get(index)
+        # Rows are clickable (expand/copy/delete) — show a hand as feedback.
+        try:
+            cv.configure(cursor="hand2" if row else "")
+        except tk.TclError:
+            pass
+        if not row:
+            return
+        cv.itemconfigure(row["bg"], fill=C["surface_hover"])
+        entry = self._hist_layout[index]
+        # Hover icon is fetched once per row and kept on the row dict — the
+        # old append-per-hover list grew without bound over a long session.
+        icon_h = row.get("icon_h")
+        if icon_h is None:
+            icon_h = self._history_icon(entry["item"], C["surface_hover"])
+            row["icon_h"] = icon_h
+        cv.itemconfigure(row["icon"], image=icon_h)
+        if entry["key"] != self._hist_confirm_key:
+            # Bin REPLACES the time in its slot — hide one before showing the
+            # other or the two render on top of each other.
+            if row["time"] is not None:
+                cv.itemconfigure(row["time"], state="hidden")
+            for part in row["delete"]:
+                cv.itemconfigure(part, state="normal")
 
-        # Expanded detail — full text below the header, toggled by clicking the row
-        detail = tk.Frame(row, bg=C["surface"])
-        detail_lbl = tk.Label(detail, text=text, fg=C["text"], bg=C["surface"],
-                              font=("Segoe UI", 9), anchor="w", justify="left",
-                              wraplength=310)
-        detail_lbl.pack(fill="x", padx=(46, 10), pady=(0, 10))
-        expanded = [False]
-
-        def _expand():
-            if expanded[0]:
-                return
-            prev_lbl.pack_forget()      # avoid showing the text twice
-            detail.pack(fill="x", after=header)
-            expanded[0] = True
-
-        def _collapse():
-            if not expanded[0]:
-                return
-            detail.pack_forget()
-            if app_lbl is not None:
-                prev_lbl.pack(fill="x", before=app_lbl)
-            else:
-                prev_lbl.pack(fill="x")
-            expanded[0] = False
-
-        def _toggle(_e=None):
-            if confirming[0]:
-                return  # ignore row clicks while the confirm bar is open
-            _collapse() if expanded[0] else _expand()
-
-        # Inline confirm controls — clicking the bin shows "Cancel  Delete" in
-        # the header, just LEFT of the timestamp. They're packed with the
-        # timestamp's layout priority so they never clip on long-text rows; the
-        # row still expands so the full text being deleted stays visible.
-        cancel_lbl = tk.Label(header, text="Cancel", fg=C["subtext"],
-                              bg=C["surface"], font=("Segoe UI", 9),
-                              cursor="hand2")
-
-        def _do_delete(_e=None):
-            def _worker():
-                try:
-                    if self._db:
-                        self._db.delete_transcription(item)
-                except Exception as e:
-                    print(f"[History] Delete failed: {e}")
-            threading.Thread(target=_worker, daemon=True).start()
+    def _on_history_motion(self, event) -> None:
+        cv = self._hist_cv
+        index = self._history_index_at_y(cv.canvasy(event.y))
+        self._set_history_hover(index)
+        # Bin turns red when the pointer is actually on it — the delete
+        # affordance the widget version had. Only repaints on a state change.
+        width = cv.winfo_width()
+        on_bin = (index is not None
+                  and width - 66 <= event.x < width - 34)
+        if on_bin == getattr(self, "_hist_bin_hot", False):
+            return
+        self._hist_bin_hot = on_bin
+        row = self._hist_drawn_rows.get(index)
+        if not row:
+            return
+        colour = C["error"] if on_bin else C["subtext"]
+        for part in row["delete"]:
             try:
-                self._hist_all.remove(item)
-            except ValueError:
-                pass
-            self._render_history()
-
-        del_btn = RoundedButton(header, text="Delete", fg=C["bg"],
-                                fill=C["error"], font=("Segoe UI", 9, "bold"),
-                                padx=12, pady=4, command=_do_delete)
-
-        def _cancel(_e=None):
-            confirming[0] = False
-            del_btn.pack_forget()
-            cancel_lbl.pack_forget()
-            _collapse()
-            _set_bg(C["surface"])
-
-        cancel_lbl.bind("<Button-1>", _cancel)
-
-        def _start_confirm(_e=None):
-            if confirming[0]:
+                cv.itemconfigure(part, fill=colour)
+            except tk.TclError:
                 return
-            _hide_bin()                    # bin away, timestamp back in its slot
-            confirming[0] = True
-            _expand()                      # show all the text being deleted
-            # Order left→right: Cancel, Delete, timestamp. Packed after the
-            # timestamp so they land immediately to its left with priority.
-            del_btn.pack(side="right", after=time_lbl, padx=(0, 6))
-            cancel_lbl.pack(side="right", after=del_btn, padx=(0, 8))
-            _set_bg(C["surface"])          # drop the hover highlight
 
-        del_cv.bind("<Button-1>", _start_confirm)
+    def _refresh_history_hover(self) -> None:
+        cv = getattr(self, "_hist_cv", None)
+        if not cv:
+            return
+        try:
+            px, py = cv.winfo_pointerxy()
+            x, y = px - cv.winfo_rootx(), py - cv.winfo_rooty()
+            if 0 <= x < cv.winfo_width() and 0 <= y < cv.winfo_height():
+                self._set_history_hover(
+                    self._history_index_at_y(cv.canvasy(y)))
+        except tk.TclError:
+            pass
 
-        hover_widgets = [row, header, icon_lbl, mid, prev_lbl, time_lbl,
-                         detail, detail_lbl, cancel_lbl] \
-            + ([app_lbl] if app_lbl else [])
+    def _on_history_canvas_configure(self, event) -> None:
+        if not self._history_rendered_once:
+            return
+        old = getattr(self, "_hist_canvas_width", 0)
+        self._hist_canvas_width = event.width
+        if abs(event.width - old) <= 2:
+            return
+        job = getattr(self, "_hist_resize_job", None)
+        if job is not None:
+            try:
+                self._root.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._hist_resize_job = self._root.after(30, self._render_history)
 
-        def _set_bg(bg: str):
-            if confirming[0]:
-                bg = C["surface"]          # no hover highlight during confirm
-            hover = (bg == C["surface_hover"])
-            for w in hover_widgets:
-                try:
-                    w.configure(bg=bg)
-                except tk.TclError:
-                    return  # row destroyed mid-hover (refresh/search)
-            if icon_n is not None:
-                icon_lbl.configure(image=icon_h if hover else icon_n)
-            copy_state["bg"] = bg
-            _draw_copy()
-            del_state["bg"] = bg
-            _draw_trash()
-            # The bin replaces the timestamp only while the row is hovered
-            # (and not mid-confirm).
-            if not confirming[0]:
-                _show_bin() if hover else _hide_bin()
+    def _on_history_click(self, event) -> None:
+        if getattr(self, "_hist_clear_confirm", False):
+            if 14 <= event.x <= 126 and 76 <= event.y <= 108:
+                self._clear_history()
+            elif 136 <= event.x <= 210 and 76 <= event.y <= 108:
+                self._hist_clear_confirm = False
+                self._render_history()
+            return
+        index = self._history_index_at_y(self._hist_cv.canvasy(event.y))
+        if index is None:
+            return
+        entry = self._hist_layout[index]
+        key, item = entry["key"], entry["item"]
+        width = self._hist_cv.winfo_width()
 
-        def _on_enter(_e=None):
-            _set_bg(C["surface_hover"])
+        if key == self._hist_confirm_key:
+            if width - 110 <= event.x <= width - 47:
+                self._delete_history_item(item)
+            elif width - 164 <= event.x < width - 110:
+                self._hist_confirm_key = None
+                self._hist_expanded_key = None
+                self._render_history()
+            return
+        if event.x >= width - 34:
+            text = item.get("refined_text") or item.get("transcribed_text") or ""
+            self._copy_to_clipboard(text)
+            return
+        # Bin slot = the timestamp slot (width-62 … width-40), padded a little.
+        if (width - 66 <= event.x < width - 34
+                and self._hist_hover_index == index):
+            self._hist_confirm_key = key
+            self._hist_expanded_key = key
+            self._render_history()
+            return
+        self._hist_expanded_key = None if self._hist_expanded_key == key else key
+        self._hist_confirm_key = None
+        self._render_history()
 
-        def _on_leave(_e=None):
-            # Enter/Leave also fire when crossing into child widgets — only
-            # un-hover once the pointer has genuinely left the row.
-            def _check():
-                try:
-                    x, y = row.winfo_pointerxy()
-                    rx, ry = row.winfo_rootx(), row.winfo_rooty()
-                    inside = (rx <= x < rx + row.winfo_width()
-                              and ry <= y < ry + row.winfo_height())
-                except tk.TclError:
-                    return
-                if not inside:
-                    _set_bg(C["surface"])
-            row.after(1, _check)
+    def _delete_history_item(self, item: dict) -> None:
+        def _worker():
+            try:
+                if self._db:
+                    self._db.delete_transcription(item)
+            except Exception as exc:
+                print(f"[History] Delete failed: {exc}")
 
-        for w in [row, header, icon_lbl, mid, prev_lbl] + \
-                 ([app_lbl] if app_lbl else []):
-            w.bind("<Enter>", _on_enter)
-            w.bind("<Leave>", _on_leave)
-            w.configure(cursor="hand2")
-            w.bind("<Button-1>", _toggle)
-        # time_lbl and the trash canvas keep row-hover alongside their own
-        # handlers. The bin turns red on direct hover as a delete affordance.
-        time_lbl.bind("<Enter>", _on_enter, add="+")
-        time_lbl.bind("<Leave>", _on_leave, add="+")
-        del_cv.bind("<Enter>", lambda _e: (del_state.update(fg=C["error"]),
-                                           _draw_trash(), _on_enter()))
-        del_cv.bind("<Leave>", lambda _e: (del_state.update(fg=C["subtext"]),
-                                           _draw_trash(), _on_leave()))
-        detail_lbl.bind("<Enter>", _on_enter)
-        detail_lbl.bind("<Leave>", _on_leave)
-        detail_lbl.bind("<Button-1>", _toggle)
+        threading.Thread(target=_worker, daemon=True, name="history-delete").start()
+        try:
+            self._hist_all.remove(item)
+        except ValueError:
+            pass
+        self._history_fingerprint = self._history_items_fingerprint(self._hist_all)
+        self._hist_confirm_key = None
+        self._hist_expanded_key = None
+        self._render_history()
 
     def _copy_to_clipboard(self, text: str, btn=None) -> None:
         if self._root:
@@ -1910,43 +2454,50 @@ class AppWindow:
             self._root.after(1500, lambda: btn.configure(text="⎘", fg=C["subtext"]))
 
     def _confirm_clear_history(self) -> None:
-        for w in self._hist_items.winfo_children():
-            w.destroy()
-        frame = tk.Frame(self._hist_items, bg=C["surface"])
-        frame.pack(fill="x", padx=12, pady=12)
-        tk.Label(frame, text="Delete all history?", fg=C["text"], bg=C["surface"],
-                 font=("Segoe UI", 10)).pack(anchor="w")
-        tk.Label(frame,
-                 text="Disappears from the app now; removed from the\n"
-                      "cloud after 30 days.",
-                 fg=C["subtext"], bg=C["surface"], justify="left",
-                 font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
-        btn_row = tk.Frame(frame, bg=C["surface"])
-        btn_row.pack(anchor="w", pady=(8, 0))
-        yes = RoundedButton(btn_row, text="Yes, delete all", fg=C["bg"], fill=C["error"],
-                            font=("Segoe UI", 9, "bold"), padx=14, pady=6,
-                            command=lambda: threading.Thread(
-                                target=self._clear_history, daemon=True).start())
-        yes.pack(side="left", padx=(0, 8))
-        no = RoundedButton(btn_row, text="Cancel", fg=C["subtext"], fill=C["surface_hover"],
-                           font=("Segoe UI", 9), padx=14, pady=6,
-                           command=lambda: self._load_history())
-        no.pack(side="left")
+        self._cancel_smooth_scroll(self._hist_cv)
+        self._hist_clear_confirm = True
+        cv = self._hist_cv
+        cv.delete("all")
+        cv.yview_moveto(0)
+        cv.configure(scrollregion=(0, 0, max(cv.winfo_width(), 1), 140))
+        cv.create_text(14, 14, text="Delete all history?", fill=C["text"],
+                       font=("Segoe UI", 10), anchor="nw")
+        cv.create_text(
+            14, 37,
+            text="Disappears from the app now; removed from the cloud after 30 days.",
+            fill=C["subtext"], font=("Segoe UI", 8), anchor="nw",
+            width=max(cv.winfo_width() - 28, 120))
+        _rr(cv, 14, 76, 126, 108, 8, fill=C["error"], outline="")
+        cv.create_text(70, 92, text="Yes, delete all", fill=C["bg"],
+                       font=("Segoe UI", 9, "bold"), anchor="center")
+        _rr(cv, 136, 76, 210, 108, 8, fill=C["surface_hover"], outline="")
+        cv.create_text(173, 92, text="Cancel", fill=C["subtext"],
+                       font=("Segoe UI", 9), anchor="center")
 
     def _clear_history(self) -> None:
-        if self._db:
-            self._db.clear_history()
-        self._ui_after(0, self._load_history)
+        self._hist_clear_confirm = False
+        self._hist_all = []
+        self._history_fingerprint = ()
+        self._hist_set_placeholder("No transcriptions yet.")
+
+        def _worker():
+            if self._db:
+                try:
+                    self._db.clear_history()
+                except Exception as exc:
+                    print(f"[History] Clear failed: {exc}")
+
+        threading.Thread(target=_worker, daemon=True, name="history-clear").start()
 
     # ── Settings tab ─────────────────────────────────────────────────────────
 
     def _build_settings_tab(self, parent: tk.Frame) -> None:
         # Scrollable container
         self._settings_cv = tk.Canvas(parent, bg=C["bg"], highlightthickness=0,
-                                      bd=0, yscrollincrement=24)
+                                      bd=0, yscrollincrement=1)
         self._settings_sb = ModernScrollbar(
-            parent, command=lambda *a: (self._settings_cv.yview(*a),
-                                        self._repaint(self._settings_cv)))
+            parent, command=lambda *a: self._scrollbar_command(
+                self._settings_cv, *a))
         self._settings_cv.configure(yscrollcommand=self._settings_sb.set)
         self._settings_sb.pack(side="right", fill="y")
         self._settings_cv.pack(side="left", fill="both", expand=True)
@@ -1989,6 +2540,7 @@ class AppWindow:
             ver_card, text="", fg=C["success"], bg=C["surface"],
             font=("Segoe UI", 9), anchor="w", justify="left", wraplength=320,
         )
+        self._autowrap(self._update_status_lbl)
 
         def _show_update_status(text, colour):
             self._update_status_lbl.configure(text=text, fg=colour)
@@ -2150,11 +2702,13 @@ class AppWindow:
         test_status = tk.Label(mic_card, text="", fg=C["subtext"], bg=C["surface"],
                                font=("Segoe UI", 8), anchor="w", wraplength=340)
         test_status.pack(fill="x", pady=(4, 0))
+        self._autowrap(test_status)
 
         meter_cv = tk.Canvas(mic_card, height=6, bg=C["input_bg"], highlightthickness=0)
         meter_fill_id = meter_cv.create_rectangle(0, 0, 0, 6, fill=C["success"], outline="")
 
         mic_test_active = [False]
+        mic_test_opening = [False]
         mic_test_job = [None]
         mic_test_stamp = [0]
         scan_active = [False]
@@ -2176,11 +2730,15 @@ class AppWindow:
 
         def _stop_test():
             mic_test_active[0] = False
+            mic_test_opening[0] = False
+            mic_test_stamp[0] += 1
             if mic_test_job[0]:
                 self._root.after_cancel(mic_test_job[0])
                 mic_test_job[0] = None
             if self._recorder:
-                self._recorder.stop_monitor()
+                threading.Thread(
+                    target=self._recorder.stop_monitor, daemon=True,
+                    name="mic-monitor-stop").start()
             meter_cv.pack_forget()
             meter_cv.coords(meter_fill_id, 0, 0, 0, 6)
             test_btn.configure(text="Test Mic")
@@ -2195,29 +2753,51 @@ class AppWindow:
                 return
             selected = mic_var.get()
             device_name = "" if selected == "Default" else selected
-            try:
-                self._recorder.start_monitor(device_name)
-            except Exception:
-                test_status.configure(text="Could not open mic", fg=C["error"])
-                return
-            mic_test_active[0] = True
-            meter_cv.pack(fill="x", pady=(6, 0))
-            test_btn.configure(text="Stop")
-            test_status.configure(text="Say something…", fg=C["subtext"])
-            # Stamp the auto-stop timer: a stale timer from a previous test
-            # must not kill a newly started test early.
             mic_test_stamp[0] += 1
             _stamp = mic_test_stamp[0]
-            self._root.after(
-                5000,
-                lambda: _stop_test()
-                if mic_test_active[0] and mic_test_stamp[0] == _stamp
-                else None,
-            )
-            _poll_meter()
+            mic_test_opening[0] = True
+            test_btn.configure(text="Opening…")
+            test_status.configure(text="Opening microphone…", fg=C["subtext"])
+
+            def _opened(ok: bool):
+                if _stamp != mic_test_stamp[0] or not mic_test_opening[0]:
+                    if ok:
+                        threading.Thread(
+                            target=self._recorder.stop_monitor, daemon=True,
+                            name="mic-monitor-stale-stop").start()
+                    return
+                mic_test_opening[0] = False
+                if not ok:
+                    test_btn.configure(text="Test Mic")
+                    test_status.configure(text="Could not open mic", fg=C["error"])
+                    return
+                mic_test_active[0] = True
+                meter_cv.pack(fill="x", pady=(6, 0))
+                test_btn.configure(text="Stop")
+                test_status.configure(text="Say something…", fg=C["subtext"])
+                self._root.after(
+                    5000,
+                    lambda: _stop_test()
+                    if mic_test_active[0] and mic_test_stamp[0] == _stamp
+                    else None,
+                )
+                _poll_meter()
+
+            def _open_worker():
+                try:
+                    self._recorder.start_monitor(device_name)
+                    ok = True
+                except Exception:
+                    ok = False
+                self._ui_after(0, _opened, ok)
+
+            threading.Thread(
+                target=_open_worker, daemon=True, name="mic-monitor-open").start()
 
         def _toggle_test():
             if mic_test_active[0]:
+                _stop_test()
+            elif mic_test_opening[0]:
                 _stop_test()
             else:
                 _start_test()
@@ -2345,11 +2925,13 @@ class AppWindow:
         tk.Label(vocab_card, text="Custom Vocabulary",
                  fg=C["subtext"], bg=C["surface"],
                  font=("Segoe UI", 9), anchor="w").pack(fill="x")
-        tk.Label(vocab_card,
+        _vocab_desc = tk.Label(vocab_card,
                  text="Comma-separated names, acronyms, or terms to boost (e.g. FTC, Salesforce, CRM)",
                  fg=C["subtext"], bg=C["surface"],
                  font=("Segoe UI", 8), anchor="w", justify="left",
-                 wraplength=320).pack(fill="x")
+                 wraplength=320)
+        _vocab_desc.pack(fill="x")
+        self._autowrap(_vocab_desc)
         current_vocab = (cfg.custom_vocabulary if cfg else "") or ""
         vocab_var = tk.StringVar(value=current_vocab)
         vocab_entry = tk.Entry(vocab_card, textvariable=vocab_var,
@@ -2391,10 +2973,12 @@ class AppWindow:
         tk.Label(label_col, text="Sound Feedback",
                  fg=C["text"], bg=C["surface"],
                  font=("Segoe UI", 9), anchor="w").pack(anchor="w")
-        tk.Label(label_col, text="Beeps when recording starts, stops, and transcription finishes",
+        _sound_desc = tk.Label(label_col, text="Beeps when recording starts, stops, and transcription finishes",
                  fg=C["subtext"], bg=C["surface"],
                  font=("Segoe UI", 8), anchor="w", justify="left",
-                 wraplength=260).pack(anchor="w")
+                 wraplength=260)
+        _sound_desc.pack(fill="x")
+        self._autowrap(_sound_desc)
 
         # ── Live captions ─────────────────────────────────────────────────────
         cap_card = self._card(parent, margin=(0, 4))
@@ -2420,10 +3004,12 @@ class AppWindow:
         tk.Label(caps_col, text="Live Captions",
                  fg=C["text"], bg=C["surface"],
                  font=("Segoe UI", 9), anchor="w").pack(anchor="w")
-        tk.Label(caps_col, text="Show the words you're saying in real time (replaces the waveform bar while recording)",
+        _caps_desc = tk.Label(caps_col, text="Show the words you're saying in real time (replaces the waveform bar while recording)",
                  fg=C["subtext"], bg=C["surface"],
                  font=("Segoe UI", 8), anchor="w", justify="left",
-                 wraplength=260).pack(anchor="w")
+                 wraplength=260)
+        _caps_desc.pack(fill="x")
+        self._autowrap(_caps_desc)
 
         # ── Behaviour toggles (auto_punctuate, trailing_space, auto_enter) ─────
         def _toggle_card(key: str, title: str, subtext: str, default: bool):
@@ -2439,9 +3025,11 @@ class AppWindow:
             col = tk.Frame(row, bg=C["surface"]); col.pack(side="left", fill="x", expand=True)
             tk.Label(col, text=title, fg=C["text"], bg=C["surface"],
                      font=("Segoe UI", 9), anchor="w").pack(anchor="w")
-            tk.Label(col, text=subtext, fg=C["subtext"], bg=C["surface"],
+            desc = tk.Label(col, text=subtext, fg=C["subtext"], bg=C["surface"],
                      font=("Segoe UI", 8), anchor="w", justify="left",
-                     wraplength=260).pack(anchor="w")
+                     wraplength=260)
+            desc.pack(fill="x")
+            self._autowrap(desc)
 
         _toggle_card("auto_punctuate", "Auto Punctuation",
                      "Add a trailing period when speech ends without ending punctuation", True)
@@ -2645,13 +3233,15 @@ class AppWindow:
                 "when FTC Whisper is idle."
                 if auto else f"Update {version} is ready to install."
             )
-            tk.Label(
+            _banner_lbl = tk.Label(
                 card,
                 text=banner_text,
                 fg=C["accent"], bg=C["surface"],
                 font=("Segoe UI", 10, "bold"), anchor="w", justify="left",
                 wraplength=320,
-            ).pack(fill="x")
+            )
+            _banner_lbl.pack(fill="x")
+            self._autowrap(_banner_lbl)
 
             banner_btn = RoundedButton(
                 card,
@@ -2818,6 +3408,10 @@ class AppWindow:
         self._root.withdraw()
 
     def _resize(self, w: int, h: int) -> None:
+        # Record the programmatic size FIRST: the geometry call fires
+        # <Configure> synchronously and _on_root_configure must not read it
+        # as a user drag.
+        self._applied_size = (w, h)
         sw = self._root.winfo_screenwidth()
         sh = self._root.winfo_screenheight()
         x  = (sw - w) // 2
@@ -2828,19 +3422,32 @@ class AppWindow:
 
     def _card(self, parent: tk.Frame, inner_pad=(18, 14),
               radius: int = 10, margin=(0, 8)) -> tk.Frame:
-        """Return an inner Frame sitting inside a rounded-corner Canvas card."""
+        """Return an inner Frame sitting inside a rounded-corner Canvas card.
+
+        Geometry sync is coalesced to ONE after_idle pass per layout change.
+        The old handler called update_idletasks() inside <Configure>, which
+        re-entered the layout engine mid-blit and was the direct cause of the
+        torn/ghosted settings page (duplicated rows, stray floating labels).
+        """
         cv = tk.Canvas(parent, bg=C["bg"], highlightthickness=0, bd=0)
         cv.pack(fill="x", padx=20, pady=margin)
         px, py = inner_pad
         inner = tk.Frame(cv, bg=C["surface"])
         wid = cv.create_window(px, py, window=inner, anchor="nw")
+        state = {"job": None, "last": (0, 0)}
 
-        def sync(_=None):
-            cv.update_idletasks()
-            cw = cv.winfo_width()
-            fh = inner.winfo_reqheight()
-            if cw < 2:
+        def _sync_now():
+            state["job"] = None
+            try:
+                cw = cv.winfo_width()
+                fh = inner.winfo_reqheight()
+            except tk.TclError:
                 return
+            if cw < 2 or fh < 2:
+                return
+            if (cw, fh) == state["last"]:
+                return  # settled — skip the redraw and stop the Configure echo
+            state["last"] = (cw, fh)
             ch = fh + 2 * py
             cv.configure(height=ch)
             cv.coords(wid, px, py)
@@ -2849,6 +3456,13 @@ class AppWindow:
             _rr(cv, 0, 0, cw - 1, ch - 1, radius,
                 fill=C["surface"], outline=C["border"], tags="bg")
             cv.tag_lower("bg")
+
+        def sync(_=None):
+            if state["job"] is None:
+                try:
+                    state["job"] = cv.after_idle(_sync_now)
+                except tk.TclError:
+                    pass
 
         cv.bind("<Configure>", sync)
         inner.bind("<Configure>", sync)
@@ -2865,6 +3479,26 @@ class AppWindow:
         btn.bind("<Enter>", lambda _e: btn.configure(bg=C["accent"], fg=C["bg"]))
         btn.bind("<Leave>", lambda _e: btn.configure(bg=C["surface_hover"], fg=C["text"]))
         return btn
+
+    @staticmethod
+    def _autowrap(lbl: tk.Label, pad: int = 4) -> tk.Label:
+        """Keep a Label's wraplength tracking its real width so text reflows
+        when the window is resized (fixed wraplengths either clipped at narrow
+        widths or wasted space at wide ones). The label must be packed with
+        fill='x' so its width follows the card."""
+        state = {"w": 0}
+
+        def _on_cfg(e):
+            w = max(e.width - pad, 60)
+            if abs(w - state["w"]) > 2:
+                state["w"] = w
+                try:
+                    lbl.configure(wraplength=w)
+                except tk.TclError:
+                    pass
+
+        lbl.bind("<Configure>", _on_cfg)
+        return lbl
 
     def _ghost_btn(self, parent, text, cmd) -> tk.Label:
         btn = tk.Label(

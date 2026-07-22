@@ -157,6 +157,7 @@ class WhisperFlowApp:
         )
 
         self._recording_hwnd: int = 0
+        self._recording_app = None
         self._mic_loop_running = threading.Event()
         self._mic_level_smooth = 0.0
 
@@ -531,21 +532,21 @@ class WhisperFlowApp:
         if self.hotkey_manager.state == AppState.RECORDING:
             self._on_cancel_recording()
         self.config.hotkey = new_hotkey
-        self.config.save()
+        self.config.save_async()
         self.hotkey_manager.update_hotkey(new_hotkey)
 
     def _on_refine_hotkey_change(self, new_hotkey: str) -> None:
         """Called when the user saves a new refine hotkey in the dashboard."""
         print(f"[App] Updating refine hotkey to: {new_hotkey}")
         self.config.refine_hotkey = new_hotkey
-        self.config.save()
+        self.config.save_async()
         self.refine_hotkey_manager.update_hotkey(new_hotkey)
 
     def _on_settings_change(self, key: str, value) -> None:
         """Called when the user saves a setting in the Settings panel."""
         print(f"[App] Setting changed: {key} = {value!r}")
         setattr(self.config, key, value)
-        self.config.save()
+        self.config.save_async()
         if key == "anthropic_api_key":
             self.ai_refiner.update_api_key(value)
             self.popup.set_ai_refiner(self.ai_refiner)
@@ -678,25 +679,35 @@ class WhisperFlowApp:
     def _on_start_recording(self) -> None:
         self._last_dictation_ts = time.time()
         try:
+            # _on_state_change captures the target synchronously on the hotkey
+            # thread. Preserve that snapshot: by the time this daemon callback
+            # runs, focus may already have moved to the popup or another window.
+            # These reads are fallback-only if the normal capture was missing.
             try:
-                self._recording_hwnd = ctypes.windll.user32.GetForegroundWindow()
+                if not self._recording_hwnd:
+                    self._recording_hwnd = ctypes.windll.user32.GetForegroundWindow()
                 print(f"[App] Recording started, target hwnd={self._recording_hwnd:#x}")
             except Exception:
-                self._recording_hwnd = 0
-            # Capture the target app identity NOW — browser tab titles change
-            # constantly, so this can't be resolved later at log time.
+                if not getattr(self, "_recording_hwnd", 0):
+                    self._recording_hwnd = 0
+            # If the synchronous identity lookup failed, retry against its
+            # preserved HWND rather than whichever window is foreground now.
             try:
-                from app_icons import capture_app_info
-                self._recording_app = capture_app_info(self._recording_hwnd)
+                _app_snapshot = getattr(self, "_recording_app", None) or {}
+                if not (_app_snapshot.get("app_name") or _app_snapshot.get("app_exe")):
+                    from app_icons import capture_app_info
+                    self._recording_app = capture_app_info(self._recording_hwnd)
             except Exception:
-                self._recording_app = {"app_name": "", "app_exe": ""}
+                if not getattr(self, "_recording_app", None):
+                    self._recording_app = {"app_name": "", "app_exe": ""}
             # Capture mouse position now — user is hovering near the target text field
-            try:
-                pt = ctypes.wintypes.POINT()
-                ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-                self._rec_cursor_x, self._rec_cursor_y = pt.x, pt.y
-            except Exception:
-                self._rec_cursor_x, self._rec_cursor_y = 0, 0
+            if not (hasattr(self, "_rec_cursor_x") and hasattr(self, "_rec_cursor_y")):
+                try:
+                    pt = ctypes.wintypes.POINT()
+                    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+                    self._rec_cursor_x, self._rec_cursor_y = pt.x, pt.y
+                except Exception:
+                    self._rec_cursor_x, self._rec_cursor_y = 0, 0
             # Start capture FIRST, beep second — the beep is the user's cue to
             # speak, so audio must already be flowing when they hear it. (With
             # the warm mic this also captures ~0.35s of pre-roll.)
@@ -1575,7 +1586,14 @@ class WhisperFlowApp:
         self.injector.inject(new_text)
         print(f"[App] Replaced with refined text: '{new_text}'")
         if original_text:
-            self.db.log_refinement(original_text, new_text, "replace")
+            _app = getattr(self, "_recording_app", None) or {}
+            self.db.log_refinement(
+                original_text,
+                new_text,
+                "replace",
+                app_name=_app.get("app_name", ""),
+                app_exe=_app.get("app_exe", ""),
+            )
 
     def _on_refine_selection(self) -> None:
         """Fires when the refine-selection hotkey is pressed."""

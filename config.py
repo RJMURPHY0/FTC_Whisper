@@ -12,6 +12,8 @@ import json
 import os
 import shutil
 import sys
+import threading
+import time
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
@@ -46,6 +48,11 @@ _SHARED_SUPABASE_URL = "https://ijeeghdxokfvlfarojlm.supabase.co"
 _SHARED_SUPABASE_KEY = "sb_publishable_G96rQQGq8BEtutrsdusjlQ_R0WxNzFw"
 _LEGACY_SUPABASE_URLS = ("https://mbxwqtsesxgpcfyicphs.supabase.co",)
 
+# User-driven settings often arrive in a short burst (the Settings save button,
+# for example, updates several fields back-to-back). Give those calls one tiny
+# quiet window so they collapse into a single atomic disk flush.
+_ASYNC_SAVE_DEBOUNCE_S = 0.03
+
 
 @dataclass
 class Config:
@@ -77,6 +84,10 @@ class Config:
     auto_enter: bool = False      # Press Enter after injection (useful for chat/search boxes)
     toggle_timeout: int = 0       # Seconds before auto-stopping in toggle mode (0 = disabled; long dictation must not be cut off)
     max_recording_duration: int = 0  # Hard cap on recording length in seconds (0 = unlimited)
+    # Dashboard window size per signed-in account: {email_lower: "WxH"}.
+    # "_default" holds the install-time default (super admin's pushed size,
+    # read once from app_settings on a fresh install; never refetched).
+    window_sizes: dict = field(default_factory=dict)
     supabase_url: str = ""  # Optional — enables transcription logging
     supabase_key: str = ""  # Publishable (anon) key
     supabase_email: str = ""  # Account email for silent background auth
@@ -88,6 +99,58 @@ class Config:
     # app.py surfaces it as a visible notification once the tray/UI is up.
     _load_warning: str = field(default="", repr=False)
 
+    def __post_init__(self) -> None:
+        # Runtime-only synchronisation state. These are deliberately not
+        # dataclass fields, so asdict() never tries to serialise/copy locks or a
+        # live Thread into config.json.
+        self._save_state_lock = threading.Lock()
+        self._save_condition = threading.Condition(self._save_state_lock)
+        self._save_io_lock = threading.Lock()
+        self._save_pending = None
+        self._save_thread = None
+        self._save_sequence = 0
+        self._save_last_written_sequence = 0
+        self._save_last_error = None
+
+    def _save_snapshot(self) -> tuple[dict, str]:
+        """Capture the public configuration values for one disk write."""
+        data = asdict(self)
+        data.pop("_config_path", None)
+        data.pop("_load_warning", None)
+        return data, self._config_path or get_config_path()
+
+    def _write_snapshot(self, sequence: int, data: dict, path: str) -> None:
+        """Serialise one snapshot atomically, skipping an already-stale write."""
+        # A synchronous save and the coalescing worker may overlap. Serialising
+        # the complete temp-write/fsync/replace transaction prevents them from
+        # sharing or replacing each other's temp file.
+        with self._save_io_lock:
+            with self._save_condition:
+                if sequence < self._save_last_written_sequence:
+                    return
+
+            # Include the request sequence in the temp name. This also avoids
+            # colliding with a stale temp file left by an interrupted older save.
+            tmp = f"{path}.{os.getpid()}.{sequence}.tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, path)  # atomic on Windows + POSIX
+                with self._save_condition:
+                    self._save_last_written_sequence = max(
+                        self._save_last_written_sequence, sequence
+                    )
+                    self._save_last_error = None
+            except Exception:
+                try:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except OSError:
+                    pass
+                raise
+
     def save(self) -> None:
         """Persist current settings to disk atomically.
 
@@ -96,24 +159,87 @@ class Config:
         truncated/corrupt config.json (which would silently reset every setting
         to defaults on the next load).
         """
-        data = asdict(self)
-        data.pop("_config_path", None)
-        data.pop("_load_warning", None)
-        path = self._config_path or get_config_path()
-        tmp = f"{path}.{os.getpid()}.tmp"
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, path)  # atomic on Windows + POSIX
-        except Exception:
+        with self._save_condition:
+            data, path = self._save_snapshot()
+            self._save_sequence += 1
+            sequence = self._save_sequence
+        self._write_snapshot(sequence, data, path)
+
+    def save_async(self) -> None:
+        """Coalesce and persist user-driven changes without blocking the caller.
+
+        Only the latest snapshot in a burst is kept. The short-lived writer is
+        intentionally non-daemon: normal interpreter shutdown waits for its
+        final fsync/replace, so a setting acknowledged by the UI is not silently
+        lost if the app closes immediately afterwards.
+        """
+        with self._save_condition:
+            data, path = self._save_snapshot()
+            self._save_sequence += 1
+            sequence = self._save_sequence
+            self._save_pending = (sequence, data, path)
+            self._save_pending_at = time.monotonic()
+
+            worker = self._save_thread
+            if worker is None or not worker.is_alive():
+                worker = threading.Thread(
+                    target=self._async_save_worker,
+                    daemon=False,
+                    name="config-save",
+                )
+                self._save_thread = worker
+                worker.start()
+            self._save_condition.notify_all()
+
+    def _async_save_worker(self) -> None:
+        while True:
+            with self._save_condition:
+                if self._save_pending is None:
+                    self._save_thread = None
+                    self._save_condition.notify_all()
+                    return
+
+                # Restart the quiet window whenever another save_async() call
+                # replaces the pending snapshot.
+                remaining = (
+                    self._save_pending_at + _ASYNC_SAVE_DEBOUNCE_S
+                    - time.monotonic()
+                )
+                if remaining > 0:
+                    self._save_condition.wait(remaining)
+                    continue
+
+                request = self._save_pending
+                self._save_pending = None
+
+            sequence, data, path = request
             try:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
-            except OSError:
-                pass
-            raise
+                self._write_snapshot(sequence, data, path)
+            except Exception as e:
+                with self._save_condition:
+                    self._save_last_error = e
+                print(f"[Config] Async save failed: {e}")
+
+    def flush_async(self, timeout: Optional[float] = None) -> bool:
+        """Wait for queued async saves; useful for orderly shutdown and tests."""
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        while True:
+            with self._save_condition:
+                worker = self._save_thread
+            if worker is None:
+                return True
+            if worker is threading.current_thread():
+                return False
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            worker.join(remaining)
+            if worker.is_alive():
+                return False
+            # Normally the worker clears this reference itself. Also recover
+            # from an unexpected worker-level failure so an unbounded flush can
+            # never spin forever joining the same dead Thread.
+            with self._save_condition:
+                if self._save_thread is worker:
+                    self._save_thread = None
 
     @classmethod
     def load(cls, path: Optional[str] = None) -> "Config":

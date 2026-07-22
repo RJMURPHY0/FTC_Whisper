@@ -68,7 +68,7 @@ _KNOWN_APPS = {
     "outlook": "Outlook", "olk": "Outlook", "onenote": "OneNote",
     "ms-teams": "Teams", "teams": "Teams",
     "slack": "Slack", "discord": "Discord", "telegram": "Telegram",
-    "whatsapp": "WhatsApp", "signal": "Signal",
+    "whatsapp": "WhatsApp", "whatsapp.root": "WhatsApp", "signal": "Signal",
     "claude": "Claude", "chatgpt": "ChatGPT",
     "notepad": "Notepad", "notepad++": "Notepad++",
     "explorer": "File Explorer",
@@ -88,13 +88,45 @@ _HOST_PROCESSES = {"applicationframehost"}
 # Browser stems — their window title carries the site/tab name, which is a far
 # better label than "Chrome" (e.g. "Claude", "Gmail").
 _BROWSERS = {"chrome", "msedge", "firefox", "brave", "opera", "opera_gx",
-             "arc", "vivaldi"}
+             "arc", "vivaldi", "zen"}
 # Suffixes browsers append to the page title
 _BROWSER_SUFFIXES = (
     " - Google Chrome", " - Microsoft​ Edge", " - Microsoft Edge",
     " — Mozilla Firefox", " - Mozilla Firefox", " - Brave", " - Opera",
-    " - Vivaldi", " - Arc",
+    " - Opera GX", " - Vivaldi", " - Arc", " - Zen Browser", " - Zen",
 )
+
+# Browser titles are presentation text, not identifiers. Resolve well-known
+# services before shortening the remaining title so hyphen/em-dash variations
+# (and titles such as "Ask Jack AI — #1 AI Auto") remain stable.
+_BROWSER_SERVICES = (
+    ("ask jack ai", "Ask Jack AI"), ("ask jack", "Ask Jack AI"),
+    ("google chatgpt", "ChatGPT"), ("chat gpt", "ChatGPT"),
+    ("chatgpt", "ChatGPT"), ("claude ai", "Claude"), ("claude", "Claude"),
+    ("google gemini", "Gemini"), ("gemini", "Gemini"),
+    ("microsoft copilot", "Copilot"), ("copilot", "Copilot"),
+    ("perplexity ai", "Perplexity"), ("perplexity", "Perplexity"),
+    ("google docs", "Google Docs"), ("google drive", "Google Drive"),
+    ("google mail", "Gmail"), ("gmail", "Gmail"),
+    ("outlook web", "Outlook"), ("outlook", "Outlook"),
+    ("microsoft teams", "Teams"), ("teams", "Teams"),
+    ("stack overflow", "Stack Overflow"), ("github", "GitHub"),
+    ("gitlab", "GitLab"), ("linkedin", "LinkedIn"),
+    ("whatsapp web", "WhatsApp"), ("whatsapp", "WhatsApp"),
+    ("youtube", "YouTube"), ("reddit", "Reddit"),
+    ("notion", "Notion"), ("figma", "Figma"), ("linear", "Linear"),
+    ("slack", "Slack"), ("discord", "Discord"),
+)
+_GENERIC_BROWSER_TITLES = {
+    "", "new tab", "new private tab", "new incognito tab", "start page",
+    "about blank", "about:blank",
+}
+_BROWSER_PRODUCT_TITLES = {
+    "google chrome", "microsoft edge", "mozilla firefox", "firefox",
+    "brave", "brave browser", "opera", "opera gx", "vivaldi", "arc",
+    "arc browser", "zen", "zen browser",
+}
+_TITLE_SEP_RE = re.compile(r"\s*(?:[-\u2010-\u2015]|[|•·])\s*")
 
 
 def _pid_for_hwnd(hwnd: int) -> int:
@@ -184,18 +216,39 @@ def _window_title(hwnd: int) -> str:
 
 
 def _browser_service_label(title: str) -> str:
-    """'New chat - Claude - Google Chrome' -> 'Claude'.
-    Sites put their name LAST in the title, so after stripping the browser
-    suffix take the final ' - ' segment."""
-    t = title
+    """Resolve a browser title to a stable service/display label."""
+    t = re.sub(r"[\u200b-\u200d\ufeff]", "", title or "").strip()
     for suf in _BROWSER_SUFFIXES:
-        if t.endswith(suf):
+        if t.casefold().endswith(suf.casefold()):
             t = t[: -len(suf)]
             break
     t = t.strip()
-    if " - " in t:
-        t = t.rsplit(" - ", 1)[-1].strip()
-    return t[:24]
+    segments = [part.strip() for part in _TITLE_SEP_RE.split(t) if part.strip()]
+
+    def _words(value: str) -> str:
+        return " ".join(re.findall(r"[a-z0-9]+", value.casefold()))
+
+    # Product suffixes are not consistent about which dash they use. Removing
+    # the final browser-name segment after tokenisation handles ASCII hyphens,
+    # en/em dashes and vertical bars without maintaining every combination.
+    if segments and _words(segments[-1]) in _BROWSER_PRODUCT_TITLES:
+        segments.pop()
+        if not segments:
+            return ""
+
+    # Search right-to-left because browsers conventionally place the service
+    # name at the end, while still supporting "ChatGPT — release notes".
+    for segment in reversed(segments or [t]):
+        words = _words(segment)
+        for alias, label in _BROWSER_SERVICES:
+            if (words == alias or words.startswith(alias + " ")
+                    or words.endswith(" " + alias)):
+                return label
+
+    candidate = (segments[-1] if segments else t).strip()
+    if _words(candidate) in _GENERIC_BROWSER_TITLES:
+        return ""
+    return candidate[:24]
 
 
 def capture_app_info(hwnd: int) -> dict:
@@ -222,7 +275,8 @@ def capture_app_info(hwnd: int) -> dict:
 
 # ── Icon extraction (HICON -> PIL -> tk PhotoImage) ──────────────────────────
 
-_icon_cache: dict = {}   # (exe_lower, bg) -> PhotoImage | None
+_raw_icon_cache: dict = {}  # executable signature -> successful RGBA PIL image
+_icon_cache: dict = {}      # (executable signature, bg) -> successful PhotoImage
 _fallback_cache: dict = {}  # bg -> PhotoImage
 
 
@@ -365,18 +419,41 @@ def _extract_exe_icon(exe_path: str):
         return _extract_via_extracticon(exe_path)
 
 
+def _exe_icon_cache_key(exe_path: str) -> tuple:
+    """Path plus file signature, so an in-place app update gets a fresh icon."""
+    path = os.path.normcase(os.path.normpath(exe_path or ""))
+    try:
+        stat = os.stat(exe_path)
+        return path, stat.st_mtime_ns, stat.st_size
+    except Exception:
+        return path, None, None
+
+
+def _get_raw_exe_icon(exe_path: str):
+    """Extract once per executable version; failed attempts are never cached."""
+    key = _exe_icon_cache_key(exe_path)
+    cached = _raw_icon_cache.get(key)
+    if cached is not None:
+        return cached
+    src = _extract_exe_icon(exe_path)
+    if src is not None:
+        _raw_icon_cache[key] = src
+    return src
+
+
 def get_app_icon(exe_path: str, bg: str):
     """tk PhotoImage of the exe's icon composited onto bg. None on failure.
     Caller must keep a reference (tk requirement); the cache does that."""
     if not exe_path:
         return None
-    key = (exe_path.lower(), bg)
+    exe_key = _exe_icon_cache_key(exe_path)
+    key = (exe_key, bg)
     if key in _icon_cache:
         return _icon_cache[key]
     photo = None
     try:
         from PIL import Image, ImageTk
-        src = _extract_exe_icon(exe_path)
+        src = _get_raw_exe_icon(exe_path)
         if src is not None:
             src = src.resize((_ICON_SIZE, _ICON_SIZE), Image.LANCZOS)
             base = Image.new("RGBA", src.size, bg)
@@ -384,7 +461,10 @@ def get_app_icon(exe_path: str, bg: str):
             photo = ImageTk.PhotoImage(base.convert("RGB"))
     except Exception:
         photo = None
-    _icon_cache[key] = photo
+    # Do not permanently poison this path/background after a transient shell,
+    # file-system or Tk initialisation failure. A later render gets to retry.
+    if photo is not None:
+        _icon_cache[key] = photo
     return photo
 
 
@@ -394,7 +474,7 @@ def get_app_icon(exe_path: str, bg: str):
 # browser-hosted web app (Claude, ChatGPT, Gemini, Gmail…) — there the captured
 # exe is the browser, so exe-icon extraction can only ever yield the browser's
 # icon. For native apps not in this pack, exe extraction still applies.
-_brand_icon_cache: dict = {}  # (slug, bg) -> PhotoImage | None
+_brand_icon_cache: dict = {}  # (slug, bg) -> successful PhotoImage
 
 # Rendering tunables for brand icons (see get_brand_icon):
 _BRAND_TILE_OPAQUE = 0.72   # ≥ this opaque fraction ⇒ treat as full-bleed tile
@@ -506,11 +586,12 @@ def get_brand_icon(app_name: str, bg: str):
         photo = ImageTk.PhotoImage(base.convert("RGB"))
     except Exception:
         photo = None
-    _brand_icon_cache[key] = photo
+    if photo is not None:
+        _brand_icon_cache[key] = photo
     return photo
 
 
-_monogram_cache: dict = {}  # (letter, bg) -> PhotoImage | None
+_monogram_cache: dict = {}  # (normalised full app name, bg) -> PhotoImage | None
 
 # Stable, pleasant tile colours picked by hashing the app name — so "Claude"
 # is always the same colour, "Outlook" another, etc.
@@ -519,6 +600,10 @@ _MONOGRAM_COLORS = [
     "#4a7edb", "#3fae6f", "#c85c9e", "#d9534f", "#6f6fd6",
     "#2fa8a8", "#e0a52e", "#8a6fd6", "#5c8a3f", "#d67f4a",
 ]
+
+
+def _monogram_cache_key(app_name: str, bg: str) -> tuple[str, str]:
+    return (app_name or "").strip().casefold(), bg
 
 
 def get_monogram_icon(app_name: str, bg: str):
@@ -530,7 +615,7 @@ def get_monogram_icon(app_name: str, bg: str):
     if not name:
         return None
     letter = name[0].upper()
-    key = (letter, bg)
+    key = _monogram_cache_key(name, bg)
     if key in _monogram_cache:
         return _monogram_cache[key]
     photo = None
@@ -564,7 +649,8 @@ def get_monogram_icon(app_name: str, bg: str):
         photo = ImageTk.PhotoImage(img.convert("RGB"))
     except Exception:
         photo = None
-    _monogram_cache[key] = photo
+    if photo is not None:
+        _monogram_cache[key] = photo
     return photo
 
 
@@ -592,5 +678,6 @@ def get_fallback_icon(bg: str):
         photo = ImageTk.PhotoImage(img.convert("RGB"))
     except Exception:
         photo = None
-    _fallback_cache[bg] = photo
+    if photo is not None:
+        _fallback_cache[bg] = photo
     return photo
