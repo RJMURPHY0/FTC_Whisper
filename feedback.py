@@ -1,17 +1,92 @@
 """
 Visual and audio feedback for the application.
 Plays sounds on recording start/stop and manages tray icon state changes.
+
+Sounds are soft sine blips (generated once in memory, played async via
+winsound.PlaySound) rather than winsound.Beep: Beep is a raw square wave at
+full volume, which reads as a long, harsh, high-pitched alarm. The blips are
+quiet, faded in/out, and short — unobtrusive but clearly audible.
 """
 
+import io
+import math
+import struct
 import sys
 import threading
+import wave
 from typing import Callable, Optional
 
 from error_reporter import report_error
 
+_SR = 22050  # sample rate for generated blips — plenty for simple sines
+
+
+def _tone(frequency: float, ms: float, volume: float = 0.22,
+          fade_ms: float = 12.0) -> list:
+    """One soft sine tone with attack/release fades (no clicks, no harshness)."""
+    n = int(_SR * ms / 1000)
+    fade = max(1, int(_SR * fade_ms / 1000))
+    out = []
+    for i in range(n):
+        env = 1.0
+        if i < fade:
+            env = i / fade
+        elif i > n - fade:
+            env = max(0.0, (n - i) / fade)
+        out.append(math.sin(2 * math.pi * frequency * i / _SR) * volume * env)
+    return out
+
+
+def _silence(ms: float) -> list:
+    return [0.0] * int(_SR * ms / 1000)
+
+
+def _wav_bytes(samples: list) -> bytes:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(_SR)
+        w.writeframes(b"".join(
+            struct.pack("<h", int(max(-1.0, min(1.0, s)) * 32767))
+            for s in samples))
+    return buf.getvalue()
+
+
+_SOUND_CACHE: dict = {}
+
+
+def _get_sound(name: str) -> bytes:
+    """Lazily build and cache one notification blip. Built off the UI thread
+    (callers are daemon threads), ~1ms of pure-python sine maths."""
+    if name not in _SOUND_CACHE:
+        recipes = {
+            # start: gentle rising two-note (E5 → G5) — "listening"
+            "start": _tone(659, 70) + _silence(15) + _tone(784, 85),
+            # stop: the same pair descending — "got it"
+            "stop": _tone(784, 70) + _silence(15) + _tone(659, 85),
+            # done: two very soft short blips
+            "done": (_tone(880, 55, volume=0.15) + _silence(45)
+                     + _tone(880, 55, volume=0.15)),
+            # error: one low, quiet buzz — noticeable, not alarming
+            "error": _tone(233, 220, volume=0.20),
+        }
+        _SOUND_CACHE[name] = _wav_bytes(recipes[name])
+    return _SOUND_CACHE[name]
+
+
+def _play_sound(name: str) -> None:
+    """Play a named blip asynchronously (Windows only, never raises)."""
+    try:
+        import winsound
+        winsound.PlaySound(_get_sound(name),
+                           winsound.SND_MEMORY | winsound.SND_ASYNC)
+    except Exception:
+        _play_beep(700, 90)  # last-resort fallback rather than going silent
+
 
 def _play_beep(frequency: int = 800, duration_ms: int = 150) -> None:
-    """Play a short beep sound (Windows only)."""
+    """Play a short beep sound (Windows only). Fallback path only."""
     try:
         import winsound
         winsound.Beep(frequency, duration_ms)
@@ -23,10 +98,10 @@ class Feedback:
     """
     Provides audio and visual feedback for app state changes.
 
-    Audio:
-        - High beep on recording start
-        - Low beep on recording stop
-        - Double beep on transcription complete
+    Audio (soft notification blips, not raw beeps):
+        - Rising two-note blip on recording start
+        - Falling two-note blip on recording stop
+        - Quiet double blip on transcription complete
 
     Visual:
         - Delegates icon updates to a tray callback
@@ -58,7 +133,7 @@ class Feedback:
 
         if self.sound_enabled:
             threading.Thread(
-                target=_play_beep, args=(1000, 100), daemon=True
+                target=_play_sound, args=("start",), daemon=True
             ).start()
 
     def recording_stopped(self) -> None:
@@ -68,7 +143,7 @@ class Feedback:
 
         if self.sound_enabled:
             threading.Thread(
-                target=_play_beep, args=(600, 100), daemon=True
+                target=_play_sound, args=("stop",), daemon=True
             ).start()
 
     def transcription_complete(self, text: str) -> None:
@@ -77,12 +152,11 @@ class Feedback:
             self.on_icon_change("idle")
 
         if self.sound_enabled:
-            def _double_beep():
-                _play_beep(800, 80)
-                import time
-                time.sleep(0.05)
-                _play_beep(1000, 80)
-            threading.Thread(target=_double_beep, daemon=True).start()
+            # The gap between the two blips is baked into the wav itself, so
+            # one async play does the whole figure without a sleeping thread.
+            threading.Thread(
+                target=_play_sound, args=("done",), daemon=True
+            ).start()
 
     def error_occurred(self, error: str) -> None:
         """Called when an error occurs during recording/transcription."""
@@ -92,7 +166,7 @@ class Feedback:
         if self.sound_enabled:
             # Low buzz for error
             threading.Thread(
-                target=_play_beep, args=(300, 300), daemon=True
+                target=_play_sound, args=("error",), daemon=True
             ).start()
 
         print(f"[Feedback] Error: {error}")

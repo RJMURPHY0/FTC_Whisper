@@ -624,6 +624,13 @@ class AppWindow:
             style = u32.GetWindowLongW(hwnd, GWL_EXSTYLE)
             if not (style & WS_EX_COMPOSITED):
                 u32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_COMPOSITED)
+                # SetWindowLong only STORES the bit; Windows keeps painting
+                # with the cached frame data until a SWP_FRAMECHANGED forces it
+                # to re-read the style. Without this the window read back as
+                # composited while still tearing exactly as before.
+                SWP_FLAGS = 0x0037  # NOSIZE|NOMOVE|NOZORDER|NOACTIVATE|FRAMECHANGED
+                u32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_FLAGS)
+                print("[AppWindow] Composited window enabled.")
         except Exception:
             pass
 
@@ -1847,6 +1854,10 @@ class AppWindow:
         try:
             cv.yview_moveto(state["current"] / content_h)
             # History is one native canvas and needs no descendant repaint.
+            # Widget-embedding canvases keep this even with compositing on:
+            # the repaint is the self-heal for any blit residue, and skipping
+            # it let torn pixels PERSIST on machines where the composited
+            # style failed to engage.
             if cv is not getattr(self, "_hist_cv", None):
                 self._repaint(cv)
         except tk.TclError:
@@ -2514,7 +2525,11 @@ class AppWindow:
         cfg = self._config
 
         # ── Updates — deliberately first in Settings ─────────────────────────
-        ver_card = self._card(parent, margin=(0, 4))
+        # ONE compact card carries everything update-related: the check link,
+        # version + status sharing a single line, and (only when an update
+        # exists) an Update Now button. The old separate banner card below
+        # duplicated the same message and doubled the vertical space.
+        ver_card = self._card(parent, margin=(0, 4), inner_pad=(18, 10))
         ver_header = tk.Frame(ver_card, bg=C["surface"])
         ver_header.pack(fill="x")
         tk.Label(ver_header, text="Updates",
@@ -2529,22 +2544,25 @@ class AppWindow:
         )
         self._update_check_btn.pack(side="right")
 
+        ver_row = tk.Frame(ver_card, bg=C["surface"])
+        ver_row.pack(fill="x", pady=(3, 0))
         ver_lbl_text = f"Version {self._version}" if self._version else "FTC Whisper"
-        tk.Label(ver_card, text=ver_lbl_text,
+        tk.Label(ver_row, text=ver_lbl_text,
                  fg=C["text"], bg=C["surface"],
-                 font=("Segoe UI", 10), anchor="w").pack(fill="x", pady=(6, 0))
+                 font=("Segoe UI", 10), anchor="w").pack(side="left")
 
-        # Status gets its own full-width line so even failure messages remain
-        # completely readable at the app's narrow fixed width.
+        # Status lives on the version line; long messages wrap in place
+        # (autowrap) instead of claiming a permanent extra row.
         self._update_status_lbl = tk.Label(
-            ver_card, text="", fg=C["success"], bg=C["surface"],
-            font=("Segoe UI", 9), anchor="w", justify="left", wraplength=320,
+            ver_row, text="", fg=C["success"], bg=C["surface"],
+            font=("Segoe UI", 9), anchor="w", justify="left",
         )
+        self._update_status_lbl.pack(side="left", fill="x", expand=True,
+                                     padx=(10, 0))
         self._autowrap(self._update_status_lbl)
 
         def _show_update_status(text, colour):
             self._update_status_lbl.configure(text=text, fg=colour)
-            self._update_status_lbl.pack(fill="x", pady=(5, 0))
 
         def _restore_check_btn():
             self._update_check_btn.configure(
@@ -2554,7 +2572,7 @@ class AppWindow:
         def _check_now(_e=None):
             self._update_check_btn.configure(text="Checking...", fg=C["subtext"], cursor="")
             self._update_check_btn.unbind("<Button-1>")
-            self._update_status_lbl.pack_forget()
+            _show_update_status("", C["subtext"])
 
             def _check_worker():
                 from updater import get_latest_release, is_newer
@@ -2563,11 +2581,10 @@ class AppWindow:
                 def _apply():
                     if info is None:
                         _show_update_status(
-                            "Check failed — no connection? You can try again.", C["subtext"])
+                            "Check failed. No connection?", C["subtext"])
                         _restore_check_btn()
                     elif is_newer(info["version"], self._version):
-                        _show_update_status(
-                            f"Update {info['version']} is available.", C["accent"])
+                        # show_update_banner writes the status line itself.
                         _restore_check_btn()
                         self.show_update_banner(info["version"], info["download_url"])
                     else:
@@ -2585,11 +2602,8 @@ class AppWindow:
         self._update_check_btn.bind("<Leave>",
             lambda _e: self._update_check_btn.configure(fg=C["accent"]))
 
+        # Packed on demand by show_update_banner; holds the Update Now button.
         self._ver_update_row = tk.Frame(ver_card, bg=C["surface"])
-
-        # Detailed available-update notice appears immediately below the card.
-        self._update_banner_frame = tk.Frame(parent, bg=C["bg"])
-        self._update_banner_frame.pack(fill="x")
 
         # ── Microphone ────────────────────────────────────────────────────────
         mic_card = self._card(parent, margin=(0, 8))
@@ -2609,11 +2623,16 @@ class AppWindow:
                 return 0
             return 1
 
+        _AUTO_PREFIX = "Auto-detect"
         unique_devs = []
-        current_mic = (cfg.input_device or "") if cfg else ""
-        mic_var = tk.StringVar(value=current_mic if current_mic else "Default")
+        current_mic = ((cfg.input_device or "") if cfg else "").strip()
+        # "" and "auto" both mean auto-detect ("" is the pre-auto default and
+        # legacy "Default" selections; the recorder treats them identically).
+        _auto_selected = current_mic.lower() in ("", "auto", "default")
+        mic_var = tk.StringVar(
+            value=_AUTO_PREFIX if _auto_selected else current_mic)
 
-        mic_menu = tk.OptionMenu(mic_card, mic_var, "Default")
+        mic_menu = tk.OptionMenu(mic_card, mic_var, _AUTO_PREFIX)
         mic_menu.configure(bg=C["surface_hover"], fg=C["text"], relief="flat",
                            font=("Segoe UI", 9), anchor="w", highlightthickness=0,
                            activebackground=C["accent"], activeforeground=C["bg"])
@@ -2622,8 +2641,34 @@ class AppWindow:
                                    font=("Segoe UI", 9))
         mic_menu.pack(fill="x", pady=(4, 0))
 
-        # The OptionMenu button itself shows the selected device — no separate
-        # label below it (that duplicated the same text into two blocks).
+        # Caption under the dropdown: the button truncates long device names,
+        # so this line shows the FULL name auto-detect resolved to (or flags a
+        # pinned choice). Tracks selection changes via the var trace.
+        _best_auto = [""]
+        _mic_caption = tk.Label(mic_card, text="", fg=C["subtext"],
+                                bg=C["surface"], font=("Segoe UI", 8),
+                                anchor="w", justify="left")
+        _mic_caption.pack(fill="x", pady=(3, 0))
+        self._autowrap(_mic_caption)
+
+        def _update_mic_caption(*_a):
+            try:
+                sel = mic_var.get()
+                if sel.startswith(_AUTO_PREFIX) or sel == "Default":
+                    name = _best_auto[0]
+                    _mic_caption.configure(
+                        text=(f"Best microphone right now:  {name}" if name
+                              else "Picks the best available microphone "
+                                   "automatically and follows device changes"))
+                else:
+                    _mic_caption.configure(
+                        text="Pinned to this device. Choose Auto-detect to "
+                             "switch automatically.")
+            except tk.TclError:
+                pass
+
+        mic_var.trace_add("write", _update_mic_caption)
+        _update_mic_caption()
 
         def _populate_mic_menu(devs):
             try:
@@ -2633,21 +2678,33 @@ class AppWindow:
                         seen_names.add(d["name"])
                         unique_devs.append(d)
                 unique_devs.sort(key=_mic_rank)
-                options = ["Default"] + [d["name"] for d in unique_devs]
+                # Show which device auto-detect resolves to right now, like
+                # "Auto-detect (Microphone Array…)", so the choice is never a
+                # black box.
+                auto_label = _AUTO_PREFIX
+                if self._recorder is not None and hasattr(
+                        self._recorder, "pick_best_input_name"):
+                    try:
+                        best = self._recorder.pick_best_input_name(unique_devs)
+                    except Exception:
+                        best = ""
+                    if best:
+                        _best_auto[0] = best
+                        short = best if len(best) <= 30 else best[:27] + "…"
+                        auto_label = f"{_AUTO_PREFIX} ({short})"
+                options = [auto_label] + [d["name"] for d in unique_devs]
                 menu = mic_menu["menu"]
                 menu.delete(0, "end")
                 for opt in options:
                     menu.add_command(label=opt, command=lambda v=opt: mic_var.set(v))
 
-                if current_mic and current_mic in options:
+                if not _auto_selected and current_mic in options:
                     mic_var.set(current_mic)
                 else:
-                    # Empty config = "Default" (follow the Windows default mic).
-                    # The old code treated empty as "not chosen yet" and silently
-                    # persisted a specific device — which made "Default"
-                    # impossible to keep AND pinned the app to a mic that stops
-                    # being the right one the moment the user plugs in a headset.
-                    mic_var.set("Default")
+                    # Auto-detect is the default: pick the best available mic
+                    # and keep following device changes. A pinned device stops
+                    # being right the moment the user plugs in a headset.
+                    mic_var.set(auto_label)
                 print(f"[Settings] Mic menu populated with {len(options)} option(s)")
             except Exception as e:
                 import traceback
@@ -2675,7 +2732,7 @@ class AppWindow:
         def _poll_mic(attempt=0):
             if _mic_done[0]:
                 if not _mic_devs:
-                    print("[Settings] No input devices found — dropdown shows Default only")
+                    print("[Settings] No input devices found — dropdown shows Auto-detect only")
                 _populate_mic_menu(list(_mic_devs))
             elif attempt < 100:                 # up to ~10s of polling
                 self._root.after(100, lambda: _poll_mic(attempt + 1))
@@ -2720,7 +2777,6 @@ class AppWindow:
             if not mic_test_active[0] or not self._recorder:
                 return
             rms, _ = self._recorder.get_live_levels()
-            meter_cv.update_idletasks()
             total_w = max(meter_cv.winfo_width(), 1)
             bar_w = int(min(rms / 0.25, 1.0) * total_w)
             color = C["success"] if rms > 0.06 else (C["accent"] if rms > 0.015 else C["subtext"])
@@ -2752,7 +2808,8 @@ class AppWindow:
                 test_status.configure(text="Stop recording first", fg=C["error"])
                 return
             selected = mic_var.get()
-            device_name = "" if selected == "Default" else selected
+            device_name = ("auto" if selected.startswith(_AUTO_PREFIX)
+                           or selected == "Default" else selected)
             mic_test_stamp[0] += 1
             _stamp = mic_test_stamp[0]
             mic_test_opening[0] = True
@@ -3090,8 +3147,10 @@ class AppWindow:
         def _save(_e=None):
             if self._on_settings_change:
                 mic_val = mic_var.get()
-                self._on_settings_change("input_device",
-                                         "" if mic_val == "Default" else mic_val)
+                self._on_settings_change(
+                    "input_device",
+                    "auto" if mic_val.startswith(_AUTO_PREFIX)
+                    or mic_val == "Default" else mic_val)
                 self._on_settings_change("custom_vocabulary", vocab_var.get().strip())
                 self._on_settings_change("sound_feedback", sound_var.get())
             self._settings_status.configure(text="Saved ✓", fg=C["success"])
@@ -3122,9 +3181,11 @@ class AppWindow:
 
     def show_update_banner(self, version: str, download_url: str,
                            auto: bool = False) -> None:
-        """Show update banner at top of Settings and an inline button in the version card.
-        With auto=True the wording reflects that the update installs itself; the
-        button stays as a manual "restart now" override."""
+        """Surface an available update inside the Updates card: coloured status
+        on the version line plus one Update Now button. (Replaces the old
+        separate banner card, which repeated the same message below the card
+        and doubled its height.) With auto=True the wording reflects that the
+        update installs itself; the button stays as a manual override."""
         if not self._root:
             return
 
@@ -3221,42 +3282,17 @@ class AppWindow:
 
         _btns = []
 
-        # ── Top banner ────────────────────────────────────────────────────────
-        if hasattr(self, "_update_banner_frame"):
-            for w in self._update_banner_frame.winfo_children():
-                w.destroy()
+        # ── Status on the version line ────────────────────────────────────────
+        status = (f"Update {version} ready · installs when idle"
+                  if auto else f"Update {version} ready")
+        lbl = getattr(self, "_update_status_lbl", None)
+        if lbl is not None:
+            try:
+                lbl.configure(text=status, fg=C["accent"])
+            except tk.TclError:
+                pass
 
-            card = self._card(self._update_banner_frame, margin=(0, 4))
-
-            banner_text = (
-                f"Update {version} is ready and will install automatically "
-                "when FTC Whisper is idle."
-                if auto else f"Update {version} is ready to install."
-            )
-            _banner_lbl = tk.Label(
-                card,
-                text=banner_text,
-                fg=C["accent"], bg=C["surface"],
-                font=("Segoe UI", 10, "bold"), anchor="w", justify="left",
-                wraplength=320,
-            )
-            _banner_lbl.pack(fill="x")
-            self._autowrap(_banner_lbl)
-
-            banner_btn = RoundedButton(
-                card,
-                text="Update Now",
-                fg=C["bg"], fill=C["accent"],
-                font=("Segoe UI", 9, "bold"),
-                padx=14, pady=5,
-            )
-            banner_btn.pack(anchor="e", pady=(8, 0))
-            banner_btn.bind("<Button-1>", _do_update)
-            banner_btn.bind("<Enter>", lambda _e: banner_btn.configure(bg=C["accent_hover"]))
-            banner_btn.bind("<Leave>", lambda _e: banner_btn.configure(bg=C["accent"]))
-            _btns.append(banner_btn)
-
-        # ── Inline button in version card ─────────────────────────────────────
+        # ── Update Now button in the card ─────────────────────────────────────
         if hasattr(self, "_ver_update_row"):
             for w in self._ver_update_row.winfo_children():
                 w.destroy()
@@ -3274,11 +3310,11 @@ class AppWindow:
             ver_btn.bind("<Leave>", lambda _e: ver_btn.configure(bg=C["accent"]))
             _btns.append(ver_btn)
 
-            self._ver_update_row.pack(fill="x", pady=(8, 0))
+            self._ver_update_row.pack(fill="x", pady=(6, 0))
 
-        # The banner just grew the settings page. Re-measure the scroll range
-        # once layout settles — with the stale region the page bottom stayed
-        # cut off by exactly the banner's height.
+        # The button row just grew the settings page. Re-measure the scroll
+        # range once layout settles or the page bottom stays cut off by
+        # exactly the row's height.
         cv = getattr(self, "_settings_cv", None)
         if cv is not None:
             self._queue_scrollregion_sync(cv)

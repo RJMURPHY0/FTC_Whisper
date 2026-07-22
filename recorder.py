@@ -805,11 +805,73 @@ class Recorder:
             ordered.append(idx)
         return ordered
 
-    def _resolve_preferred_input(self, devices: list[dict]) -> Optional[int]:
-        if not self.input_device:
-            return None
+    # ── Auto-detect (best available) ─────────────────────────────────────
+    # Name-based ranking, no audio sampling: instant, deterministic, and safe
+    # to run on every stream open. Real wired mics first, Bluetooth hands-free
+    # profiles late (they sound terrible), loopback/virtual endpoints last.
 
-        token = self.input_device.strip()
+    @staticmethod
+    def _auto_rank(name: str) -> int:
+        n = (name or "").lower()
+        if any(v in n for v in (
+                "stereo mix", "sound mapper", "primary sound", "what u hear",
+                "wave out", "pc speaker", "loopback", "virtual", "cable")):
+            return 4
+        if any(b in n for b in (
+                "bluetooth", "hands-free", "hfp", " ag audio")):
+            return 3
+        if any(s in n for s in (
+                "microphone", "mic", "headset", "webcam", "usb audio",
+                "array", "logi", "jabra", "yeti", "rode", "shure", "blue ",
+                "elgato", "samson")):
+            return 0
+        return 2
+
+    def _pick_best_input(self, devices: list[dict]) -> Optional[int]:
+        """Best device index by rank. Within the winning rank the Windows
+        default input wins (respects the user's OS-level choice among good
+        mics); otherwise the first enumerated device of that rank."""
+        if not devices:
+            return None
+        best_rank = min(self._auto_rank(d["name"]) for d in devices)
+        best = [d for d in devices if self._auto_rank(d["name"]) == best_rank]
+        default_idx = self._get_default_input_index()
+        if default_idx is not None:
+            try:
+                default_name = str(
+                    sd.query_devices(default_idx).get("name", "")).strip().lower()
+            except Exception:
+                default_name = ""
+            for d in best:
+                if d["name"].strip().lower() == default_name:
+                    return int(d["index"])
+        return int(best[0]["index"])
+
+    def pick_best_input_name(self, devices: list[dict]) -> str:
+        """Name auto-detect would choose right now ('' if none) — used by the
+        Settings dropdown to show 'Auto-detect (<device>)'."""
+        idx = self._pick_best_input(devices)
+        if idx is None:
+            return ""
+        for d in devices:
+            if int(d["index"]) == idx:
+                return d["name"]
+        return ""
+
+    @staticmethod
+    def is_auto_device(token: str) -> bool:
+        return (token or "").strip().lower() in ("", "auto")
+
+    def _resolve_preferred_input(self, devices: list[dict]) -> Optional[int]:
+        token = (self.input_device or "").strip()
+        if self.is_auto_device(token):
+            picked = self._pick_best_input(devices)
+            if picked is not None:
+                name = next((d["name"] for d in devices
+                             if int(d["index"]) == picked), f"#{picked}")
+                print(f"[Recorder] Auto-detect using '{name}' (#{picked})")
+            return picked
+
         if token.isdigit():
             idx = int(token)
             if any(int(d["index"]) == idx for d in devices):

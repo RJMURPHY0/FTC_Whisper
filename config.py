@@ -64,7 +64,7 @@ class Config:
     whisper_model: str = "small.en"  # accurate/upgrade model; was "base" (same size as the fast pass = no accuracy gain). tiny, base, small, medium, large-v3, large-v3-turbo
     language: str = "en"
     sample_rate: int = 16000
-    input_device: str = ""  # Optional input device name fragment or index
+    input_device: str = "auto"  # "auto" = pick the best available mic (name-ranked, follows device changes); or a device name fragment / index. "" behaves as auto.
     inject_method: str = "clipboard"  # "clipboard" or "keystrokes"
     sound_feedback: bool = True
     auto_start: bool = False
