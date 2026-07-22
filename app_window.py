@@ -41,7 +41,11 @@ C = {
 }
 
 WINDOW_W = 420
-DASH_H   = 600
+DASH_H   = 640
+
+# Impact card box height — must fit icon, caption, value and sub-label with
+# the reference's breathing room; the layout draws against this constant.
+_IMPACT_CARD_H = 148
 
 
 def show_toast(root: tk.Misc, message: str, duration_ms: int = 5000) -> None:
@@ -828,9 +832,10 @@ class AppWindow:
         row.pack(fill="x", padx=20)
         for i in range(3):
             row.grid_columnconfigure(i, weight=1, uniform="impact")
+        row.grid_rowconfigure(0, minsize=_IMPACT_CARD_H)
 
-        self._impact_font_value = tkfont.Font(family="Segoe UI", size=16, weight="bold")
-        self._impact_font_unit  = tkfont.Font(family="Segoe UI", size=9)
+        self._impact_font_value = tkfont.Font(family="Segoe UI", size=18, weight="bold")
+        self._impact_font_unit  = tkfont.Font(family="Segoe UI", size=10)
 
         self._impact_cards = {}
         specs = [
@@ -840,7 +845,7 @@ class AppWindow:
         ]
         for i, (key, label, icon_fn) in enumerate(specs):
             cv = tk.Canvas(row, bg=C["bg"], highlightthickness=0, bd=0,
-                           height=116, width=120)
+                           height=_IMPACT_CARD_H, width=120)
             cv.grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else 8, 0))
             self._impact_cards[key] = {
                 "cv": cv, "icon": icon_fn, "label": label,
@@ -886,53 +891,74 @@ class AppWindow:
             return
         cv = card["cv"]
         w = cv.winfo_width()
-        h = 116
+        h = _IMPACT_CARD_H
         if w < 40:
             return
         cv.delete("all")
-        _rr(cv, 0, 0, w - 1, h - 1, 10, fill=C["surface"], outline=C["border"])
+        _rr(cv, 0, 0, w - 1, h - 1, 12, fill=C["surface"], outline=C["border"])
         cx = w // 2
-        card["icon"](cv, cx, 28)
-        cv.create_text(cx, 52, text=card["label"], fill=C["subtext"],
-                       font=("Segoe UI", 7, "bold"))
-        # Value + unit centred as a pair, bottoms aligned on one baseline
+        card["icon"](cv, cx, 32)
+        # tkinter has no letter-spacing — hair spaces between characters give
+        # the reference's tracked-out caption look.
+        cv.create_text(cx, 66, text=" ".join(card["label"]),
+                       fill=C["subtext"], font=("Segoe UI", 7, "bold"))
+        # Value + unit centred as a pair, bottoms aligned on one baseline.
+        # The figure is the card's focal point: wide gap above it, and it sits
+        # tight to the description below.
         vw = self._impact_font_value.measure(card["value"])
         uw = self._impact_font_unit.measure(card["unit"]) if card["unit"] else 0
-        gap = 4 if card["unit"] else 0
+        gap = 5 if card["unit"] else 0
         x0 = cx - (vw + gap + uw) // 2
-        cv.create_text(x0, 79, text=card["value"], fill=C["text"],
+        cv.create_text(x0, 110, text=card["value"], fill=C["text"],
                        font=self._impact_font_value, anchor="sw")
         if card["unit"]:
-            cv.create_text(x0 + vw + gap, 79, text=card["unit"],
+            cv.create_text(x0 + vw + gap, 110, text=card["unit"],
                            fill=C["subtext"], font=self._impact_font_unit,
                            anchor="sw")
-        cv.create_text(cx, 98, text=card["sub"], fill=C["subtext"],
+        cv.create_text(cx, 127, text=card["sub"], fill=C["subtext"],
                        font=("Segoe UI", 8))
 
     @staticmethod
     def _draw_icon_clock(cv, cx, cy):
-        r = 10
+        r = 11
         cv.create_oval(cx - r, cy - r, cx + r, cy + r,
                        outline=C["accent"], width=2)
-        cv.create_line(cx, cy, cx, cy - 5.5, fill=C["accent"], width=2,
+        cv.create_line(cx, cy, cx, cy - 6, fill=C["accent"], width=2,
                        capstyle="round")
-        cv.create_line(cx, cy, cx + 4.5, cy + 2, fill=C["accent"], width=2,
+        cv.create_line(cx, cy, cx + 5, cy + 2.5, fill=C["accent"], width=2,
                        capstyle="round")
 
     @staticmethod
     def _draw_icon_bolt(cv, cx, cy):
-        pts = [(2, -11), (-6.5, 1.5), (-1, 1.5), (-2, 11), (6.5, -1.5), (1, -1.5)]
+        pts = [(2.5, -12), (-7, 1.5), (-1, 1.5), (-2.5, 12), (7, -1.5), (1, -1.5)]
         cv.create_polygon([(cx + dx, cy + dy) for dx, dy in pts],
                           fill=C["success"], outline="")
 
     @staticmethod
     def _draw_icon_flame(cv, cx, cy):
-        pts = [(0, -10.5), (-4.5, -4), (-6.5, 2), (-5.5, 7), (-2, 10.5),
-               (3, 10.5), (6.5, 6.5), (6.5, 1.5), (4.5, -3.5), (2.5, 0.5),
-               (0, -10.5)]
-        cv.create_line([(cx + dx, cy + dy) for dx, dy in pts],
-                       fill=C["accent"], width=2, smooth=1,
-                       capstyle="round", joinstyle="round")
+        """Filled teardrop flame with a lick curling off the left, matching the
+        reference. Filled reads far better than a stroke at this size."""
+        outer = [
+            (0.5, -12),      # tip
+            (4.5, -6.5),
+            (7, -1),
+            (7.5, 4),
+            (4.5, 9.5),
+            (0, 11.5),
+            (-4.5, 9.5),
+            (-7.5, 4.5),
+            (-7, -0.5),
+            (-4, -4),
+            (-2.5, -1),      # inner notch — the flame's curl
+            (-1.5, -5.5),
+        ]
+        cv.create_polygon([(cx + dx, cy + dy) for dx, dy in outer],
+                          fill=C["accent"], outline="", smooth=1)
+        # Inner cut-out gives the two-tone flame depth without a second colour.
+        inner = [(0.5, 1), (3.5, 4.5), (2.5, 8.5), (-0.5, 10),
+                 (-3.5, 8), (-3, 4)]
+        cv.create_polygon([(cx + dx, cy + dy) for dx, dy in inner],
+                          fill=C["surface"], outline="", smooth=1)
 
     def _refresh_impact(self) -> None:
         """Recompute the impact cards from the stats store. Main thread only —
