@@ -336,7 +336,7 @@ def _log_inject_failure(detail: str) -> None:
 # ── Injection methods ─────────────────────────────────────────────────────────
 
 
-def _post_wm_char(text: str) -> tuple[int, int]:
+def _post_wm_char(text: str, target_child: int = 0) -> tuple[int, int]:
     """
     Inject text by posting WM_CHAR messages directly to the focused child HWND.
 
@@ -346,15 +346,24 @@ def _post_wm_char(text: str) -> tuple[int, int]:
     - Works while the hotkey modifiers (Alt, Ctrl) are still physically held
     - Handles surrogate pairs for emoji / extended Unicode
 
+    target_child: when a valid HWND, post straight to it. This is the control
+    that was focused when recording STARTED — using it means text lands in the
+    box the user originally clicked even if the foreground moved (a mid-speech
+    click elsewhere). PostMessage needs no foreground, so this is the reliable
+    recovery path. When 0/invalid, derive the child from the live foreground.
+
     Returns (posted, failed) character counts. A partial post (some landed,
     some failed) must NOT be retried with another method — the characters that
     DID land would be duplicated.
     """
     u32 = _u32
-    fg = u32.GetForegroundWindow()
-    if not fg:
-        return 0, len(text)
-    target = _get_focused_child(fg)
+    if target_child and u32.IsWindow(target_child):
+        target = target_child
+    else:
+        fg = u32.GetForegroundWindow()
+        if not fg:
+            return 0, len(text)
+        target = _get_focused_child(fg)
     posted = 0
     failed = 0
     for ch in text:
@@ -485,14 +494,26 @@ class Injector:
         self.method = m if m in {"clipboard", "keystrokes", "auto"} else "clipboard"
         self._lock = threading.Lock()
         self._partial_direct = False  # set when a direct inject partially landed
+        # Capture target for the CURRENT final injection. Set by inject() and
+        # read by _clipboard_paste (foreground gate) and _direct_inject (stored
+        # child WM_CHAR). 0 outside a final inject — the streaming path never
+        # sets these, so its focus contract is untouched.
+        self._target_hwnd = 0
+        self._target_child = 0
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
-    def inject(self, text: str, release_mods: bool = True) -> bool:
+    def inject(self, text: str, release_mods: bool = True,
+               target_hwnd: int = 0, target_child: int = 0) -> bool:
         """
         Inject text into the focused window. Thread-safe.
         release_mods=True: release hotkey modifiers first (use for final injection).
         release_mods=False: skip modifier release (use during streaming while key held).
+        target_hwnd/target_child: the top-level window and focused control captured
+        when recording STARTED. When given, the clipboard paste refuses to fire
+        into any other foreground (so a mid-speech click elsewhere can't paste into
+        the wrong window), and native WM_CHAR posts straight to the stored control
+        so the text still lands where the user originally clicked.
         Automatically retries once on failure after a short settle delay —
         UNLESS the failure was a partial direct injection (some characters
         landed), where a full re-send would duplicate them.
@@ -501,31 +522,37 @@ class Injector:
             return False
         with self._lock:
             self._partial_direct = False
-            result = self._inject(text, release_mods=release_mods)
-            if not result and not self._partial_direct:
-                # First attempt failed — give Windows time to settle focus,
-                # then try once more. Modifiers are already released.
-                print("[Injector] First attempt failed — retrying in 200 ms…")
-                time.sleep(0.20)
-                result = self._inject(text, release_mods=False)
-                if result:
-                    print("[Injector] Retry succeeded.")
-                else:
-                    print("[Injector] Retry also failed.")
-            if not result:
-                # Hard failure: capture WHY in the rolling field log so a
-                # "text never landed" report from any device is diagnosable.
-                detail = (
-                    f"target={_get_fg_exe() or '?'} class={_get_fg_class()!r} "
-                    f"method={self.method} chars={len(text)}"
-                    + (" partial-direct (no paste retry)"
-                       if self._partial_direct else "")
-                    + (" ELEVATED-TARGET (run FTC Whisper as admin)"
-                       if foreground_is_elevated_blocked() else "")
-                )
-                print(f"[Injector] FAILED: {detail}")
-                _log_inject_failure(detail)
-            return result
+            self._target_hwnd = int(target_hwnd or 0)
+            self._target_child = int(target_child or 0)
+            try:
+                result = self._inject(text, release_mods=release_mods)
+                if not result and not self._partial_direct:
+                    # First attempt failed — give Windows time to settle focus,
+                    # then try once more. Modifiers are already released.
+                    print("[Injector] First attempt failed — retrying in 200 ms…")
+                    time.sleep(0.20)
+                    result = self._inject(text, release_mods=False)
+                    if result:
+                        print("[Injector] Retry succeeded.")
+                    else:
+                        print("[Injector] Retry also failed.")
+                if not result:
+                    # Hard failure: capture WHY in the rolling field log so a
+                    # "text never landed" report from any device is diagnosable.
+                    detail = (
+                        f"target={_get_fg_exe() or '?'} class={_get_fg_class()!r} "
+                        f"method={self.method} chars={len(text)}"
+                        + (" partial-direct (no paste retry)"
+                           if self._partial_direct else "")
+                        + (" ELEVATED-TARGET (run FTC Whisper as admin)"
+                           if foreground_is_elevated_blocked() else "")
+                    )
+                    print(f"[Injector] FAILED: {detail}")
+                    _log_inject_failure(detail)
+                return result
+            finally:
+                self._target_hwnd = 0
+                self._target_child = 0
 
     def inject_immediate(self, text: str) -> bool:
         """
@@ -680,14 +707,16 @@ class Injector:
             ok = _send_unicode(text)
             method = "SendInput/VK_PACKET"
             if not ok:
-                posted, failed = _post_wm_char(text)
+                posted, failed = _post_wm_char(text, self._target_child)
                 ok = posted > 0 and failed == 0
                 if posted > 0 and failed > 0:
                     self._partial_direct = True
                 method = "WM_CHAR (fallback)"
         else:
-            # Native apps (Outlook, Word, etc.): WM_CHAR — modifier-state agnostic
-            posted, failed = _post_wm_char(text)
+            # Native apps (Outlook, Word, etc.): WM_CHAR — modifier-state agnostic.
+            # Post to the control focused at record start so the text lands in the
+            # right box even if the foreground moved (mid-speech click elsewhere).
+            posted, failed = _post_wm_char(text, self._target_child)
             ok = posted > 0 and failed == 0
             method = "WM_CHAR"
             if not ok:
@@ -898,6 +927,15 @@ class Injector:
             VK_CTRL = 0x11
             VK_V = 0x56
             fg_now = u32.GetForegroundWindow()
+            # Never paste into a window that is not the capture target. If the
+            # user clicked elsewhere mid-dictation the foreground moved, and a
+            # Ctrl+V here would dump the text into that other window. Bail so the
+            # caller falls through to a stored-child WM_CHAR post, which lands in
+            # the ORIGINAL control and needs no foreground.
+            if self._target_hwnd and fg_now != self._target_hwnd:
+                print(f"[Injector] Foreground {fg_now:#x} != target "
+                      f"{self._target_hwnd:#x} — skip Ctrl+V, fall back to direct")
+                return False
             print(f"[Injector] Sending Ctrl+V, fg_hwnd={fg_now:#x}")
             ctrl_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL))
             v_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_V))

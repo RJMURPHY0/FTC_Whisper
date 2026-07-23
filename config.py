@@ -83,6 +83,8 @@ class Config:
     live_inject: bool = False     # Type words into the app live as you speak (Parakeet mode); corrects at hotkey-release
     auto_paragraphs: bool = True  # Paragraph break after a clear pause (2s+ silence following a finished sentence); Parakeet path, off during Live Typing
     parakeet_version: str = "v2"  # Parakeet model: "v2" (English) or "v3" (multilingual, lower WER); switching triggers a one-time ~660 MB download
+    show_popup: bool = True  # Show the cursor-icon popup (Insert/Replace/Upgrade) after each dictation; off = text is injected silently with no popup
+    trim_silence: bool = True  # Drop fully-silent committed chunks (no words transcribed) from the stored clip to save local disk
     trailing_space: bool = False  # Append a space after each injection (useful when dictating mid-sentence)
     auto_enter: bool = False      # Press Enter after injection (useful for chat/search boxes)
     toggle_timeout: int = 0       # Seconds before auto-stopping in toggle mode (0 = disabled; long dictation must not be cut off)

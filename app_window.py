@@ -4047,6 +4047,10 @@ class AppWindow:
         _toggle_card("auto_enter", "Press Enter After Insert",
                      "Send Enter after injecting (useful for chat / search boxes)",
                      False, icon="enter")
+        _toggle_card("show_popup", "Show Popup After Dictation",
+                     "Show the Insert / Replace / Upgrade icon near the cursor "
+                     "after each dictation (it still appears if injection fails)",
+                     True, icon="wand")
 
         # ── Live typing ───────────────────────────────────────────────────────
         _section("keyboard", "Live Typing")

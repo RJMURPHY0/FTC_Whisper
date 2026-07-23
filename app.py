@@ -46,7 +46,54 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.32"
+APP_VERSION = "1.6.33"
+
+
+class _RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+class _GUITHREADINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_uint), ("flags", ctypes.c_uint),
+        ("hwndActive", ctypes.c_void_p), ("hwndFocus", ctypes.c_void_p),
+        ("hwndCapture", ctypes.c_void_p), ("hwndMenuOwner", ctypes.c_void_p),
+        ("hwndMoveSize", ctypes.c_void_p), ("hwndCaret", ctypes.c_void_p),
+        ("rcCaret", _RECT),
+    ]
+
+
+def _capture_focus_target(hwnd: int) -> tuple[int, tuple[int, int]]:
+    """(focused_child_hwnd, caret_screen_xy) for hwnd's UI thread, captured at
+    record start. GetGUIThreadInfo reads another thread's focus/caret WITHOUT
+    AttachThreadInput, so this is race-free on the synchronous hotkey thread.
+    The child lets final injection land in the exact control the user clicked,
+    even if they click elsewhere mid-dictation; the caret drives the browser
+    DOM-focus restore click. Returns (0, (0, 0)) on any failure."""
+    try:
+        u32 = ctypes.windll.user32
+        if not hwnd:
+            return 0, (0, 0)
+        tid = u32.GetWindowThreadProcessId(hwnd, None)
+        if not tid:
+            return 0, (0, 0)
+        info = _GUITHREADINFO()
+        info.cbSize = ctypes.sizeof(_GUITHREADINFO)
+        if not u32.GetGUIThreadInfo(tid, ctypes.byref(info)):
+            return 0, (0, 0)
+        child = int(info.hwndFocus or 0)
+        caret = (0, 0)
+        base = info.hwndCaret or info.hwndFocus
+        if base and (info.rcCaret.right or info.rcCaret.bottom):
+            pt = ctypes.wintypes.POINT(
+                (info.rcCaret.left + info.rcCaret.right) // 2,
+                (info.rcCaret.top + info.rcCaret.bottom) // 2)
+            if u32.ClientToScreen(base, ctypes.byref(pt)):
+                caret = (int(pt.x), int(pt.y))
+        return child, caret
+    except Exception:
+        return 0, (0, 0)
 
 
 class WhisperFlowApp:
@@ -931,6 +978,7 @@ class WhisperFlowApp:
                     live_inject=live,
                     audio_sink=self._audio_writer,
                     auto_paragraphs=bool(getattr(self.config, "auto_paragraphs", True)),
+                    trim_silence=bool(getattr(self.config, "trim_silence", True)),
                 )
                 self._session = session
                 session.start()
@@ -1150,8 +1198,9 @@ class WhisperFlowApp:
                     same_cursor = False
             focus_unchanged = bool(hwnd) and fg_now == hwnd and same_cursor
 
+            _rec_child = getattr(self, "_recording_child", 0)
             if not focus_unchanged:
-                self._focus_window(hwnd)
+                self._focus_window(hwnd, child=_rec_child)
 
             # Release modifier keys BEFORE the browser focus click so Chrome never
             # receives a spurious Alt key-up that would activate its menu bar and
@@ -1180,9 +1229,16 @@ class WhisperFlowApp:
                         cls in _BROWSER_EXACT
                         or any(cls.startswith(p) for p in _BROWSER_PREFIXES)
                     ):
-                        self._click_to_restore_focus(
-                            self._rec_cursor_x, self._rec_cursor_y, hwnd
-                        )
+                        # Click the CARET position captured at record start, not
+                        # the mouse position: the mouse may have hovered a link or
+                        # button, and clicking there unfocuses the input (or fires
+                        # page UI). Fall back to the mouse only if no caret.
+                        _caret = getattr(self, "_recording_caret", (0, 0))
+                        if _caret and (_caret[0] or _caret[1]):
+                            _cx, _cy = _caret
+                        else:
+                            _cx, _cy = self._rec_cursor_x, self._rec_cursor_y
+                        self._click_to_restore_focus(_cx, _cy, hwnd)
                 except Exception as e:
                     print(f"[App] Browser focus click error: {e}")
 
@@ -1208,8 +1264,12 @@ class WhisperFlowApp:
                     print(f"[App] Live reconcile result={result} del={_live_del}")
                 else:
                     print(f"[App] Injecting: {len(_text_to_inject)} chars")
-                    # Modifiers already released above — skip the second release
-                    result = self.injector.inject(_text_to_inject, release_mods=False)
+                    # Modifiers already released above — skip the second release.
+                    # Pass the capture target so the paste refuses a wrong
+                    # foreground and native WM_CHAR posts to the original control.
+                    result = self.injector.inject(
+                        _text_to_inject, release_mods=False,
+                        target_hwnd=hwnd, target_child=_rec_child)
                     print(f"[App] Inject result: {result}")
             except Exception as e:
                 print(f"[App] Injection error (popup will still appear): {e}")
@@ -1258,25 +1318,28 @@ class WhisperFlowApp:
             if self._pending_model_change:
                 self._apply_model_change(self._pending_model_change)
 
-        # ── Popup always shown — works as manual-insert fallback if inject failed ─
-        # undo_count=0 when injection failed: Replace must NOT Ctrl+Z the user's
-        # own prior edits when there is nothing of ours to undo.
+        # ── Popup — shown unless the user turned it off in Settings ──────────────
+        # It doubles as the manual-insert fallback when injection failed, so when
+        # show_popup is off but injection ALSO failed, still show it: silently
+        # losing text is worse than an unwanted popup. undo_count=0 when injection
+        # failed: Replace must NOT Ctrl+Z the user's own prior edits.
         _undo_n = 1 if result else 0
         # Live-injected dictations were typed as many keystroke bursts, so Replace
         # must delete exactly the chars we put in (backspace) rather than one Ctrl+Z.
         _live_dc = _live_del if (result and _live_del) else 0
-        self.popup.show_cursor_icon(
-            transcribed_text,
-            on_insert=lambda t=transcribed_text, h=hwnd: self._insert_text(t, h),
-            on_replace=lambda new_text, t=transcribed_text, h=hwnd, uc=_undo_n, dc=_live_dc: self._replace_text(new_text, h, t, undo_count=uc, del_chars=dc),
-            on_insert_result=lambda new_text, h=hwnd: self._insert_text(new_text, h),
-            inserted=result,
-            hwnd=hwnd,
-            cursor_x=0,
-            cursor_y=0,
-            upgrading=upgrading,
-            session=seq,
-        )
+        if getattr(self.config, "show_popup", True) or not result:
+            self.popup.show_cursor_icon(
+                transcribed_text,
+                on_insert=lambda t=transcribed_text, h=hwnd: self._insert_text(t, h),
+                on_replace=lambda new_text, t=transcribed_text, h=hwnd, uc=_undo_n, dc=_live_dc: self._replace_text(new_text, h, t, undo_count=uc, del_chars=dc),
+                on_insert_result=lambda new_text, h=hwnd: self._insert_text(new_text, h),
+                inserted=result,
+                hwnd=hwnd,
+                cursor_x=0,
+                cursor_y=0,
+                upgrading=upgrading,
+                session=seq,
+            )
 
         # Background upgrade — session-stamped so a slow upgrade from dictation
         # N can never attach its text to dictation N+1's popup.
@@ -1447,6 +1510,14 @@ class WhisperFlowApp:
                 self._recording_hwnd = hwnd
             except Exception:
                 hwnd = self._recording_hwnd
+            # Capture the focused control + caret NOW (synchronous hotkey thread,
+            # race-free). Final injection uses the child so text lands in the box
+            # the user clicked even after a mid-speech click elsewhere.
+            try:
+                self._recording_child, self._recording_caret = \
+                    _capture_focus_target(hwnd)
+            except Exception:
+                self._recording_child, self._recording_caret = 0, (0, 0)
             try:
                 from app_icons import capture_app_info
                 self._recording_app = capture_app_info(hwnd)
@@ -1663,9 +1734,12 @@ class WhisperFlowApp:
         except Exception as e:
             print(f"[App] Click to restore focus failed: {e}")
 
-    def _focus_window(self, hwnd: int, short: bool = False) -> bool:
+    def _focus_window(self, hwnd: int, short: bool = False,
+                      child: int = 0) -> bool:
         """Bring hwnd to the foreground so injected keystrokes land there.
-        Retries once if focus doesn't land on the first attempt.
+        Retries once if focus doesn't land on the first attempt. When `child`
+        is a valid control HWND, restore focus to it too (cross-thread) so the
+        caret returns to the exact box the user was in.
         Returns True if the window is confirmed foreground after the call."""
         if not hwnd:
             return False
@@ -1724,10 +1798,35 @@ class WhisperFlowApp:
                 if attached:
                     u32.AttachThreadInput(our_tid, fg_tid, False)
 
-                time.sleep(0.05 if short else 0.12)
+                # Poll instead of a single fixed sleep: SetForegroundWindow is
+                # asynchronous, and on a loaded machine the switch can take longer
+                # than a flat 120ms — polling lands as soon as it's actually done.
+                actual = 0
+                deadline = time.monotonic() + (0.10 if short else 0.30)
+                while time.monotonic() < deadline:
+                    actual = u32.GetForegroundWindow()
+                    if actual == hwnd:
+                        break
+                    time.sleep(0.02)
 
-                actual = u32.GetForegroundWindow()
                 if actual == hwnd:
+                    # Foreground is ours — now put the caret back in the exact
+                    # control the user was typing in. SetFocus is cross-thread,
+                    # so attach to the TARGET window's own thread (not the old
+                    # foreground's) for the call to take effect.
+                    if child:
+                        try:
+                            tgt_tid = u32.GetWindowThreadProcessId(hwnd, None)
+                            att2 = bool(tgt_tid and tgt_tid != our_tid
+                                        and u32.IsWindow(child))
+                            if att2:
+                                u32.AttachThreadInput(our_tid, tgt_tid, True)
+                            if u32.IsWindow(child):
+                                u32.SetFocus(child)
+                            if att2:
+                                u32.AttachThreadInput(our_tid, tgt_tid, False)
+                        except Exception:
+                            pass
                     return True
                 print(
                     f"[App] Focus attempt {attempt + 1}: expected {hwnd:#x}, got {actual:#x}"

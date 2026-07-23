@@ -54,6 +54,7 @@ class StreamingSession:
         live_inject: bool = False,
         audio_sink=None,
         auto_paragraphs: bool = False,
+        trim_silence: bool = False,
     ):
         self._recorder = recorder
         self._engine = engine
@@ -88,6 +89,7 @@ class StreamingSession:
         # plain words, and a newline emitted as a keypress could submit a chat
         # box, so the reconcile must never see paragraph breaks it didn't type.
         self._auto_paragraphs = bool(auto_paragraphs) and not live_inject
+        self._trim_silence = bool(trim_silence)
         # Break-BEFORE flag per _committed_texts entry (parallel list; only
         # finalize() reads it, so captions/context joins stay space-separated).
         self._para_flags: list[bool] = []
@@ -162,7 +164,12 @@ class StreamingSession:
                     # Sink write sits inside the same locked commit: a tick that
                     # loses the finalize race returns above and never writes, so
                     # the tail (which re-covers its audio) can't be duplicated.
-                    if self._audio_sink is not None:
+                    # trim_silence: a chunk that transcribed to NO words is a
+                    # silent/noise span the user left running. Skip storing it —
+                    # it has no words for playback or retry, so dropping it only
+                    # shrinks the local WAV. Speech chunks are always stored.
+                    if self._audio_sink is not None and (
+                            preview or not self._trim_silence):
                         self._audio_sink.write(chunk, rate)
                     self._committed_sample += boundary
                     self._recorder.drop_audio_before(self._committed_sample)
