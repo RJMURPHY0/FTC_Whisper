@@ -114,12 +114,15 @@ class SupabaseLogger:
     # ------------------------------------------------------------------
 
     def log_transcription(self, text: str, app_name: str = "",
-                          app_exe: str = "") -> None:
-        """Save a new transcription record (with the app it was injected into)."""
+                          app_exe: str = "", created_at: str = "") -> None:
+        """Save a new transcription record (with the app it was injected into).
+        The caller may mint created_at itself (app.py does, so the saved audio
+        clip and the history row share one identity)."""
         owner = self._history_owner()
         # One timestamp is the durable local/remote identity. Previously the two
         # calls to now() differed, forcing fuzzy timestamp matching forever.
-        created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        created_at = created_at or datetime.datetime.now(
+            datetime.timezone.utc).isoformat()
         record = self._append_local(
             text, app_name=app_name, app_exe=app_exe,
             created_at=created_at, user_id=owner,
@@ -217,6 +220,42 @@ class SupabaseLogger:
         t.start()
         t.join(timeout=8.0)
         return result[0]
+
+    def fetch_contact_vocab(self, limit: int = 500) -> list:
+        """Contact and company names from the estate CRM (FTC Contacts shares
+        this Supabase project) — used as speech-recognition hotwords so the
+        names the user actually dictates are recognised. Best-effort: returns
+        [] when signed out, offline, or the table/columns aren't there. RLS
+        scopes rows to the signed-in user."""
+        if not self._enabled or not self._user_id or self._user_id == "local":
+            return []
+        shapes = ("first_name,last_name,company",
+                  "first_name,last_name,company_name",
+                  "name,company",
+                  "full_name,company")
+        rows = []
+        for cols in shapes:
+            try:
+                rows = (self._get_client().table("contacts").select(cols)
+                        .limit(limit).execute().data or [])
+                break
+            except Exception as exc:
+                if not _is_missing_column_error(exc):
+                    return []
+        terms = []
+        seen = set()
+        for r in rows:
+            first = (r.get("first_name") or "").strip()
+            last = (r.get("last_name") or "").strip()
+            full = " ".join(p for p in (first, last) if p) \
+                or (r.get("name") or r.get("full_name") or "").strip()
+            company = (r.get("company") or r.get("company_name") or "").strip()
+            for term in (full, company):
+                t = " ".join(term.split())
+                if len(t) >= 3 and t.lower() not in seen:
+                    seen.add(t.lower())
+                    terms.append(t)
+        return terms[:150]
 
     def set_app_setting(self, key: str, value: str) -> None:
         """Fire-and-forget upsert into app_settings. RLS only grants writes to
@@ -467,6 +506,16 @@ class SupabaseLogger:
         Supabase rows are deleted after a 30-day grace period (tombstone),
         so an accidental clear is recoverable server-side."""
         owner = self._history_owner()
+        # Stored audio is local-only and unrecoverable server-side, so drop
+        # exactly this owner's clips (a shared machine keeps other accounts').
+        try:
+            import audio_store
+            with self._history_lock:
+                rows = [dict(r) for r in self._history_cache.get(owner, [])]
+            for row in rows:
+                audio_store.delete_for(row.get("created_at") or "")
+        except Exception:
+            pass
         local_ok = self._clear_local(owner)
         now = datetime.datetime.now(datetime.timezone.utc)
         stone = {
@@ -485,6 +534,11 @@ class SupabaseLogger:
         deleted from Supabase after the 30-day grace period."""
         text = item.get("transcribed_text") or ""
         created = item.get("created_at") or ""
+        try:
+            import audio_store
+            audio_store.delete_for(created)
+        except Exception:
+            pass
         now = datetime.datetime.now(datetime.timezone.utc)
         stone = {
             "id": item.get("id"),
@@ -525,6 +579,71 @@ class SupabaseLogger:
                           or (row.get("transcribed_text") == text
                               and row.get("created_at") == created))]
         self._publish_history(owner, cached)
+        return True
+
+    def update_transcription(self, item: dict, new_text: str) -> bool:
+        """Replace one row's text (history "Retry transcription"). created_at
+        is deliberately untouched — it is the row's identity and the key of
+        its stored audio clip. Remote update is fire-and-forget."""
+        old_text = item.get("transcribed_text") or ""
+        created = item.get("created_at") or ""
+        row_id = item.get("id")
+        owner = self._history_owner()
+        if not new_text or (new_text == old_text and not item.get("refined_text")):
+            return False
+
+        def _matches(row: dict) -> bool:
+            if row_id is not None and row.get("id") == row_id:
+                return True
+            return (row.get("transcribed_text") == old_text
+                    and row.get("created_at") == created)
+
+        # Local file
+        try:
+            path = _local_history_path()
+            with _local_history_lock:
+                if os.path.exists(path):
+                    with open(path, "r", encoding="utf-8") as f:
+                        entries = json.load(f) or []
+                    for e in entries:
+                        same_owner = ((e.get("user_id") == owner) if owner
+                                      else not e.get("user_id"))
+                        if same_owner and _matches(e):
+                            e["transcribed_text"] = new_text
+                            e.pop("refined_text", None)
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(entries, f, ensure_ascii=False)
+        except Exception as e:
+            print(f"[LocalHistory] Update failed: {e}")
+
+        # In-memory cache + listeners (UI re-renders off this publish)
+        with self._history_lock:
+            cached = [dict(r) for r in self._history_cache.get(owner, [])]
+        for row in cached:
+            if _matches(row):
+                row["transcribed_text"] = new_text
+                row.pop("refined_text", None)
+        self._publish_history(owner, cached)
+
+        # Remote
+        if self._enabled and owner:
+            def _update():
+                try:
+                    q = (self._get_client().table(_TABLE)
+                         .update({"transcribed_text": new_text,
+                                  "refined_text": None})
+                         .eq("user_id", owner))
+                    if row_id is not None:
+                        q = q.eq("id", row_id)
+                    else:
+                        q = (q.eq("created_at", created)
+                              .eq("transcribed_text", old_text))
+                    q.execute()
+                except Exception as e:
+                    print(f"[Supabase] Update failed (non-fatal): {e}")
+
+            threading.Thread(target=_update, daemon=True,
+                             name="supabase-history-update").start()
         return True
 
     # ── Tombstones (deferred remote deletes) ──────────────────────────

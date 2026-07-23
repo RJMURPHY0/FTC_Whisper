@@ -174,11 +174,37 @@ class LoginWindow:
         self._root.geometry(f"{WINDOW_W}x{WINDOW_H}+{x}+{y}")
 
         self._build_ui()
+        self._apply_dark_frame()
 
         if parent is not None:
             self._root.wait_window()
         else:
             self._root.mainloop()
+
+    def _apply_dark_frame(self) -> None:
+        """Windows 11: dark caption/border on the standalone login window.
+        Unset, DWM draws its default light frame — white edging around the
+        dark UI. (The embedded login inherits the main window's treatment.)"""
+        try:
+            import ctypes
+            self._root.update_idletasks()
+            hwnd = ctypes.windll.user32.GetAncestor(self._root.winfo_id(), 2)
+            dwm = ctypes.windll.dwmapi
+
+            def _cr(hex_color):
+                h = hex_color.lstrip("#")
+                r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+                return (b << 16) | (g << 8) | r
+
+            for attr, val in ((20, 1),                    # immersive dark mode
+                              (34, _cr(C["bg"])),         # border
+                              (35, _cr(C["surface"])),    # caption
+                              (36, _cr("#ffffff"))):      # caption text
+                dwm.DwmSetWindowAttribute(
+                    hwnd, attr, ctypes.byref(ctypes.c_int(val)),
+                    ctypes.sizeof(ctypes.c_int))
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # UI construction

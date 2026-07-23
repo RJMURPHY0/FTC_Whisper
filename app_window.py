@@ -443,6 +443,19 @@ class AppWindow:
         self._history_rendered_once = False
         self._history_fingerprint = None
 
+        # Expanded-row audio player / actions (playback is local-only: the
+        # clip exists solely on the machine that dictated it).
+        self._retranscribe = None          # attached by app._init_core
+        self._hist_retry_keys = set()
+        self._audio_path_cache = {}
+        self._wave_cache = {}
+        self._player_refs = None           # canvas ids of the drawn player
+        self._play_key = None
+        self._play_started = 0.0
+        self._play_duration = 0.0
+        self._play_filled = 0
+        self._play_job = None
+
         # Hotkey recorder state
         self._recording_hotkey        = False
         self._pending_hotkey: Optional[str] = None
@@ -571,7 +584,8 @@ class AppWindow:
         except Exception:
             pass
 
-    def attach_audio(self, recorder=None, transcriber=None) -> None:
+    def attach_audio(self, recorder=None, transcriber=None,
+                     retranscribe=None) -> None:
         """Late-bind the audio subsystem. The pipeline is built on a
         background thread after first paint (see app._init_core), so these
         arrive a moment after construction; every use site already guards
@@ -580,6 +594,8 @@ class AppWindow:
             self._recorder = recorder
         if transcriber is not None:
             self._transcriber = transcriber
+        if retranscribe is not None:
+            self._retranscribe = retranscribe
 
     def _repaint_all(self) -> None:
         """Synchronous full repaint of the whole window tree:
@@ -670,6 +686,7 @@ class AppWindow:
     def _apply_dark_titlebar(self) -> None:
         try:
             DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+            DWMWA_BORDER_COLOR = 34    # Windows 11 build 22000+
             DWMWA_CAPTION_COLOR = 35   # Windows 11 build 22000+
             DWMWA_TEXT_COLOR = 36
             u32 = ctypes.windll.user32
@@ -688,9 +705,13 @@ class AppWindow:
 
             _set(DWMWA_USE_IMMERSIVE_DARK_MODE, 1)
             # Explicit grey caption + white text (falls through harmlessly on
-            # Windows 10, which doesn't support these two attributes).
+            # Windows 10, which doesn't support these attributes). The border
+            # colour matches the app background — unset, Windows draws its
+            # default light frame, which reads as white edging around the
+            # dark window.
             _set(DWMWA_CAPTION_COLOR, self._colorref(self._TITLEBAR_GREY))
             _set(DWMWA_TEXT_COLOR, self._colorref("#ffffff"))
+            _set(DWMWA_BORDER_COLOR, self._colorref(C["bg"]))
 
             # NOTE: no WS_EX_COMPOSITED anywhere. It was tried on the
             # top-level (v1.6.26) and on the scroll canvases: both variants
@@ -2421,6 +2442,8 @@ class AppWindow:
 
     def _hist_set_placeholder(self, msg: str) -> None:
         cv = self._hist_cv
+        self._stop_history_playback(redraw=False)
+        self._player_refs = None
         cv.delete("all")
         cv.create_text(14, 16, text=msg, fill=C["subtext"],
                        font=("Segoe UI", 10, "italic"), anchor="nw")
@@ -2433,6 +2456,7 @@ class AppWindow:
         # no longer exists.
         self._hist_hover_index = None
         self._hist_bin_hot = False
+        self._hist_copy_hot = False
         try:
             cv.configure(cursor="")
         except tk.TclError:
@@ -2489,6 +2513,12 @@ class AppWindow:
             self._hist_render_query = q
             self._history_rendered_once = True
             return
+        # A collapsed/vanished row can't keep sounding; a still-expanded row's
+        # player is redrawn below and the progress ticker carries on over it.
+        if self._play_key is not None and self._play_key not in (
+                self._hist_expanded_key, self._hist_confirm_key):
+            self._stop_history_playback(redraw=False)
+        self._player_refs = None
         cv.delete("all")
         self._hist_layout = []
         self._hist_row_starts = []      # y0 per row, sorted — see _history_index_at_y
@@ -2522,12 +2552,15 @@ class AppWindow:
             # Cancel/Delete pair is up it needs to clear the button (which ends
             # at y0+36), so the text starts lower.
             detail_y = 46 if key == self._hist_confirm_key else 34
-            row_h = (detail_y + self._history_detail_height(
-                        text, max(width - 72, 80))
-                     if expanded else 52)
+            text_h = extras_h = 0
+            if expanded:
+                text_h = self._history_detail_height(text, max(width - 72, 80))
+                extras_h = self._history_extras_height(item)
+            row_h = (detail_y + text_h + extras_h) if expanded else 52
             index = len(self._hist_layout)
             entry = {"index": index, "item": item, "key": key, "dt": dt,
-                     "y0": y, "y1": y + row_h, "detail_y": detail_y}
+                     "y0": y, "y1": y + row_h, "detail_y": detail_y,
+                     "text_h": text_h}
             self._hist_layout.append(entry)
             self._hist_row_starts.append(y)
             self._draw_history_canvas_row(entry, width)
@@ -2622,16 +2655,17 @@ class AppWindow:
         text = item.get("refined_text") or item.get("transcribed_text") or ""
         app_name = item.get("app_name") or "Unknown app"
         time_str = entry["dt"].strftime("%H:%M") if entry["dt"] else ""
-        bg_id = cv.create_rectangle(0, y0, width, y1, fill=C["surface"],
-                                    outline="")
-
-        icon_n = self._history_icon(item, C["surface"])
-        icon_id = cv.create_image(11, y0 + 8, image=icon_n, anchor="nw")
-        self._hist_icon_refs.append(icon_n)
-
         confirming = (entry["key"] == self._hist_confirm_key)
         expanded = entry["key"] in (self._hist_expanded_key,
                                     self._hist_confirm_key)
+        base_bg = self._SEL_BG if expanded else C["surface"]
+        bg_id = cv.create_rectangle(0, y0, width, y1, fill=base_bg,
+                                    outline="")
+
+        icon_n = self._history_icon(item, base_bg)
+        icon_id = cv.create_image(11, y0 + 8, image=icon_n, anchor="nw")
+        self._hist_icon_refs.append(icon_n)
+
         # While the Cancel/Delete pair is showing it eats into the header, so the
         # header text has to stop well short of it or it renders underneath.
         text_width = max((width - 227) if confirming else (width - 154), 80)
@@ -2675,7 +2709,7 @@ class AppWindow:
             cv.create_rectangle(width - 22, y0 + 13, width - 12, y0 + 23,
                                 outline=C["subtext"], width=1),
             cv.create_rectangle(width - 26, y0 + 17, width - 16, y0 + 27,
-                                fill=C["surface"], outline=C["subtext"], width=1),
+                                fill=base_bg, outline=C["subtext"], width=1),
         ]
 
         # Line-art trash can (never an emoji glyph — those render inconsistently
@@ -2703,15 +2737,19 @@ class AppWindow:
             for x in (9, 11, 13)
         ]
 
+        entry["hits"] = []
+        extras_refs = {}
         if expanded:
             cv.create_text(57, y0 + entry["detail_y"], text=text,
                            fill=C["text"], font=("Segoe UI", 9), anchor="nw",
                            width=max(width - 72, 80))
+            self._draw_history_extras(entry, width, extras_refs)
 
         self._hist_drawn_rows[entry["index"]] = {
             "bg": bg_id, "icon": icon_id, "icon_n": icon_n,
             "copy": copy_items, "delete": delete_items,
             "time": time_id, "confirm": confirm_items,
+            **extras_refs,
         }
 
     def _history_index_at_y(self, canvas_y: float):
@@ -2736,17 +2774,28 @@ class AppWindow:
         cv = getattr(self, "_hist_cv", None)
         if cv is None:
             return
-        old = self._hist_drawn_rows.get(self._hist_hover_index)
+        old_index = self._hist_hover_index
+        old = self._hist_drawn_rows.get(old_index)
         if old:
-            cv.itemconfigure(old["bg"], fill=C["surface"])
+            old_base = self._row_base_bg(old_index)
+            cv.itemconfigure(old["bg"], fill=old_base)
             cv.itemconfigure(old["icon"], image=old["icon_n"])
             for part in old["delete"]:
                 # Reset the colour too — a bin left red would come back red the
                 # next time this row is hovered.
                 cv.itemconfigure(part, state="hidden", fill=C["subtext"])
+            # Copy glyph loses its hot colour and its overlap-fill goes back
+            # to the row's base.
+            cv.itemconfigure(old["copy"][0], outline=C["subtext"])
+            cv.itemconfigure(old["copy"][1], outline=C["subtext"],
+                             fill=old_base)
             if old["time"] is not None:      # timestamp comes back
                 cv.itemconfigure(old["time"], state="normal")
+            # PIL-rendered images carry a baked-in background — re-render any
+            # on this row against its un-hovered base.
+            self._sync_row_image_bg(old_index, old, old_base)
         self._hist_bin_hot = False
+        self._hist_copy_hot = False
         self._hist_hover_index = index
         row = self._hist_drawn_rows.get(index)
         # Rows are clickable (expand/copy/delete) — show a hand as feedback.
@@ -2756,15 +2805,18 @@ class AppWindow:
             pass
         if not row:
             return
-        cv.itemconfigure(row["bg"], fill=C["surface_hover"])
+        hover_bg = self._row_hover_bg(index)
+        cv.itemconfigure(row["bg"], fill=hover_bg)
+        cv.itemconfigure(row["copy"][1], fill=hover_bg)
         entry = self._hist_layout[index]
         # Hover icon is fetched once per row and kept on the row dict — the
         # old append-per-hover list grew without bound over a long session.
         icon_h = row.get("icon_h")
         if icon_h is None:
-            icon_h = self._history_icon(entry["item"], C["surface_hover"])
+            icon_h = self._history_icon(entry["item"], hover_bg)
             row["icon_h"] = icon_h
         cv.itemconfigure(row["icon"], image=icon_h)
+        self._sync_row_image_bg(index, row, hover_bg)
         if entry["key"] != self._hist_confirm_key:
             # Bin REPLACES the time in its slot — hide one before showing the
             # other or the two render on top of each other.
@@ -2775,17 +2827,31 @@ class AppWindow:
 
     def _on_history_motion(self, event) -> None:
         cv = self._hist_cv
-        index = self._history_index_at_y(cv.canvasy(event.y))
+        canvas_y = cv.canvasy(event.y)
+        index = self._history_index_at_y(canvas_y)
         self._set_history_hover(index)
+        width = cv.winfo_width()
+        row = self._hist_drawn_rows.get(index)
+        # Copy glyph brightens to white when the pointer is actually on it,
+        # so it's obvious it is its own click target. Header slot only.
+        on_copy = (row is not None and event.x >= width - 34
+                   and canvas_y <= self._hist_layout[index]["y0"] + 40)
+        if on_copy != getattr(self, "_hist_copy_hot", False):
+            self._hist_copy_hot = on_copy
+            if row:
+                colour = C["text"] if on_copy else C["subtext"]
+                for part in row["copy"]:
+                    try:
+                        cv.itemconfigure(part, outline=colour)
+                    except tk.TclError:
+                        return
         # Bin turns red when the pointer is actually on it — the delete
         # affordance the widget version had. Only repaints on a state change.
-        width = cv.winfo_width()
         on_bin = (index is not None
                   and width - 66 <= event.x < width - 34)
         if on_bin == getattr(self, "_hist_bin_hot", False):
             return
         self._hist_bin_hot = on_bin
-        row = self._hist_drawn_rows.get(index)
         if not row:
             return
         colour = C["error"] if on_bin else C["subtext"]
@@ -2839,16 +2905,37 @@ class AppWindow:
         width = self._hist_cv.winfo_width()
 
         if key == self._hist_confirm_key:
-            if width - 110 <= event.x <= width - 47:
-                self._delete_history_item(item)
-            elif width - 164 <= event.x < width - 110:
-                self._hist_confirm_key = None
-                self._hist_expanded_key = None
-                self._render_history()
+            entry_y = self._hist_cv.canvasy(event.y)
+            if entry["y0"] <= entry_y <= entry["y0"] + 44:
+                if width - 110 <= event.x <= width - 47:
+                    self._delete_history_item(item)
+                    return
+                if width - 164 <= event.x < width - 110:
+                    self._hist_confirm_key = None
+                    self._hist_expanded_key = None
+                    self._render_history()
+                    return
+        # Expanded-row controls (player / retry / download / delete)
+        canvas_y = self._hist_cv.canvasy(event.y)
+        for hx0, hy0, hx1, hy1, action in entry.get("hits", ()):
+            if hx0 <= event.x <= hx1 and hy0 <= canvas_y <= hy1:
+                if action == "play":
+                    self._toggle_history_play(entry)
+                elif action == "retry":
+                    self._retry_history_item(entry)
+                elif action == "download":
+                    self._download_transcript(entry)
+                elif action == "delete":
+                    self._hist_confirm_key = key
+                    self._hist_expanded_key = key
+                    self._render_history()
+                return
+        if key == self._hist_confirm_key:
             return
         if event.x >= width - 34:
             text = item.get("refined_text") or item.get("transcribed_text") or ""
             self._copy_to_clipboard(text)
+            self._flash_copy_tick(index)
             return
         # Bin slot = the timestamp slot (width-62 … width-40), padded a little.
         if (width - 66 <= event.x < width - 34
@@ -2886,6 +2973,475 @@ class AppWindow:
         if btn:
             btn.configure(text="✓", fg=C["success"])
             self._root.after(1500, lambda: btn.configure(text="⎘", fg=C["subtext"]))
+
+    # ── History row: copy tick ────────────────────────────────────────────────
+
+    def _tick_photo(self, bg: str):
+        try:
+            import ui_render
+            return ui_render.icon_glyph(self._hist_cv, "check", 20,
+                                        C["success"], bg)
+        except Exception:
+            return None
+
+    def _flash_copy_tick(self, index) -> None:
+        """Swap the copy glyph for a tick for a moment — the copied cue."""
+        cv = self._hist_cv
+        row = self._hist_drawn_rows.get(index)
+        if not row or row.get("tick") is not None:
+            return
+        try:
+            entry = self._hist_layout[index]
+        except (IndexError, TypeError):
+            return
+        width = cv.winfo_width()
+        for part in row["copy"]:
+            cv.itemconfigure(part, state="hidden")
+        photo = self._tick_photo(self._row_bg(index))
+        if photo is not None:
+            tick = cv.create_image(width - 29, entry["y0"] + 10,
+                                   image=photo, anchor="nw")
+            self._hist_icon_refs.append(photo)
+        else:
+            tick = cv.create_line(
+                width - 27, entry["y0"] + 20, width - 21, entry["y0"] + 26,
+                width - 12, entry["y0"] + 13, fill=C["success"], width=2,
+                capstyle="round", joinstyle="round")
+        row["tick"] = tick
+        gen = row["tick_gen"] = row.get("tick_gen", 0) + 1
+
+        def _restore():
+            # A re-render in the meantime replaced the row dicts and cleared
+            # the canvas — item ids are never reused, so these become no-ops.
+            if row.get("tick_gen") != gen:
+                return
+            row.pop("tick", None)
+            try:
+                cv.delete(tick)
+                for part in row["copy"]:
+                    cv.itemconfigure(part, state="normal")
+            except tk.TclError:
+                pass
+
+        try:
+            cv.after(1400, _restore)
+        except tk.TclError:
+            pass
+
+    # ── History row: audio player + actions ───────────────────────────────────
+
+    _HIST_PLAYER_H = 46
+    _HIST_ACTIONS_H = 40
+    _HIST_FOOTER_H = 44
+    _WAVE_GREY = "#3a3a3a"
+    # The clicked-open row keeps a lighter base so it reads as selected even
+    # when the pointer moves away; its hover state steps up once more.
+    _SEL_BG = "#242424"
+    _SEL_HOVER = "#2e2e2e"
+    _LANG_NAMES = {"": "Auto", "auto": "Auto", "en": "English", "es": "Spanish",
+                   "fr": "French", "de": "German", "it": "Italian",
+                   "pt": "Portuguese", "nl": "Dutch", "pl": "Polish"}
+
+    def _row_is_selected(self, index) -> bool:
+        try:
+            key = self._hist_layout[index]["key"]
+        except (IndexError, TypeError):
+            return False
+        return key in (self._hist_expanded_key, self._hist_confirm_key)
+
+    def _row_base_bg(self, index) -> str:
+        return self._SEL_BG if self._row_is_selected(index) else C["surface"]
+
+    def _row_hover_bg(self, index) -> str:
+        return self._SEL_HOVER if self._row_is_selected(index) \
+            else C["surface_hover"]
+
+    def _row_bg(self, index) -> str:
+        return self._row_hover_bg(index) if self._hist_hover_index == index \
+            else self._row_base_bg(index)
+
+    @staticmethod
+    def _fmt_clock(seconds: float) -> str:
+        s = max(0, int(seconds + 0.5))
+        return f"{s // 60}:{s % 60:02d}"
+
+    @staticmethod
+    def _hist_created_label(dt) -> str:
+        if not dt:
+            return "—"
+        label = f"{dt.day} {dt.strftime('%b')}"
+        if dt.year != datetime.now().year:
+            label += f" {dt.year}"
+        return f"{label}, {dt.strftime('%H:%M')}"
+
+    def _audio_path_for(self, item: dict):
+        """Stored WAV for a history row (None off this device). Cached — the
+        lookup runs during row layout."""
+        created = item.get("created_at") or ""
+        if not created:
+            return None
+        cached = self._audio_path_cache.get(created, False)
+        if cached is not False:
+            return cached
+        try:
+            import audio_store
+            path = audio_store.find(created)
+        except Exception:
+            path = None
+        self._audio_path_cache[created] = path
+        return path
+
+    def _wave_info(self, path: str):
+        """(duration, peak levels) for the progress bar, cached per file."""
+        info = self._wave_cache.get(path)
+        if info is None:
+            try:
+                import audio_store
+                info = audio_store.waveform(path)
+            except Exception as e:
+                print(f"[History] waveform read failed: {e}")
+                info = (0.0, [])
+            self._wave_cache[path] = info
+        return info
+
+    def _media_photo(self, kind: str, bg: str):
+        try:
+            import ui_render
+            return ui_render.icon_media(self._hist_cv, kind, 30,
+                                        C["accent"], "#0d0d0d", bg)
+        except Exception:
+            return None
+
+    def _sync_row_image_bg(self, index, row: dict, bg: str) -> None:
+        """Hover flips the row fill; PIL images bake their background in, so
+        swap any on this row for the variant rendered against the new fill."""
+        cv = self._hist_cv
+        if row.get("tick") is not None:
+            photo = self._tick_photo(bg)
+            if photo is not None:
+                try:
+                    cv.itemconfigure(row["tick"], image=photo)
+                    self._hist_icon_refs.append(photo)
+                except tk.TclError:
+                    pass
+        if row.get("media") is not None:
+            kind = "play"
+            try:
+                if self._play_key == self._hist_layout[index]["key"]:
+                    kind = "stop"
+            except (IndexError, TypeError):
+                pass
+            photo = self._media_photo(kind, bg)
+            if photo is not None:
+                try:
+                    cv.itemconfigure(row["media"], image=photo)
+                    self._hist_icon_refs.append(photo)
+                except tk.TclError:
+                    pass
+
+    def _history_extras_height(self, item: dict) -> int:
+        """Height of everything under the full text in an expanded row. Must
+        mirror _draw_history_extras exactly or rows overlap."""
+        h = self._HIST_ACTIONS_H + self._HIST_FOOTER_H
+        if self._audio_path_for(item):
+            h += self._HIST_PLAYER_H
+        return h
+
+    def _draw_history_extras(self, entry: dict, width: int, refs: dict) -> None:
+        cv = self._hist_cv
+        item, key = entry["item"], entry["key"]
+        x0 = 57
+        ey = entry["y0"] + entry["detail_y"] + entry["text_h"]
+        hits = entry["hits"]
+        path = self._audio_path_for(item)
+        duration = 0.0
+
+        if path:
+            duration, peaks = self._wave_info(path)
+            cy = ey + self._HIST_PLAYER_H // 2
+            playing = (self._play_key == key)
+            photo = self._media_photo("stop" if playing else "play",
+                                      self._row_bg(entry["index"]))
+            if photo is not None:
+                refs["media"] = cv.create_image(x0, cy - 15, image=photo,
+                                                anchor="nw")
+                self._hist_icon_refs.append(photo)
+            else:
+                cv.create_oval(x0, cy - 15, x0 + 30, cy + 15,
+                               fill=C["accent"], outline="")
+                if playing:
+                    cv.create_rectangle(x0 + 11, cy - 4, x0 + 19, cy + 4,
+                                        fill=C["bg"], outline="")
+                else:
+                    cv.create_polygon(x0 + 12, cy - 6, x0 + 12, cy + 6,
+                                      x0 + 22, cy, fill=C["bg"], outline="")
+            hits.append((x0 - 3, cy - 18, x0 + 33, cy + 18, "play"))
+
+            elapsed = (time.monotonic() - self._play_started) if playing else 0.0
+            elapsed = min(elapsed, duration)
+            time_id = cv.create_text(
+                width - 18, cy,
+                text=f"{self._fmt_clock(elapsed)} / {self._fmt_clock(duration)}",
+                fill=C["subtext"], font=("Segoe UI", 8), anchor="e")
+
+            # Waveform: peak-per-bucket bars, so speech is tall and silence
+            # flat — the accent fill tracks playback over real speaking time.
+            bx0, bx1 = x0 + 42, width - 96
+            avail = max(bx1 - bx0, 40)
+            n = max(16, min(80, avail // 5))
+            step = avail / n
+            m = len(peaks)
+            bars = []
+            frac = (elapsed / duration) if (playing and duration > 0) else 0.0
+            fill_to = int(frac * n + 0.5)
+            for i in range(n):
+                p = peaks[int(i * m / n)] if m else 0.0
+                h = 3 + (p ** 0.7) * 22
+                x = bx0 + i * step
+                bars.append(cv.create_rectangle(
+                    x, cy - h / 2, x + 3, cy + h / 2,
+                    fill=C["accent"] if i < fill_to else self._WAVE_GREY,
+                    outline=""))
+            if playing:
+                self._play_filled = fill_to
+            self._player_refs = {"key": key, "index": entry["index"],
+                                 "bars": bars, "time": time_id,
+                                 "media": refs.get("media"),
+                                 "duration": duration}
+            ey += self._HIST_PLAYER_H
+
+        # Action chips: Retry (audio on this device only) / Download / Delete.
+        font = getattr(self, "_hist_btn_font", None)
+        if font is None:
+            font = self._hist_btn_font = tkfont.Font(family="Segoe UI", size=9)
+        retrying = key in self._hist_retry_keys
+        can_retry = bool(path) and self._retranscribe is not None
+        variants = []
+        for long_labels in (True, False):
+            defs = []
+            if can_retry:
+                if retrying:
+                    defs.append(("Retrying…", "retry"))
+                else:
+                    defs.append(("↻  Retry transcription" if long_labels
+                                 else "↻ Retry", "retry"))
+            defs.append(("↓  Download transcript" if long_labels
+                         else "↓ Download", "download"))
+            defs.append(("Delete", "delete"))
+            variants.append(defs)
+        avail = width - x0 - 15
+        defs = variants[0]
+        if sum(font.measure(t) + 26 for t, _ in defs) + 8 * (len(defs) - 1) > avail:
+            defs = variants[1]
+        by = ey + 4
+        bx = x0
+        for label, action in defs:
+            w = font.measure(label) + 26
+            fg = C["error"] if action == "delete" else C["text"]
+            _rr(cv, bx, by, bx + w, by + 28, 8,
+                fill="#2a2a2a", outline=C["border"], width=1)
+            cv.create_text(bx + w / 2, by + 14, text=label, fill=fg,
+                           font=font, anchor="center")
+            if not (action == "retry" and retrying):
+                hits.append((bx, by, bx + w, by + 28, action))
+            bx += w + 8
+        ey += self._HIST_ACTIONS_H
+
+        # Metadata footer: Created / Duration / Words / Language.
+        text = item.get("refined_text") or item.get("transcribed_text") or ""
+        lang = ""
+        if self._config is not None:
+            lang = (getattr(self._config, "language", "en") or "").lower()
+        cols = [
+            ("CREATED", self._hist_created_label(entry.get("dt"))),
+            ("DURATION", self._fmt_clock(duration) if path else "—"),
+            ("WORDS", str(len(text.split()))),
+            ("LANGUAGE", self._LANG_NAMES.get(lang, lang.upper() or "Auto")),
+        ]
+        fy = ey + 8
+        col_w = max((width - x0 - 20) / len(cols), 60)
+        for i, (lab, val) in enumerate(cols):
+            cx = x0 + i * col_w
+            cv.create_text(cx, fy, text=lab, fill=C["subtext"],
+                           font=("Segoe UI", 7, "bold"), anchor="nw")
+            cv.create_text(cx, fy + 13, text=val, fill=C["text"],
+                           font=("Segoe UI", 8), anchor="nw")
+
+    # ── History audio playback ────────────────────────────────────────────────
+
+    def _toggle_history_play(self, entry: dict) -> None:
+        key = entry["key"]
+        if self._play_key == key:
+            self._stop_history_playback()
+            return
+        self._stop_history_playback()
+        path = self._audio_path_for(entry["item"])
+        if not path:
+            return
+        duration, _peaks = self._wave_info(path)
+        try:
+            import winsound
+            winsound.PlaySound(
+                path, winsound.SND_FILENAME | winsound.SND_ASYNC
+                | winsound.SND_NODEFAULT)
+        except Exception as e:
+            print(f"[History] Playback failed: {e}")
+            return
+        self._play_key = key
+        self._play_started = time.monotonic()
+        self._play_duration = max(duration, 0.05)
+        self._play_filled = 0
+        refs = self._player_refs
+        if refs and refs.get("key") == key and refs.get("media") is not None:
+            photo = self._media_photo("stop", self._row_bg(entry["index"]))
+            if photo is not None:
+                try:
+                    self._hist_cv.itemconfigure(refs["media"], image=photo)
+                    self._hist_icon_refs.append(photo)
+                except tk.TclError:
+                    pass
+        try:
+            self._play_job = self._root.after(50, self._tick_history_play)
+        except tk.TclError:
+            self._play_job = None
+
+    def _stop_history_playback(self, *, redraw: bool = True) -> None:
+        job = self._play_job
+        self._play_job = None
+        if job is not None:
+            try:
+                self._root.after_cancel(job)
+            except tk.TclError:
+                pass
+        if self._play_key is None:
+            return
+        try:
+            import winsound
+            winsound.PlaySound(None, winsound.SND_PURGE)
+        except Exception:
+            pass
+        key, self._play_key = self._play_key, None
+        self._play_filled = 0
+        refs = self._player_refs
+        if redraw and refs and refs.get("key") == key:
+            cv = self._hist_cv
+            try:
+                for bar in refs["bars"]:
+                    cv.itemconfigure(bar, fill=self._WAVE_GREY)
+                cv.itemconfigure(
+                    refs["time"],
+                    text=f"0:00 / {self._fmt_clock(refs['duration'])}")
+                if refs.get("media") is not None:
+                    photo = self._media_photo("play",
+                                              self._row_bg(refs["index"]))
+                    if photo is not None:
+                        cv.itemconfigure(refs["media"], image=photo)
+                        self._hist_icon_refs.append(photo)
+            except tk.TclError:
+                pass
+
+    def _tick_history_play(self) -> None:
+        self._play_job = None
+        if self._play_key is None:
+            return
+        elapsed = time.monotonic() - self._play_started
+        frac = min(elapsed / self._play_duration, 1.0)
+        refs = self._player_refs
+        cv = getattr(self, "_hist_cv", None)
+        if refs and cv is not None and refs.get("key") == self._play_key:
+            bars = refs["bars"]
+            fill_to = int(frac * len(bars) + 0.5)
+            try:
+                if fill_to > self._play_filled:
+                    for bar in bars[self._play_filled:fill_to]:
+                        cv.itemconfigure(bar, fill=C["accent"])
+                self._play_filled = fill_to
+                cv.itemconfigure(
+                    refs["time"],
+                    text=f"{self._fmt_clock(min(elapsed, self._play_duration))}"
+                         f" / {self._fmt_clock(self._play_duration)}")
+            except tk.TclError:
+                pass
+        if frac >= 1.0:
+            self._stop_history_playback()
+            return
+        try:
+            self._play_job = self._root.after(50, self._tick_history_play)
+        except tk.TclError:
+            self._play_job = None
+
+    # ── History actions: retry / download ─────────────────────────────────────
+
+    def _retry_history_item(self, entry: dict) -> None:
+        key, item = entry["key"], entry["item"]
+        if (key in self._hist_retry_keys or self._retranscribe is None
+                or self._db is None):
+            return
+        path = self._audio_path_for(item)
+        if not path:
+            return
+        self._hist_retry_keys.add(key)
+        self._render_history()
+
+        current = item.get("refined_text") or item.get("transcribed_text") or ""
+
+        def _worker():
+            new_text = ""
+            try:
+                import audio_store
+                audio, rate = audio_store.read(path)
+                new_text = (self._retranscribe(audio, rate, current)
+                            or "").strip()
+            except Exception as exc:
+                print(f"[History] Retry transcription failed: {exc}")
+
+            def _done():
+                self._hist_retry_keys.discard(key)
+                old = item.get("refined_text") \
+                    or item.get("transcribed_text") or ""
+                if new_text and (new_text != old or item.get("refined_text")):
+                    try:
+                        self._db.update_transcription(item, new_text)
+                    except Exception as exc:
+                        print(f"[History] Update failed: {exc}")
+                    item["transcribed_text"] = new_text
+                    item.pop("refined_text", None)
+                    # Text is part of a local row's key — carry the expansion
+                    # over so the row doesn't snap shut on completion.
+                    new_key = self._history_item_key(item)
+                    if self._hist_expanded_key == key:
+                        self._hist_expanded_key = new_key
+                    if self._hist_confirm_key == key:
+                        self._hist_confirm_key = new_key
+                    self._history_fingerprint = \
+                        self._history_items_fingerprint(self._hist_all)
+                self._render_history()
+
+            self._ui_after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True,
+                         name="history-retry").start()
+
+    def _download_transcript(self, entry: dict) -> None:
+        item = entry["item"]
+        text = item.get("refined_text") or item.get("transcribed_text") or ""
+        dt = entry.get("dt")
+        stamp = dt.strftime("%Y-%m-%d %H.%M") if dt else "transcript"
+        from tkinter import filedialog
+        try:
+            path = filedialog.asksaveasfilename(
+                parent=self._root, defaultextension=".txt",
+                initialfile=f"FTC Whisper {stamp}.txt",
+                filetypes=[("Text file", "*.txt"), ("All files", "*.*")])
+        except tk.TclError:
+            return
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        except Exception as exc:
+            print(f"[History] Transcript save failed: {exc}")
 
     def _confirm_clear_history(self) -> None:
         self._cancel_smooth_scroll(self._hist_cv)
@@ -3868,6 +4424,10 @@ class AppWindow:
             self._root.destroy()
 
     def _hide(self) -> None:
+        try:
+            self._stop_history_playback(redraw=False)
+        except Exception:
+            pass
         self._root.withdraw()
 
     def _resize(self, w: int, h: int) -> None:

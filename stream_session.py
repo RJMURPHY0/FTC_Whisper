@@ -47,9 +47,14 @@ class StreamingSession:
         captions_enabled: bool = False,
         on_inject: Optional[Callable[[str], bool]] = None,
         live_inject: bool = False,
+        audio_sink=None,
     ):
         self._recorder = recorder
         self._engine = engine
+        # Committed audio is dropped from the recorder ring to keep memory
+        # flat, so the sink is the only place the full clip survives: each
+        # chunk is handed over at the exact moment its samples are committed.
+        self._audio_sink = audio_sink
         self._context = context_words
         self._hotwords = hotwords
         self._on_caption = on_caption
@@ -136,6 +141,11 @@ class StreamingSession:
                         print(f"[Stream] Committed {boundary / rate:.1f}s: '{text[:60]}…'")
                     # Advance even when the chunk transcribed empty (pure noise) so
                     # a noisy environment can't make the window grow unbounded.
+                    # Sink write sits inside the same locked commit: a tick that
+                    # loses the finalize race returns above and never writes, so
+                    # the tail (which re-covers its audio) can't be duplicated.
+                    if self._audio_sink is not None:
+                        self._audio_sink.write(chunk, rate)
                     self._committed_sample += boundary
                     self._recorder.drop_audio_before(self._committed_sample)
                     # The caption window's start just moved — the previous

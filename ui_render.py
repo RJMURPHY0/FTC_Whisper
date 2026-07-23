@@ -230,6 +230,20 @@ def icon_glyph(master, name: str, size: int = 20, color: str = "#f39200",
             for cx, cy, r in ((16.5, 7, 2.6), (10.5, 5, 1.5), (19, 12.5, 1.5)):
                 L((cx - r, cy), (cx + r, cy))
                 L((cx, cy - r), (cx, cy + r))
+        elif name == "check":
+            # copied-to-clipboard tick
+            L((4.5, 12.5), (10, 18), (19.5, 6.5))
+        elif name == "retry":
+            # circular arrow — retry transcription
+            d.arc([5 * u, 5 * u, 19 * u, 19 * u], start=-40, end=230,
+                  fill=color, width=lw)
+            d.polygon([(17.2 * u, 3.2 * u), (21.2 * u, 8.4 * u),
+                       (14.8 * u, 8.8 * u)], fill=color)
+        elif name == "download":
+            L((12, 4), (12, 14))
+            L((7.8, 10.2), (12, 14.4))
+            L((16.2, 10.2), (12, 14.4))
+            L((5, 16.5), (5, 19.5), (19, 19.5), (19, 16.5))
         else:
             raise ValueError(f"unknown glyph {name!r}")
 
@@ -237,6 +251,25 @@ def icon_glyph(master, name: str, size: int = 20, color: str = "#f39200",
         return _photo(key, master, _draw, size, size)
     except Exception:
         return None
+
+
+def icon_media(master, kind: str, size: int = 30, accent: str = "#f39200",
+               fg: str = "#0d0d0d", bg: str = "#1a1a1a"):
+    """History player button: accent-filled circle holding a play triangle or
+    a stop square. Cached per bg — play/stop toggling is an image swap."""
+    key = ("media", kind, size, accent, fg, bg)
+
+    def _draw(d, s):
+        u = size * s / 30.0
+        d.ellipse([1 * u, 1 * u, 29 * u, 29 * u], fill=accent)
+        if kind == "play":
+            d.polygon([(12 * u, 9.3 * u), (12 * u, 20.7 * u),
+                       (21.5 * u, 15 * u)], fill=fg)
+        else:
+            d.rounded_rectangle([10.5 * u, 10.5 * u, 19.5 * u, 19.5 * u],
+                                radius=1.5 * u, fill=fg)
+
+    return _photo(key, master, _draw, size, size)
 
 
 def icon_doc(master, size: int = 20, color: str = "#777777",

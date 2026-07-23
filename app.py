@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.29"
+APP_VERSION = "1.6.30"
 
 
 class WhisperFlowApp:
@@ -152,6 +152,10 @@ class WhisperFlowApp:
         # Monotonic id per dictation: stale upgrade results from a previous
         # dictation are discarded instead of contaminating the current popup.
         self._dictation_seq = 0
+        # Per-dictation local audio persistence (history playback/retry)
+        self._audio_writer = None
+        # CRM contact/company names merged into hotwords (see _load_estate_vocab)
+        self._estate_vocab = ""
         # Model change requested while recording — applied when idle again
         self._pending_model_change: str | None = None
         # Auto-update: restart only after a stretch of inactivity. Seeded with
@@ -241,9 +245,18 @@ class WhisperFlowApp:
             # Late-bind the settings tab's device tools now the recorder exists.
             try:
                 self.app_window.attach_audio(
-                    recorder=self.recorder, transcriber=self.transcriber)
+                    recorder=self.recorder, transcriber=self.transcriber,
+                    retranscribe=self._retranscribe_audio)
             except Exception as e:
                 print(f"[App] attach_audio failed (non-fatal): {e}")
+
+            # Trim stored dictation audio past the count/size cap (we're
+            # already off the UI thread here).
+            try:
+                import audio_store
+                audio_store.prune()
+            except Exception as e:
+                print(f"[App] audio prune failed (non-fatal): {e}")
 
             self.popup.set_voice_capture_fns(
                 start=self.recorder.start_aux_capture,
@@ -321,6 +334,48 @@ class WhisperFlowApp:
         """Engine used for immediate/injection transcription."""
         return self.parakeet if self._use_parakeet() else self.fast_transcriber
 
+    def _retranscribe_audio(self, audio, rate: int, current_text: str = "") -> str:
+        """History "Retry transcription": a genuinely different pass, not a
+        rerun. The original text usually came from Parakeet's streamed
+        commits, so retry transcribes the WHOLE clip in one window with both
+        engines (Parakeet full-clip + the accurate whisper model), prefers a
+        reading that differs from the text the user just rejected, and
+        finishes with the word-count-guarded LLM context fix. No rolling
+        context — it belongs to the current session, not an old recording.
+        Serialised internally by each engine's _transcribe_lock."""
+        hw = self._get_hotwords()
+        candidates = []
+        if self._use_parakeet():
+            try:
+                candidates.append(self.parakeet.transcribe(
+                    audio, rate, hotwords_str=hw).strip())
+            except Exception as e:
+                print(f"[App] Retry parakeet pass failed: {e}")
+        if self.transcriber is not None:
+            try:
+                candidates.append(self.transcriber.transcribe(
+                    audio, rate, hotwords_str=hw).strip())
+            except Exception as e:
+                print(f"[App] Retry whisper pass failed: {e}")
+        candidates = [c for c in candidates if c]
+        if not candidates:
+            return ""
+
+        def _norm(s: str) -> str:
+            return " ".join("".join(ch.lower() for ch in s
+                                    if ch.isalnum() or ch.isspace()).split())
+
+        # The user pressed Retry because the current text is wrong — a
+        # candidate that reads the same is not an answer if any other differs.
+        fresh = [c for c in candidates if _norm(c) != _norm(current_text)]
+        pick = fresh[0] if fresh else candidates[0]
+        if self.ai_refiner.is_available and len(pick.split()) >= 4:
+            try:
+                pick = self.ai_refiner.context_fix(pick) or pick
+            except Exception as e:
+                print(f"[App] Retry context_fix failed: {e}")
+        return pick.strip()
+
     # ------------------------------------------------------------------
     # Startup
     # ------------------------------------------------------------------
@@ -366,6 +421,11 @@ class WhisperFlowApp:
         if self.db.is_enabled:
             threading.Thread(
                 target=self._fetch_remote_api_keys, daemon=True, name="api-key-fetch"
+            ).start()
+            # Accuracy: fold the user's CRM contact/company names into the
+            # hotwords (needs the authenticated client for RLS).
+            threading.Thread(
+                target=self._load_estate_vocab, daemon=True, name="estate-vocab"
             ).start()
 
         if self.ai_refiner.is_available:
@@ -817,6 +877,11 @@ class WhisperFlowApp:
                     self._rec_cursor_x, self._rec_cursor_y = pt.x, pt.y
                 except Exception:
                     self._rec_cursor_x, self._rec_cursor_y = 0, 0
+            # Per-dictation audio persistence (history playback/retry). The
+            # writer is a cheap object here — the WAV opens lazily on the
+            # first background write, never on this hotkey-press path.
+            from audio_store import DictationAudioWriter
+            self._audio_writer = DictationAudioWriter()
             # Start capture FIRST, beep second — the beep is the user's cue to
             # speak, so audio must already be flowing when they hear it. (With
             # the warm mic this also captures ~0.35s of pre-roll.)
@@ -855,6 +920,7 @@ class WhisperFlowApp:
                     captions_enabled=bool(getattr(self.config, "live_captions", False)) and not live,
                     on_inject=self._on_stream_inject if live else None,
                     live_inject=live,
+                    audio_sink=self._audio_writer,
                 )
                 self._session = session
                 session.start()
@@ -870,6 +936,11 @@ class WhisperFlowApp:
         self._cancel_recording_timer()
         session = self._session
         self._session = None
+        # Take ownership of this dictation's audio writer. Every discard path
+        # below must abort() it; the success path finish()es it under the
+        # history row's created_at so playback/retry can find the clip.
+        audio_writer = getattr(self, "_audio_writer", None)
+        self._audio_writer = None
 
         # Stop the whisper-fallback caption loop (Parakeet captions live inside
         # the streaming session) and wait for any in-flight tick, so no caption
@@ -909,6 +980,10 @@ class WhisperFlowApp:
                 # ── Parakeet path: committed prefix + tail-only final pass ──
                 text, tail_audio, capture_rate = session.finalize()
                 final_audio = tail_audio
+                # Committed chunks are already in the writer (session sink);
+                # the tail completes the clip. Discard paths abort() below.
+                if audio_writer is not None and tail_audio is not None:
+                    audio_writer.write(tail_audio, capture_rate)
                 _streamed = session.injected_text if self._live_inject_active else ""
                 # Near-silence gate: when nothing was committed while speaking
                 # and the whole result came from an essentially silent tail,
@@ -936,6 +1011,8 @@ class WhisperFlowApp:
                         else:
                             print("[App] Empty transcription result.")
                             self.feedback.error_occurred("No speech detected")
+                        if audio_writer is not None:
+                            audio_writer.abort()
                         self.hotkey_manager.set_idle()
                         return
                 transcribed_text = text
@@ -950,6 +1027,8 @@ class WhisperFlowApp:
 
                 if audio is None or len(audio) < capture_rate * 0.3:
                     print("[App] Recording too short, ignoring.")
+                    if audio_writer is not None:
+                        audio_writer.abort()
                     self.hotkey_manager.set_idle()
                     self.feedback.error_occurred("Recording too short")
                     return
@@ -964,9 +1043,13 @@ class WhisperFlowApp:
                 if _clip_peak < 0.002:
                     print(f"[App] Near-silent clip (peak={_clip_peak:.4f}) — "
                           "skipping transcription entirely.")
+                    if audio_writer is not None:
+                        audio_writer.abort()
                     self.hotkey_manager.set_idle()
                     self.feedback.error_occurred("No speech detected")
                     return
+                if audio_writer is not None:
+                    audio_writer.write(final_audio, capture_rate)
                 print(
                     f"[App] Transcribing {len(final_audio) / capture_rate:.1f}s of audio at {capture_rate} Hz..."
                 )
@@ -985,6 +1068,8 @@ class WhisperFlowApp:
                     peak = float(_np.max(_np.abs(final_audio))) if len(final_audio) else 0.0
                     if peak < 0.002:
                         print("[App] Silence detected — skipping accurate fallback.")
+                        if audio_writer is not None:
+                            audio_writer.abort()
                         self.hotkey_manager.set_idle()
                         self.feedback.error_occurred("No speech detected")
                         return
@@ -992,6 +1077,8 @@ class WhisperFlowApp:
                         final_audio, capture_rate, context_words=_ctx, hotwords_str=_hw).strip()
                     if not text:
                         print("[App] Empty transcription result.")
+                        if audio_writer is not None:
+                            audio_writer.abort()
                         self.hotkey_manager.set_idle()
                         self.feedback.error_occurred("No speech detected")
                         return
@@ -1004,6 +1091,8 @@ class WhisperFlowApp:
             import traceback
 
             traceback.print_exc()
+            if audio_writer is not None:
+                audio_writer.abort()
             self.feedback.error_occurred(str(e))
             self.hotkey_manager.set_idle()
             return
@@ -1138,11 +1227,18 @@ class WhisperFlowApp:
             except Exception as e:
                 print(f"[Stats] record failed (non-fatal): {e}")
             _app = getattr(self, "_recording_app", None) or {}
+            # The timestamp is minted HERE so the saved clip and the history
+            # row share one identity — audio_store keys the WAV by created_at.
+            import datetime as _dt
+            _created_at = _dt.datetime.now(_dt.timezone.utc).isoformat()
+            if audio_writer is not None:
+                audio_writer.finish(_created_at)
             threading.Thread(
                 target=self.db.log_transcription,
                 args=(transcribed_text,),
                 kwargs={"app_name": _app.get("app_name", ""),
-                        "app_exe": _app.get("app_exe", "")},
+                        "app_exe": _app.get("app_exe", ""),
+                        "created_at": _created_at},
                 daemon=True,
             ).start()
         except Exception as e:
@@ -1236,6 +1332,10 @@ class WhisperFlowApp:
     def _on_cancel_recording(self) -> None:
         session = self._session
         self._session = None
+        _writer = getattr(self, "_audio_writer", None)
+        self._audio_writer = None
+        if _writer is not None:
+            _writer.abort()
         self._caption_stop_event.set()
         self._caption_loop_running.clear()
         try:
@@ -1285,7 +1385,43 @@ class WhisperFlowApp:
             self._context_deque.extend(text.split()[-30:])
 
     def _get_hotwords(self) -> str:
-        return (getattr(self.config, "custom_vocabulary", "") or "").strip()
+        custom = (getattr(self.config, "custom_vocabulary", "") or "").strip()
+        estate = getattr(self, "_estate_vocab", "") or ""
+        if custom and estate:
+            return f"{custom}, {estate}"
+        return custom or estate
+
+    def _load_estate_vocab(self) -> None:
+        """Names the user actually dictates — their CRM contacts and companies
+        from the shared FTC Supabase project — folded into the hotwords for
+        both engines and the LLM fix. Best-effort: cached locally for offline,
+        silently absent when signed out or the table isn't reachable."""
+        import json as _json
+        cache_path = os.path.join(
+            os.environ.get("APPDATA") or os.path.expanduser("~"),
+            "FTC Whisper", "estate-vocab.json")
+        if not getattr(self, "_estate_vocab", ""):
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    cached = _json.load(f)
+                if isinstance(cached, list) and cached:
+                    self._estate_vocab = ", ".join(cached)
+            except Exception:
+                pass
+        try:
+            terms = self.db.fetch_contact_vocab()
+        except Exception as e:
+            print(f"[App] Estate vocab fetch failed (non-fatal): {e}")
+            return
+        if terms:
+            self._estate_vocab = ", ".join(terms)
+            print(f"[App] Estate vocab: {len(terms)} CRM terms loaded")
+            try:
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    _json.dump(terms, f, ensure_ascii=False)
+            except Exception:
+                pass
 
     def _on_state_change(self, state: AppState) -> None:
         self.app_window.update_status(
