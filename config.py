@@ -81,6 +81,8 @@ class Config:
     auto_punctuate: bool = True   # Add trailing period when Whisper output has no terminal punctuation
     live_captions: bool = False   # Show live text of what you're saying (replaces the waveform bar while recording)
     live_inject: bool = False     # Type words into the app live as you speak (Parakeet mode); corrects at hotkey-release
+    auto_paragraphs: bool = True  # Paragraph break after a clear pause (2s+ silence following a finished sentence); Parakeet path, off during Live Typing
+    parakeet_version: str = "v2"  # Parakeet model: "v2" (English) or "v3" (multilingual, lower WER); switching triggers a one-time ~660 MB download
     trailing_space: bool = False  # Append a space after each injection (useful when dictating mid-sentence)
     auto_enter: bool = False      # Press Enter after injection (useful for chat/search boxes)
     toggle_timeout: int = 0       # Seconds before auto-stopping in toggle mode (0 = disabled; long dictation must not be cut off)
@@ -297,5 +299,20 @@ class Config:
                 print("[Config] Migrated Supabase backend to shared FTC project.")
             except Exception as e:
                 print(f"[Config] Backend migration save failed (non-fatal): {e}")
+
+        # One-time migration: the hold/toggle mode UI is gone. Hands-free
+        # (toggle) belongs to the main bind and hold-to-talk to the
+        # push-to-talk bind, so a legacy "hold" main bind is coerced to
+        # toggle whenever a PTT bind exists to carry hold semantics. A
+        # hold-mode config with NO PTT bind is left alone: hold is that
+        # user's only way to dictate.
+        if config.mode == "hold" and config.ptt_hotkey:
+            config.mode = "toggle"
+            try:
+                config.save()
+                print("[Config] Migrated main bind to hands-free (toggle); "
+                      "hold lives on the push-to-talk bind.")
+            except Exception as e:
+                print(f"[Config] Mode migration save failed (non-fatal): {e}")
 
         return config

@@ -21,6 +21,7 @@ hotkey is still physically held causes its own problems.
 
 import ctypes
 import ctypes.wintypes
+import os
 import threading
 import time
 
@@ -281,6 +282,57 @@ def foreground_is_elevated_blocked() -> bool:
     return False
 
 
+def _get_fg_exe() -> str:
+    """Best-effort exe name of the foreground window's process ('' unknown)."""
+    try:
+        hwnd = _u32.GetForegroundWindow()
+        if not hwnd:
+            return ""
+        pid = ctypes.wintypes.DWORD(0)
+        _u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return ""
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        h = _k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+        if not h:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(260)
+            size = ctypes.wintypes.DWORD(260)
+            if _k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                return os.path.basename(buf.value)
+        finally:
+            _k32.CloseHandle(h)
+    except Exception:
+        pass
+    return ""
+
+
+def _log_inject_failure(detail: str) -> None:
+    """Append one line to a small rolling failure log. The frozen exe has no
+    console, so this file is the only way a 'text never landed' report from
+    another machine can say WHICH app, WHICH strategy, and whether the target
+    was elevated. %LOCALAPPDATA%\\FTC Whisper\\inject-failures.log"""
+    try:
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        folder = os.path.join(base, "FTC Whisper")
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, "inject-failures.log")
+        lines: list[str] = []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except OSError:
+            pass
+        lines.append(time.strftime("%Y-%m-%d %H:%M:%S") + "  " + detail + "\n")
+        if len(lines) > 200:
+            lines = lines[-150:]
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    except Exception:
+        pass
+
+
 # ── Injection methods ─────────────────────────────────────────────────────────
 
 
@@ -460,6 +512,19 @@ class Injector:
                     print("[Injector] Retry succeeded.")
                 else:
                     print("[Injector] Retry also failed.")
+            if not result:
+                # Hard failure: capture WHY in the rolling field log so a
+                # "text never landed" report from any device is diagnosable.
+                detail = (
+                    f"target={_get_fg_exe() or '?'} class={_get_fg_class()!r} "
+                    f"method={self.method} chars={len(text)}"
+                    + (" partial-direct (no paste retry)"
+                       if self._partial_direct else "")
+                    + (" ELEVATED-TARGET (run FTC Whisper as admin)"
+                       if foreground_is_elevated_blocked() else "")
+                )
+                print(f"[Injector] FAILED: {detail}")
+                _log_inject_failure(detail)
             return result
 
     def inject_immediate(self, text: str) -> bool:

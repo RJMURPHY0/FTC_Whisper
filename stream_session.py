@@ -36,6 +36,8 @@ class StreamingSession:
     LOCK_LAG = 1               # keep the freshest N agreed words un-injected (churn buffer)
     PAUSE_FLUSH_QUIET = 0.55   # trailing silence (s) that counts as "speaker paused"
     PAUSE_FLUSH_RMS = 0.006    # quiet floor for the pause flush (matches the commit floor)
+    PARAGRAPH_PAUSE = 2.0      # continuous quiet (s) that starts a new paragraph
+    PARAGRAPH_RMS = 0.006      # absolute quiet floor for paragraph detection
 
     def __init__(
         self,
@@ -48,6 +50,7 @@ class StreamingSession:
         on_inject: Optional[Callable[[str], bool]] = None,
         live_inject: bool = False,
         audio_sink=None,
+        auto_paragraphs: bool = False,
     ):
         self._recorder = recorder
         self._engine = engine
@@ -75,6 +78,19 @@ class StreamingSession:
         # Consecutive ticks held by frontier disagreement — a commit that
         # rewords already-typed text must stall emission briefly, not forever.
         self._hold_ticks = 0
+
+        # Auto-paragraphs: a clear dictation pause (PARAGRAPH_PAUSE of true
+        # silence) after a finished sentence becomes a paragraph break in the
+        # final text. Never under live injection: the live stream is append-only
+        # plain words, and a newline emitted as a keypress could submit a chat
+        # box, so the reconcile must never see paragraph breaks it didn't type.
+        self._auto_paragraphs = bool(auto_paragraphs) and not live_inject
+        # Break-BEFORE flag per _committed_texts entry (parallel list; only
+        # finalize() reads it, so captions/context joins stay space-separated).
+        self._para_flags: list[bool] = []
+        # Trailing quiet seconds of the previous committed chunk, so a pause
+        # that spans a commit boundary still counts in full.
+        self._carry_quiet = 0.0
 
         self._committed_texts: list[str] = []
         self._committed_sample = 0     # absolute sample position of the commit frontier
@@ -127,18 +143,17 @@ class StreamingSession:
                 # finalize_text=False: forced capitals/periods per chunk corrupt
                 # the joined text at mid-sentence commit boundaries — polish is
                 # applied once on the full utterance in finalize().
-                text = self._engine.transcribe(
-                    chunk, rate,
-                    context_words=self._context_with_committed(),
-                    hotwords_str=self._hotwords,
-                    finalize_text=False,
-                ).strip()
+                results = self._transcribe_paragraph_parts(chunk, rate)
+                preview = " ".join(t for t, _ in results if t)
                 with self._state_lock:
                     if self._finalized or self._stop_event.is_set():
                         return  # finalize owns the tail now — discard, tail re-covers it
-                    if text:
-                        self._committed_texts.append(text)
-                        print(f"[Stream] Committed {boundary / rate:.1f}s: '{text[:60]}…'")
+                    for text, brk in results:
+                        if text:
+                            self._committed_texts.append(text)
+                            self._para_flags.append(brk)
+                    if preview:
+                        print(f"[Stream] Committed {boundary / rate:.1f}s: '{preview[:60]}…'")
                     # Advance even when the chunk transcribed empty (pure noise) so
                     # a noisy environment can't make the window grow unbounded.
                     # Sink write sits inside the same locked commit: a tick that
@@ -226,6 +241,99 @@ class StreamingSession:
     @staticmethod
     def _norm_word(w: str) -> str:
         return w.strip(".,!?;:\"'").lower()
+
+    def _quiet_profile(
+        self, audio: np.ndarray, rate: int
+    ) -> tuple[list[int], float, float]:
+        """Scan for paragraph-length quiet runs. Returns (split_points,
+        lead_secs, trail_secs): sample indices at the middle of each INTERNAL
+        quiet run at least PARAGRAPH_PAUSE long, plus the quiet durations at
+        the chunk's edges. Edge runs are never split points here — the carry
+        logic in _transcribe_paragraph_parts joins them across boundaries."""
+        win = max(1, int(self.SILENCE_WIN * rate))
+        n_wins = len(audio) // win
+        dur = len(audio) / rate
+        if n_wins < 1:
+            return [], dur, dur
+        rms = np.sqrt(
+            np.mean(
+                audio[: n_wins * win].reshape(n_wins, win).astype(np.float64) ** 2,
+                axis=1,
+            )
+        )
+        quiet = rms < self.PARAGRAPH_RMS
+        need = max(1, int(round(self.PARAGRAPH_PAUSE / self.SILENCE_WIN)))
+        lead = 0
+        for q in quiet:
+            if not q:
+                break
+            lead += 1
+        trail = 0
+        for q in quiet[::-1]:
+            if not q:
+                break
+            trail += 1
+        splits: list[int] = []
+        run = 0
+        for i, q in enumerate(quiet):
+            if q:
+                run += 1
+            else:
+                if run >= need and run < i:  # internal run only, never leading
+                    splits.append((i - run // 2) * win)
+                run = 0
+        return splits, lead * self.SILENCE_WIN, trail * self.SILENCE_WIN
+
+    def _transcribe_paragraph_parts(
+        self, chunk: np.ndarray, rate: int
+    ) -> list[tuple[str, bool]]:
+        """Transcribe a chunk, split at paragraph-length pauses when
+        auto-paragraphs is on. Returns (text, break_before) pairs and updates
+        the boundary-spanning quiet carry. Context chains across the parts so
+        a split never costs recognition accuracy."""
+        base_ctx = self._context_with_committed()
+        if not self._auto_paragraphs:
+            text = self._engine.transcribe(
+                chunk, rate,
+                context_words=base_ctx,
+                hotwords_str=self._hotwords,
+                finalize_text=False,
+            ).strip()
+            return [(text, False)]
+        splits, lead_q, trail_q = self._quiet_profile(chunk, rate)
+        first_break = (self._carry_quiet + lead_q) >= self.PARAGRAPH_PAUSE
+        if lead_q >= (len(chunk) / rate) - 1e-6:
+            # Whole chunk is silence — keep accumulating across chunks so a
+            # very long pause spanning several commits still counts in full.
+            self._carry_quiet += len(chunk) / rate
+        else:
+            self._carry_quiet = trail_q
+        parts: list[np.ndarray] = []
+        prev = 0
+        for s in splits:
+            parts.append(chunk[prev:s])
+            prev = s
+        parts.append(chunk[prev:])
+        out: list[tuple[str, bool]] = []
+        ctx = base_ctx
+        for part in parts:
+            if len(part) < int(rate * 0.25):
+                continue
+            text = self._engine.transcribe(
+                part, rate,
+                context_words=ctx,
+                hotwords_str=self._hotwords,
+                finalize_text=False,
+            ).strip()
+            if not text:
+                continue
+            # Parts after the first surviving one were separated from it by a
+            # paragraph-length pause by construction.
+            out.append((text, first_break if not out else True))
+            ctx = f"{ctx} {text}".strip()
+        if not out:
+            return [("", False)]
+        return out
 
     def _tail_is_quiet(self, audio: np.ndarray, rate: int) -> bool:
         """True when the trailing PAUSE_FLUSH_QUIET seconds of the uncommitted
@@ -393,26 +501,49 @@ class StreamingSession:
         with self._state_lock:
             committed_sample = self._committed_sample
             committed_texts = list(self._committed_texts)
+            para_flags = list(self._para_flags)
 
         tail: Optional[np.ndarray] = None
         if audio is not None and len(audio) > 0:
             rel = committed_sample - offset_before
             tail = audio[rel:] if 0 < rel < len(audio) else (None if rel >= len(audio) else audio)
 
-        tail_text = ""
+        tail_entries: list[tuple[str, bool]] = []
         if tail is not None and len(tail) >= rate * 0.25:
-            tail_text = self._engine.transcribe(
-                tail, rate,
-                context_words=self._context_with_committed(),
-                hotwords_str=self._hotwords,
-                finalize_text=False,
-            ).strip()
+            tail_entries = self._transcribe_paragraph_parts(tail, rate)
 
-        full = " ".join([*committed_texts, tail_text]).strip()
-        full = " ".join(full.split())  # normalise double spaces at joins
+        entries = list(zip(committed_texts, para_flags))
+        entries += [(t, b) for t, b in tail_entries if t]
+        full = self._assemble_paragraphs(entries)
         if full and hasattr(self._engine, "polish"):
             full = self._engine.polish(full)
         return full, tail, rate
+
+    @staticmethod
+    def _assemble_paragraphs(entries: list[tuple[str, bool]]) -> str:
+        """Join (text, break_before) entries into paragraph text. A break
+        lands after a finished sentence. When the pause said "break" but the
+        model left the previous part unpunctuated (common when the segment
+        cut fell inside the silence), the next part starting with a capital
+        letter confirms the sentence ended — supply the period and break. A
+        lowercase continuation joins as one paragraph: that pause was
+        mid-sentence thinking. With auto-paragraphs off every flag is False
+        and this reduces to the old single space-joined string."""
+        paras: list[list[str]] = [[]]
+        for text, brk in entries:
+            if not text:
+                continue
+            if brk and paras[-1]:
+                prev = paras[-1][-1].rstrip()
+                nxt = text.lstrip()
+                if prev and prev[-1] in ".!?":
+                    paras.append([])
+                elif prev and nxt[:1].isupper():
+                    paras[-1][-1] = prev + "."
+                    paras.append([])
+            paras[-1].append(text)
+        para_strs = [" ".join(" ".join(p).split()) for p in paras]
+        return "\n\n".join(p for p in para_strs if p)
 
     def abort(self) -> None:
         """Cancel path — just stop the worker; caller handles the recorder."""

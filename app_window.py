@@ -1265,8 +1265,9 @@ class AppWindow:
 
         # Speed starts at the product's nominal 160 wpm; once the account has
         # enough voiced-speech data, _refresh_impact replaces it with the
-        # user's real measured average (see StatsStore.snapshot).
-        self._set_impact_card("speed", "160", "wpm", "4× faster than typing")
+        # user's real measured average (see StatsStore.snapshot) and the
+        # subtitle switches to say it is their own average.
+        self._set_impact_card("speed", "160", "wpm", "typical dictation speed")
 
         # Today bar
         bar = self._card(parent, inner_pad=(14, 10), margin=(8, 0))
@@ -1449,14 +1450,15 @@ class AppWindow:
             v, u, s = str(int(round(m / 60))), "hrs", "Real time back"
         self._set_impact_card("time", v, u, s)
 
+        # avg_wpm counts voiced speech only (silence excluded upstream in
+        # Recorder.voiced_seconds / StatsStore), so once it unlocks the card
+        # shows the user's real speaking speed, labelled as their average.
         wpm = snap.get("avg_wpm") or 0
         if wpm:
-            ratio = wpm / 40.0
-            ratio_txt = f"{ratio:.1f}".rstrip("0").rstrip(".")
             self._set_impact_card("speed", str(int(round(wpm))), "wpm",
-                                  f"{ratio_txt}× faster than typing")
+                                  "your average speed")
         else:
-            self._set_impact_card("speed", "160", "wpm", "4× faster than typing")
+            self._set_impact_card("speed", "160", "wpm", "typical dictation speed")
 
         n = snap["streak_days"]
         if n == 0:
@@ -1539,49 +1541,57 @@ class AppWindow:
         _init_mode = getattr(self._config, "mode", "toggle") if self._config else "toggle"
         self._mode_toggle_on = (_init_mode == "toggle")
 
-        tk.Label(card1, text=" ".join("HANDS-FREE"),
+        # Hands-free and push-to-talk sit side by side so the refine card
+        # below stays on screen without scrolling. Buttons stack vertically
+        # inside each column because two columns at MIN_W leave ~150px each.
+        cols = tk.Frame(card1, bg=C["surface"])
+        cols.pack(fill="x", pady=(10, 0))
+        cols.columnconfigure(0, weight=1, uniform="hk")
+        cols.columnconfigure(2, weight=1, uniform="hk")
+
+        col_hf = tk.Frame(cols, bg=C["surface"])
+        col_hf.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        tk.Frame(cols, bg=C["border"], width=1).grid(row=0, column=1, sticky="ns")
+        col_ptt = tk.Frame(cols, bg=C["surface"])
+        col_ptt.grid(row=0, column=2, sticky="nsew", padx=(10, 0))
+
+        tk.Label(col_hf, text=" ".join("HANDS-FREE"),
                  fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 7, "bold"), anchor="w").pack(
-                     fill="x", pady=(10, 0))
+                 font=("Segoe UI", 7, "bold"), anchor="w").pack(fill="x")
 
         self._hotkey_display_lbl = tk.Label(
-            card1, text=self._hotkey or "ALT+V",
+            col_hf, text=self._hotkey or "ALT+V",
             fg=C["accent"], bg=C["surface"],
             font=("Segoe UI", 18, "bold"), anchor="w",
         )
         self._hotkey_display_lbl.pack(fill="x", pady=(0, 2))
 
         self._hotkey_record_msg = tk.Label(
-            card1,
+            col_hf,
             text=self._hotkey_help_text(),
             fg=C["subtext"], bg=C["surface"],
-            font=("Segoe UI", 9), justify="left", anchor="w", wraplength=340,
+            font=("Segoe UI", 9), justify="left", anchor="w", wraplength=150,
         )
         self._hotkey_record_msg.pack(fill="x", pady=(0, 6))
         self._autowrap(self._hotkey_record_msg)
 
-        btn_row = tk.Frame(card1, bg=C["surface"])
-        btn_row.pack(fill="x")
-
         self._record_btn = self._surface_btn(
-            btn_row, "Change Shortcut", self._toggle_hotkey_recording)
-        self._record_btn.pack(side="left", padx=(0, 8))
+            col_hf, "Change Shortcut", self._toggle_hotkey_recording)
+        self._record_btn.pack(anchor="w")
 
         self._save_btn = RoundedButton(
-            btn_row, text="Save",
+            col_hf, text="Save",
             fg=C["subtext"], fill=C["border"],
             font=("Segoe UI", 10, "bold"), padx=16, pady=8,
         )
-        self._save_btn.pack(side="left")
+        self._save_btn.pack(anchor="w", pady=(6, 0))
 
-        tk.Frame(card1, bg=C["border"], height=1).pack(fill="x", pady=(12, 8))
-
-        tk.Label(card1, text=" ".join("PUSH-TO-TALK"),
+        tk.Label(col_ptt, text=" ".join("PUSH-TO-TALK"),
                  fg=C["subtext"], bg=C["surface"],
                  font=("Segoe UI", 7, "bold"), anchor="w").pack(fill="x")
 
         self._ptt_display_lbl = tk.Label(
-            card1, text=self._ptt_hotkey or "Not set",
+            col_ptt, text=self._ptt_hotkey or "Not set",
             fg=C["accent"] if self._ptt_hotkey else C["subtext"],
             bg=C["surface"],
             font=("Segoe UI", 18, "bold"), anchor="w",
@@ -1589,38 +1599,25 @@ class AppWindow:
         self._ptt_display_lbl.pack(fill="x", pady=(0, 2))
 
         self._ptt_record_msg = tk.Label(
-            card1,
+            col_ptt,
             text=self._ptt_help_text(),
             fg=C["subtext"], bg=C["surface"],
-            font=("Segoe UI", 9), justify="left", anchor="w", wraplength=340,
+            font=("Segoe UI", 9), justify="left", anchor="w", wraplength=150,
         )
         self._ptt_record_msg.pack(fill="x", pady=(0, 6))
         self._autowrap(self._ptt_record_msg)
 
-        btn_row_p = tk.Frame(card1, bg=C["surface"])
-        btn_row_p.pack(fill="x")
-
         self._ptt_record_btn = self._surface_btn(
-            btn_row_p, "Change Shortcut" if self._ptt_hotkey else "Set Shortcut",
+            col_ptt, "Change Shortcut" if self._ptt_hotkey else "Set Shortcut",
             self._toggle_ptt_recording)
-        self._ptt_record_btn.pack(side="left", padx=(0, 8))
+        self._ptt_record_btn.pack(anchor="w")
 
         self._ptt_save_btn = RoundedButton(
-            btn_row_p, text="Save",
+            col_ptt, text="Save",
             fg=C["subtext"], fill=C["border"],
             font=("Segoe UI", 10, "bold"), padx=16, pady=8,
         )
-        self._ptt_save_btn.pack(side="left")
-
-        self._ptt_clear_btn = tk.Label(
-            btn_row_p, text="Remove" if self._ptt_hotkey else "",
-            fg=C["subtext"], bg=C["surface"],
-            font=("Segoe UI", 9), cursor="hand2", anchor="e",
-        )
-        self._ptt_clear_btn.pack(side="right")
-        self._ptt_clear_btn.bind("<Button-1>", lambda _e: self._clear_ptt_hotkey())
-        self._ptt_clear_btn.bind("<Enter>", lambda _e: self._ptt_clear_btn.configure(fg=C["error"]))
-        self._ptt_clear_btn.bind("<Leave>", lambda _e: self._ptt_clear_btn.configure(fg=C["subtext"]))
+        self._ptt_save_btn.pack(anchor="w", pady=(6, 0))
 
         # ── Refine selection hotkey ───────────────────────────────────────────────
         card2 = self._card(parent, margin=(0, 8))
@@ -1885,7 +1882,6 @@ class AppWindow:
         self._ptt_hotkey = new_hotkey.upper()
         self._pending_ptt_hotkey = None
         self._ptt_display_lbl.configure(text=self._ptt_hotkey, fg=C["accent"])
-        self._ptt_clear_btn.configure(text="Remove")
         self._ptt_record_btn.configure(text="Change Shortcut")
         self._ptt_save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
         self._ptt_save_btn.unbind("<Button-1>")
@@ -1907,26 +1903,6 @@ class AppWindow:
             threading.Thread(
                 target=self._on_settings_change,
                 args=("ptt_hotkey", new_hotkey.lower()), daemon=True,
-            ).start()
-
-    def _clear_ptt_hotkey(self) -> None:
-        if not self._ptt_hotkey and not self._pending_ptt_hotkey:
-            return
-        if self._recording_ptt_hotkey:
-            self._stop_ptt_recording(cancelled=True)
-        self._ptt_hotkey = ""
-        self._pending_ptt_hotkey = None
-        self._ptt_display_lbl.configure(text="Not set", fg=C["subtext"])
-        self._ptt_clear_btn.configure(text="")
-        self._ptt_record_btn.configure(text="Set Shortcut")
-        self._ptt_save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
-        self._ptt_save_btn.unbind("<Button-1>")
-        self._ptt_record_msg.configure(text=self._ptt_help_text(), fg=C["subtext"])
-        self._update_home_ptt_row()
-        if self._on_settings_change:
-            threading.Thread(
-                target=self._on_settings_change,
-                args=("ptt_hotkey", ""), daemon=True,
             ).start()
 
     # ── Refine hotkey recorder ────────────────────────────────────────────────

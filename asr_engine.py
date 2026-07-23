@@ -26,7 +26,16 @@ import numpy as np
 
 _MODEL_SAMPLE_RATE = 16000
 
-_HF_BASE = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main"
+# Model version: "v2" (English, shipped default) or "v3" (multilingual, lower
+# WER on the Open ASR leaderboard). Same file layout on the istupakov HF repos,
+# and onnx-asr >= 0.11 knows both names natively.
+DEFAULT_MODEL_VERSION = "v2"
+
+
+def _hf_base(version: str = DEFAULT_MODEL_VERSION) -> str:
+    return (f"https://huggingface.co/istupakov/parakeet-tdt-0.6b-{version}-onnx"
+            "/resolve/main")
+
 
 # name -> (url path, minimum sane size in bytes)
 _MODEL_FILES = {
@@ -39,13 +48,15 @@ _MODEL_FILES = {
 _TOTAL_DOWNLOAD_BYTES = 680_000_000  # rough, for progress reporting
 
 
-def models_dir() -> str:
+def models_dir(version: str = DEFAULT_MODEL_VERSION) -> str:
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "FTC Whisper", "models", "parakeet-tdt-0.6b-v2-onnx")
+    return os.path.join(base, "FTC Whisper", "models",
+                        f"parakeet-tdt-0.6b-{version}-onnx")
 
 
-def model_files_present(directory: Optional[str] = None) -> bool:
-    d = directory or models_dir()
+def model_files_present(directory: Optional[str] = None,
+                        version: str = DEFAULT_MODEL_VERSION) -> bool:
+    d = directory or models_dir(version)
     for name, min_size in _MODEL_FILES.items():
         p = os.path.join(d, name)
         try:
@@ -59,6 +70,7 @@ def model_files_present(directory: Optional[str] = None) -> bool:
 def download_model(
     progress: Optional[Callable[[float, str], None]] = None,
     directory: Optional[str] = None,
+    version: str = DEFAULT_MODEL_VERSION,
 ) -> bool:
     """Download the Parakeet model files. Returns True on success.
 
@@ -67,7 +79,7 @@ def download_model(
     interrupted download never leaves a truncated file that passes the
     size check.
     """
-    d = directory or models_dir()
+    d = directory or models_dir(version)
     os.makedirs(d, exist_ok=True)
     done_bytes = 0
     try:
@@ -77,7 +89,7 @@ def download_model(
                 done_bytes += os.path.getsize(dest)
                 continue
             tmp = dest + ".part"
-            url = f"{_HF_BASE}/{name}"
+            url = f"{_hf_base(version)}/{name}"
             req = urllib.request.Request(url, headers={"User-Agent": "FTC-Whisper"})
             with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as f:
                 while True:
@@ -112,12 +124,14 @@ class ParakeetTranscriber:
     """
 
     def __init__(self, auto_punctuate: bool = True, cpu_threads: int = 4,
-                 vad_gate: bool = True):
+                 vad_gate: bool = True,
+                 model_version: str = DEFAULT_MODEL_VERSION):
         self.auto_punctuate = auto_punctuate
         self._cpu_threads = cpu_threads
         self._vad_gate = vad_gate
         self._vad_failed = False
         self._model = None
+        self._model_version = model_version
         self._load_lock = threading.Lock()
         self._transcribe_lock = threading.Lock()
         self._load_failed = False
@@ -130,7 +144,7 @@ class ParakeetTranscriber:
     def is_available(self) -> bool:
         """True once loaded, or loadable without a download."""
         return self._model is not None or (
-            not self._load_failed and model_files_present()
+            not self._load_failed and model_files_present(version=self._model_version)
         )
 
     def load_model(self) -> bool:
@@ -141,7 +155,7 @@ class ParakeetTranscriber:
                 return True
             if self._load_failed:
                 return False
-            if not model_files_present():
+            if not model_files_present(version=self._model_version):
                 return False
             try:
                 import onnxruntime as ort
@@ -152,10 +166,11 @@ class ParakeetTranscriber:
                 opts = ort.SessionOptions()
                 opts.intra_op_num_threads = self._cpu_threads
                 opts.inter_op_num_threads = 1
-                print("[ParakeetEngine] Loading parakeet-tdt-0.6b-v2 int8…")
+                ver = self._model_version
+                print(f"[ParakeetEngine] Loading parakeet-tdt-0.6b-{ver} int8…")
                 self._model = onnx_asr.load_model(
-                    "nemo-parakeet-tdt-0.6b-v2",
-                    models_dir(),
+                    f"nemo-parakeet-tdt-0.6b-{ver}",
+                    models_dir(ver),
                     quantization="int8",
                     sess_options=opts,
                 )

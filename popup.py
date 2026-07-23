@@ -104,6 +104,12 @@ ASK_PLACEHOLDER = "Ask AI — e.g. 'change language to French' or 'make this sho
 # never lingers on screen indefinitely.
 ICON_AUTO_DISMISS_SECS = 30.0
 
+# The expanded refinement panel dismisses itself after this long with no
+# interaction. Typing in the Ask box, a running AI call, a voice prompt, an
+# in-flight upgrade, or the pointer resting over the panel all count as
+# activity and restart the countdown.
+PANEL_IDLE_DISMISS_SECS = 45.0
+
 
 def _apply_popup_corners(hwnd: int) -> bool:
     """Apply Win11 DWM rounded corners — no GDI clipping, no black artifacts.
@@ -282,6 +288,25 @@ class FloatingPopup:
         if self.root:
             # Use lambda — avoids tkinter after() quirks with boolean positional args
             self.root.after(0, lambda: self._enter_status_mode(text, recording))
+
+    def set_status_text(self, text: str) -> None:
+        """Update the status pill label in place, no re-layout. Used to flip
+        the honest 'Starting…' cue to 'Recording' once the mic stream is
+        proven live. No-op outside status mode, and in caption mode, where
+        the label is deliberately empty (the caption bar is the cue there)."""
+        if not self.root:
+            return
+
+        def _apply() -> None:
+            if self._mode != "status":
+                return
+            try:
+                if self._status_label.cget("text"):
+                    self._status_label.configure(text=text)
+            except tk.TclError:
+                pass
+
+        self.root.after(0, _apply)
 
     def show_cursor_icon(
         self,
@@ -858,7 +883,9 @@ class FloatingPopup:
         self._ask_entry.bind("<FocusOut>", _restore_placeholder)
         self._ask_entry.bind("<Return>", _on_return)
         self._ask_entry.bind("<Shift-Return>", lambda _e: self._autosize_ask())
-        self._ask_entry.bind("<KeyRelease>", lambda _e: self._autosize_ask())
+        self._ask_entry.bind(
+            "<KeyRelease>",
+            lambda _e: (self._touch_panel_activity(), self._autosize_ask()))
 
         self._mic_btn = tk.Label(
             ask_row,
@@ -1143,6 +1170,30 @@ class FloatingPopup:
         if self._mode == "icon" and self._icon_entered == stamp:
             self._do_hide()
 
+    def _touch_panel_activity(self) -> None:
+        self._panel_activity = time.time()
+
+    def _idle_check_panel(self, stamp: float) -> None:
+        if self._mode != "refinement" or getattr(self, "_panel_entered", 0) != stamp:
+            return
+        active = self._ai_busy or self._mic_recording or self._upgrading
+        if not active:
+            try:
+                px, py = self.root.winfo_pointerx(), self.root.winfo_pointery()
+                rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+                active = (rx <= px <= rx + self.root.winfo_width()
+                          and ry <= py <= ry + self.root.winfo_height())
+            except tk.TclError:
+                pass
+        if active:
+            self._touch_panel_activity()
+        remaining = PANEL_IDLE_DISMISS_SECS - (time.time() - self._panel_activity)
+        if remaining <= 0:
+            self._do_hide()
+            return
+        self.root.after(int(max(0.5, remaining) * 1000),
+                        lambda s=stamp: self._idle_check_panel(s))
+
     def _expand_to_panel(self) -> None:
         # Space should dismiss the small badge, but NOT the full refinement panel
         # where the user may be typing in the Ask AI field.
@@ -1156,6 +1207,12 @@ class FloatingPopup:
         self._refine_frame.pack()
         self._mode = "refinement"
         self._last_shown = time.time()
+        # Idle auto-dismiss, stamp-guarded like the icon badge so a stale
+        # timer from an earlier panel session can never kill a newer one.
+        self._panel_entered = self._last_shown
+        self._panel_activity = self._last_shown
+        self.root.after(int(PANEL_IDLE_DISMISS_SECS * 1000),
+                        lambda s=self._panel_entered: self._idle_check_panel(s))
         try:
             self._refresh_insert_status()
         except Exception as e:
@@ -1513,6 +1570,9 @@ class FloatingPopup:
 
     def _show_ai_result(self, text: str, session: int = 0) -> None:
         self._ai_busy = False
+        # Restart the idle countdown so the user gets the full window to read
+        # the result even if the AI call took a while.
+        self._touch_panel_activity()
         if self._mode is None:
             # Popup was closed while the worker was running; discard silently.
             return

@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.30"
+APP_VERSION = "1.6.31"
 
 
 class WhisperFlowApp:
@@ -95,7 +95,7 @@ class WhisperFlowApp:
             on_sign_out=self._sign_out,
             on_sign_in=self._on_sign_in,
             on_open_config=self._open_config,
-            on_quit=self._shutdown,
+            on_quit=self._shutdown_from_window,
             on_hotkey_change=self._on_hotkey_change,
             on_refine_hotkey_change=self._on_refine_hotkey_change,
             on_settings_change=self._on_settings_change,
@@ -228,6 +228,7 @@ class WhisperFlowApp:
             self.parakeet = ParakeetTranscriber(
                 auto_punctuate=_ap,
                 vad_gate=bool(getattr(config, "noise_gate", True)),
+                model_version=getattr(config, "parakeet_version", "v2"),
             )
             self.recorder = Recorder(
                 sample_rate=config.sample_rate,
@@ -266,6 +267,19 @@ class WhisperFlowApp:
                               self.recorder.active_sample_rate),
             )
 
+            # Warm mic: keep a persistent input stream with a ~1.5s pre-roll ring
+            # buffer so recording starts instantly and the first syllable — even
+            # speech that began ON the go-beep — is captured. Started BEFORE the
+            # model preloads so the stream open isn't competing with their heavy
+            # imports, and flagged synchronously so a hotkey press that races
+            # the open waits on it instead of cold-opening with no pre-roll.
+            if getattr(config, "warm_mic", True):
+                self.recorder.mark_warm_pending()
+                threading.Thread(
+                    target=lambda: self.recorder.set_warm(True),
+                    daemon=True, name="warm-mic",
+                ).start()
+
             # ── Pre-load all models immediately in background ─────────
             threading.Thread(
                 target=self.transcriber.load_model, daemon=True, name="model-preload"
@@ -276,15 +290,6 @@ class WhisperFlowApp:
             threading.Thread(
                 target=self._init_parakeet, daemon=True, name="parakeet-preload"
             ).start()
-
-            # Warm mic: keep a persistent input stream with a ~1.5s pre-roll ring
-            # buffer so recording starts instantly and the first syllable — even
-            # speech that began ON the go-beep — is captured.
-            if getattr(config, "warm_mic", True):
-                threading.Thread(
-                    target=lambda: self.recorder.set_warm(True),
-                    daemon=True, name="warm-mic",
-                ).start()
         finally:
             self._core_ready.set()
 
@@ -304,8 +309,9 @@ class WhisperFlowApp:
             if not getattr(self.config, "use_parakeet", True):
                 print("[App] Parakeet disabled in config — whisper pipeline only.")
                 return
-            if not model_files_present():
-                print("[App] Parakeet model not found — downloading (~660 MB, one-time)…")
+            _ver = getattr(self.config, "parakeet_version", "v2")
+            if not model_files_present(version=_ver):
+                print(f"[App] Parakeet model ({_ver}) not found — downloading (~660 MB, one-time)…")
                 last_pct = [-10]
 
                 def _progress(frac: float, msg: str) -> None:
@@ -314,7 +320,7 @@ class WhisperFlowApp:
                         last_pct[0] = pct
                         print(f"[App] {msg} ({pct}%)")
 
-                if not download_model(progress=_progress):
+                if not download_model(progress=_progress, version=_ver):
                     return
             self.parakeet.load_model()
             if self.parakeet.is_loaded:
@@ -887,6 +893,9 @@ class WhisperFlowApp:
             # the warm mic this also captures ~0.35s of pre-roll.)
             self.recorder.start()
             self.feedback.recording_started()
+            # The status pill went up as "Starting…" on the hotkey thread;
+            # audio is now proven flowing, so flip it to "Recording".
+            self.popup.set_status_text("Recording")
 
             # Auto-stop timer: toggle_timeout (toggle mode only) and max_recording_duration (all modes)
             _timeouts = []
@@ -921,6 +930,7 @@ class WhisperFlowApp:
                     on_inject=self._on_stream_inject if live else None,
                     live_inject=live,
                     audio_sink=self._audio_writer,
+                    auto_paragraphs=bool(getattr(self.config, "auto_paragraphs", True)),
                 )
                 self._session = session
                 session.start()
@@ -1452,8 +1462,14 @@ class WhisperFlowApp:
                 cy = getattr(self, "_rec_cursor_y", 0)
             _captions_on = self._captions_active()
             self.popup.set_captions_enabled(_captions_on)
+            # Honest cue: this fires on the hotkey thread BEFORE recorder.start()
+            # has proven the stream live. Say "Starting" until it has, then
+            # _on_start_recording flips the pill to "Recording" right after the
+            # go-beep. On a warm stream the flip lands within a frame; on a cold
+            # or slow device the user is told the mic is not listening yet.
+            _mic_live = self.recorder is not None and self.recorder.is_recording
             self.popup.show_status(
-                "Recording",
+                "Recording" if _mic_live else "Starting…",
                 hwnd=hwnd,
                 recording=True,
                 cursor_x=cx,
@@ -1974,6 +1990,19 @@ class WhisperFlowApp:
         self.refine_hotkey_manager.unregister()
         if self.recorder is not None and self.recorder.is_recording:
             self.recorder.stop()
+
+    def _shutdown_from_window(self) -> None:
+        """Called from the window's Quit button. Same teardown as tray Quit,
+        including stopping the tray icon, which this path used to leave in
+        the notification area. The caller (AppWindow._do_quit) destroys the
+        Tk root itself."""
+        self._shutdown()
+        tray = getattr(self, "tray", None)
+        if tray is not None:
+            try:
+                tray.stop()
+            except Exception as e:
+                print(f"[App] Tray stop failed (non-fatal): {e}")
 
     def _shutdown_and_destroy(self) -> None:
         """Called from tray Quit — shuts down and ends the tkinter mainloop."""

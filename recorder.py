@@ -196,6 +196,15 @@ class Recorder:
         else:
             self._close_stream_if_idle()
 
+    def mark_warm_pending(self) -> None:
+        """Set the warm flag ahead of an async set_warm(True) call. A start()
+        that races the open must see warm enabled and wait on the in-flight
+        stream (via _stream_lifecycle_lock inside _ensure_warm_stream) instead
+        of falling to the cold path, which has no pre-roll and loses whatever
+        the user says while its own synchronous open grinds through device
+        enumeration on a fresh machine."""
+        self._warm_enabled = True
+
     def restart_warm(self) -> None:
         """Re-open the warm stream (after an input-device change)."""
         if not self._warm_enabled:
