@@ -61,7 +61,15 @@ class StreamingSession:
         self._live_inject = live_inject
         self._injected_words: list[str] = []   # words handed to on_inject (that landed)
         self._injected_text = ""               # exact string sent — drives finalize reconcile
-        self._stream_frozen = False            # an emit failed / focus lost — stop emitting
+        self._stream_frozen = False            # transport emit failed — stop emitting
+        # Terminal punctuation stripped from a pause-flushed word: the model
+        # ends EVERY pause with a period, even mid-sentence. It's held here and
+        # restored on the next emit only if the model still ends the sentence
+        # there (next word capitalised).
+        self._pending_punct = ""
+        # Consecutive ticks held by frontier disagreement — a commit that
+        # rewords already-typed text must stall emission briefly, not forever.
+        self._hold_ticks = 0
 
         self._committed_texts: list[str] = []
         self._committed_sample = 0     # absolute sample position of the commit frontier
@@ -194,7 +202,8 @@ class StreamingSession:
             # ── Live injection (append-only) ──
             if want_inject:
                 committed_words = " ".join(self._committed_texts).split()
-                if stable and self._tail_is_quiet(audio, rate):
+                pause = bool(stable and self._tail_is_quiet(audio, rate))
+                if pause:
                     # Speaker paused: no upcoming words will push the tail past
                     # LOCK_LAG, so the withheld words would sit untyped until
                     # the next commit or hotkey release. The pause itself is
@@ -202,7 +211,7 @@ class StreamingSession:
                     locked_hyp = stable
                 else:
                     locked_hyp = stable[:-self.LOCK_LAG] if len(stable) > self.LOCK_LAG else []
-                self._emit_locked(committed_words + locked_hyp)
+                self._emit_locked(committed_words + locked_hyp, pause_flush=pause)
 
     @staticmethod
     def _norm_word(w: str) -> str:
@@ -218,12 +227,13 @@ class StreamingSession:
         tail = audio[-n:].astype(np.float64)
         return float(np.sqrt(np.mean(tail * tail))) < self.PAUSE_FLUSH_RMS
 
-    def _emit_locked(self, locked: list[str]) -> None:
+    def _emit_locked(self, locked: list[str], pause_flush: bool = False) -> None:
         """Append-only live injection. `locked` is the confident word list so far
-        (committed words + lagged agreed hypothesis). Emit whatever extends what we
-        already typed, but ONLY if the already-typed prefix still agrees (ignoring
-        case/punctuation churn at commit boundaries). Never retracts — genuine
-        divergence just holds until the app's finalize reconcile fixes it."""
+        (committed words + lagged agreed hypothesis). Emit whatever extends what
+        we already typed. Never retracts — the app's finalize reconcile owns
+        correction. on_inject's return contract: True = landed, None = target
+        not focused right now (skip, retry next tick), False = transport failure
+        (freeze for the rest of the dictation)."""
         # Once finalize has begun (stop_event set) it owns the document — a
         # straggler tick must NOT inject after the reconcile has started, or it
         # would append past the corrected text and desync the char count.
@@ -232,11 +242,25 @@ class StreamingSession:
         n_have = len(self._injected_words)
         if n_have > len(locked):
             return  # locked shrank this tick — wait for it to regrow
-        # Verify our already-emitted prefix still matches (loose compare).
-        for a, b in zip(self._injected_words, locked):
-            if self._norm_word(a) != self._norm_word(b):
-                return  # divergence — hold; finalize reconcile corrects it
-        new_words = locked[n_have:]
+        # Agreement check on the recent frontier ONLY (last 6 words). A commit
+        # re-transcription can reword text far behind the frontier; requiring
+        # full-prefix agreement made emission stall permanently ("live typing
+        # just stops"). Old-text correctness belongs to the finalize reconcile.
+        start = max(0, n_have - 6)
+        diverged = any(
+            self._norm_word(a) != self._norm_word(b)
+            for a, b in zip(self._injected_words[start:n_have],
+                            locked[start:n_have])
+        )
+        if diverged:
+            self._hold_ticks += 1
+            if self._hold_ticks <= 4:
+                return  # hypothesis churn — usually settles within a tick or two
+            # Persistent rewording at the frontier (a commit changed words we
+            # already typed): keep the stream flowing anyway — finalize repairs
+            # the wording. A frozen stream reads far worse than a small drift.
+        self._hold_ticks = 0
+        new_words = list(locked[n_have:])
         if not new_words:
             return
         if n_have == 0 and new_words[0] and new_words[0][0].islower():
@@ -248,21 +272,47 @@ class StreamingSession:
             # reconcile to appending the terminal period. Agreement compares
             # via _norm_word (case-folded), so this never breaks the prefix check.
             new_words = [new_words[0][0].upper() + new_words[0][1:], *new_words[1:]]
-        chunk = (" " if self._injected_text else "") + " ".join(new_words)
-        ok = False
+        # Restore a previously withheld pause period only if the model STILL
+        # ends the sentence there (next word starts a capital). If it re-read
+        # the pause as mid-sentence, the period silently disappears — which is
+        # exactly what the document needs.
+        lead = ""
+        if self._injected_text:
+            lead = " "
+            if self._pending_punct and 0 < n_have <= len(locked):
+                prev = locked[n_have - 1]
+                if prev and prev[-1] in ".!?" and new_words[0][:1].isupper():
+                    lead = prev[-1] + " "
+        # A pause flush carries the model's utterance-final period even when the
+        # user merely paused mid-sentence. Hold that punctuation back; the next
+        # chunk decides whether it was real (see above).
+        new_pending = ""
+        if pause_flush and new_words[-1] and len(new_words[-1]) > 1 \
+                and new_words[-1][-1] in ".!?":
+            new_pending = new_words[-1][-1]
+            new_words = [*new_words[:-1], new_words[-1][:-1]]
+        chunk = lead + " ".join(new_words)
+        ok = None
         try:
-            ok = bool(self._on_inject(chunk))
+            ok = self._on_inject(chunk)
         except Exception as e:
             print(f"[Stream] live-inject emit error: {e}")
             ok = False
+        if ok is None:
+            # Target not foreground right now (toast, brief alt-tab). Nothing
+            # was typed and no state changed — emission resumes automatically
+            # when focus returns. This must NOT freeze the stream: a transient
+            # focus flick used to kill live typing for the whole dictation.
+            return
         if ok:
             self._injected_words.extend(new_words)
             self._injected_text += chunk
+            self._pending_punct = new_pending
         else:
-            # Emit failed (or focus left the target). Stop emitting so we can't
-            # leave a gap in the document; the finalize reconcile appends the rest.
+            # Transport genuinely failed — stop emitting so we can't leave a
+            # gap in the document; the finalize reconcile appends the rest.
             self._stream_frozen = True
-            print("[Stream] live-inject frozen (emit failed / focus lost)")
+            print("[Stream] live-inject frozen (emit transport failed)")
 
     def _find_commit_point(
         self, audio: np.ndarray, rate: int, uncommitted_secs: float

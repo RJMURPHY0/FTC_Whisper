@@ -100,17 +100,30 @@ class StatsStore:
         if key != "local":
             self._start_sync(key)
 
-    def record_dictation(self, words: int, audio_seconds: float) -> None:
+    def record_dictation(self, words: int, audio_seconds: float,
+                         voiced_seconds: float = 0.0) -> None:
         """Add one finished dictation to today's bucket. Synchronous local
-        write (instant UI); remote push is debounced + fire-and-forget."""
+        write (instant UI); remote push is debounced + fire-and-forget.
+
+        voiced_seconds is the speech-only portion of the recording (energy
+        above the mic's noise floor) — it feeds the real words-per-minute
+        stat. Dictations whose implied speed falls outside plausible human
+        speech are excluded from the wpm aggregate (a mic left running or a
+        misfiring gate must not poison the average) but still count words."""
         if words <= 0:
             return
+        v = max(0.0, float(voiced_seconds or 0.0))
+        v_wpm = (words / (v / 60.0)) if v >= 1.0 else 0.0
+        plausible = 20.0 <= v_wpm <= 350.0
         day = _today().isoformat()
         with self._lock:
             u = self._user_blob()
             rec = u["days"].setdefault(day, {"w": 0, "s": 0.0})
             rec["w"] = int(rec.get("w", 0)) + int(words)
             rec["s"] = float(rec.get("s", 0.0)) + max(0.0, float(audio_seconds or 0.0))
+            if plausible:
+                rec["v"] = round(float(rec.get("v", 0.0)) + v, 2)
+                rec["vw"] = int(rec.get("vw", 0)) + int(words)
             self._trim_locked(u)
             self._save_locked()
         self._notify()
@@ -127,8 +140,19 @@ class StatsStore:
         today_words = int(days.get(today.isoformat(), {}).get("w", 0))
 
         saved_min = carry_saved
+        voiced_s = 0.0
+        voiced_w = 0
         for rec in days.values():
             saved_min += _saved_minutes(int(rec.get("w", 0)), float(rec.get("s", 0.0)))
+            voiced_s += float(rec.get("v", 0.0))
+            voiced_w += int(rec.get("vw", 0))
+
+        # Real dictation speed: words per minute of actual speech. Shown only
+        # once there's enough data to be a measurement rather than noise;
+        # before that the card keeps the nominal 160 default.
+        avg_wpm = 0
+        if voiced_w >= 50 and voiced_s >= 30.0:
+            avg_wpm = int(round(voiced_w / (voiced_s / 60.0)))
 
         # Streak: consecutive days with at least one dictation, ending today —
         # or ending yesterday (streak alive, but needs a dictation today).
@@ -144,6 +168,7 @@ class StatsStore:
             "streak_days": streak,
             "streak_active_today": active_today,
             "saved_minutes": saved_min,
+            "avg_wpm": avg_wpm,
         }
 
     # ── Local persistence ─────────────────────────────────────────────
@@ -253,16 +278,28 @@ class StatsStore:
             rec = dict((u or {}).get("days", {}).get(day) or {})
         if not rec:
             return
+        payload = {
+            "user_id": uid,
+            "day": day,
+            "words": int(rec.get("w", 0)),
+            "audio_seconds": round(float(rec.get("s", 0.0)), 2),
+            "voiced_seconds": round(float(rec.get("v", 0.0)), 2),
+            "voiced_words": int(rec.get("vw", 0)),
+            "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
         try:
-            client.table(_STATS_TABLE).upsert({
-                "user_id": uid,
-                "day": day,
-                "words": int(rec.get("w", 0)),
-                "audio_seconds": round(float(rec.get("s", 0.0)), 2),
-                "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            }, on_conflict="user_id,day").execute()
-        except Exception as e:
-            print(f"[Stats] Push failed (non-fatal): {e}")
+            client.table(_STATS_TABLE).upsert(
+                payload, on_conflict="user_id,day").execute()
+        except Exception:
+            # Table predating the voiced columns — retry without them so the
+            # core counters still sync.
+            payload.pop("voiced_seconds", None)
+            payload.pop("voiced_words", None)
+            try:
+                client.table(_STATS_TABLE).upsert(
+                    payload, on_conflict="user_id,day").execute()
+            except Exception as e:
+                print(f"[Stats] Push failed (non-fatal): {e}")
 
     def _start_sync(self, uid: str) -> None:
         if uid in self._sync_running:
@@ -284,19 +321,26 @@ class StatsStore:
 
             remote = {}
             table_ok = False
-            rows = self._execute_timeout(
-                client.table(_STATS_TABLE)
-                .select("day,words,audio_seconds")
-                .eq("user_id", uid)
-                .order("day", desc=True)
-                .limit(_PULL_DAYS_LIMIT), 15.0)
+            rows = None
+            for cols in ("day,words,audio_seconds,voiced_seconds,voiced_words",
+                         "day,words,audio_seconds"):
+                rows = self._execute_timeout(
+                    client.table(_STATS_TABLE)
+                    .select(cols)
+                    .eq("user_id", uid)
+                    .order("day", desc=True)
+                    .limit(_PULL_DAYS_LIMIT), 15.0)
+                if rows is not None:
+                    break
             if rows is not None:
                 table_ok = True
                 for r in rows:
                     day = str(r.get("day") or "")[:10]
                     if day:
                         remote[day] = {"w": int(r.get("words") or 0),
-                                       "s": float(r.get("audio_seconds") or 0.0)}
+                                       "s": float(r.get("audio_seconds") or 0.0),
+                                       "v": float(r.get("voiced_seconds") or 0.0),
+                                       "vw": int(r.get("voiced_words") or 0)}
             else:
                 print("[Stats] Pull unavailable (table missing or offline).")
 
@@ -329,6 +373,12 @@ class StatsStore:
                             if rec["s"] > float(cur.get("s", 0.0)):
                                 cur["s"] = rec["s"]
                                 changed = True
+                            if float(rec.get("v", 0.0)) > float(cur.get("v", 0.0)):
+                                cur["v"] = float(rec["v"])
+                                changed = True
+                            if int(rec.get("vw", 0)) > int(cur.get("vw", 0)):
+                                cur["vw"] = int(rec["vw"])
+                                changed = True
                 if seed is not None and not u["seeded"]:
                     u["seeded"] = True
                     changed = True
@@ -342,12 +392,16 @@ class StatsStore:
                         rec = days[day]
                         rem = remote.get(day)
                         if (rem is None or int(rec.get("w", 0)) > rem["w"]
-                                or float(rec.get("s", 0.0)) > rem["s"]):
+                                or float(rec.get("s", 0.0)) > rem["s"]
+                                or float(rec.get("v", 0.0)) > float(rem.get("v", 0.0))
+                                or int(rec.get("vw", 0)) > int(rem.get("vw", 0))):
                             to_push.append({
                                 "user_id": uid,
                                 "day": day,
                                 "words": int(rec.get("w", 0)),
                                 "audio_seconds": round(float(rec.get("s", 0.0)), 2),
+                                "voiced_seconds": round(float(rec.get("v", 0.0)), 2),
+                                "voiced_words": int(rec.get("vw", 0)),
                                 "updated_at": datetime.datetime.now(
                                     datetime.timezone.utc).isoformat(),
                             })
@@ -359,8 +413,20 @@ class StatsStore:
                     client.table(_STATS_TABLE).upsert(
                         to_push, on_conflict="user_id,day").execute()
                     print(f"[Stats] Synced {len(to_push)} day(s) to Supabase.")
-                except Exception as e:
-                    print(f"[Stats] Sync push failed (non-fatal): {e}")
+                except Exception:
+                    # Table predating the voiced columns — sync the core
+                    # counters anyway.
+                    slim = [{k: v for k, v in row.items()
+                             if k not in ("voiced_seconds", "voiced_words")}
+                            for row in to_push]
+                    try:
+                        client.table(_STATS_TABLE).upsert(
+                            slim, on_conflict="user_id,day").execute()
+                        print(f"[Stats] Synced {len(slim)} day(s) to Supabase "
+                              "(voiced columns missing — run the updated "
+                              "user_daily_stats.sql).")
+                    except Exception as e:
+                        print(f"[Stats] Sync push failed (non-fatal): {e}")
         except Exception as e:
             print(f"[Stats] Sync error (non-fatal): {e}")
         finally:

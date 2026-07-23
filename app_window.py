@@ -1,4 +1,4 @@
-"""
+﻿"""
 FTC Whisper — Main application window.
 
 Dashboard: Home / Hotkey / History tabs.
@@ -228,6 +228,20 @@ class TogglePill(tk.Frame):
 
     def _draw(self):
         self._cv.delete("all")
+        # PIL-rendered pill (anti-aliased, cached) — canvas ovals have hard
+        # jagged edges because tk.Canvas can't anti-alias.
+        photo = None
+        try:
+            import ui_render
+            photo = ui_render.toggle_pill(
+                self._cv, self._value, self.W, self.H,
+                accent=C["accent"], off_track=C["border"],
+                dot=C["text"], bg=self._cv.cget("bg"))
+        except Exception:
+            photo = None
+        if photo is not None:
+            self._cv.create_image(0, 0, image=photo, anchor="nw")
+            return
         track = C["accent"] if self._value else C["border"]
         r = self.H // 2
         # True pill: filled rect + two semicircle caps
@@ -319,7 +333,17 @@ class RoundedButton(tk.Canvas):
         if h is None:
             h = int(self["height"])
         self.delete("all")
-        _rr(self, 1, 1, w - 1, h - 1, self._radius, fill=self._fill, outline="")
+        photo = None
+        try:
+            import ui_render
+            photo = ui_render.round_rect(self, w, h, self._radius,
+                                         self._fill, bg=self.cget("bg"))
+        except Exception:
+            photo = None
+        if photo is not None:
+            self.create_image(0, 0, image=photo, anchor="nw")
+        else:
+            _rr(self, 1, 1, w - 1, h - 1, self._radius, fill=self._fill, outline="")
         self.create_text(w // 2, h // 2, text=self._text,
                          fill=self._fg, font=self._font)
 
@@ -406,6 +430,10 @@ class AppWindow:
         self._win_save_job = None
         self._install_default_checked = False
 
+        # Set the moment the window is first shown — app._init_core waits on
+        # it so heavy imports/model loads never starve the UI build.
+        self.first_paint = threading.Event()
+
         # History is cache-first and refreshed without clearing the visible rows.
         self._hist_all = []
         self._history_loading = False
@@ -420,6 +448,10 @@ class AppWindow:
         self._pending_hotkey: Optional[str] = None
         self._recording_refine_hotkey = False
         self._pending_refine_hotkey: Optional[str] = None
+        self._recording_ptt_hotkey    = False
+        self._pending_ptt_hotkey: Optional[str] = None
+        self._ptt_hotkey = (getattr(config, "ptt_hotkey", "") or "").upper() \
+            if config else ""
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -518,6 +550,7 @@ class AppWindow:
         # Re-apply after the window is mapped — DWM caption attributes set while
         # the window was withdrawn don't always stick, leaving a white title bar.
         self._apply_dark_titlebar()
+        self.first_paint.set()
 
         # Pre-draw cached History shortly after first paint so its first click is
         # only a frame raise, not a network request plus widget construction.
@@ -530,6 +563,52 @@ class AppWindow:
         except Exception:
             pass
         self._root = None
+        # Cached PhotoImages die with the interpreter — drop them so a future
+        # root never touches images bound to this one.
+        try:
+            import ui_render
+            ui_render.clear_cache()
+        except Exception:
+            pass
+
+    def attach_audio(self, recorder=None, transcriber=None) -> None:
+        """Late-bind the audio subsystem. The pipeline is built on a
+        background thread after first paint (see app._init_core), so these
+        arrive a moment after construction; every use site already guards
+        for None in the meantime."""
+        if recorder is not None:
+            self._recorder = recorder
+        if transcriber is not None:
+            self._transcriber = transcriber
+
+    def _repaint_all(self) -> None:
+        """Synchronous full repaint of the whole window tree:
+        RDW_INVALIDATE|RDW_ALLCHILDREN|RDW_UPDATENOW from the top-level HWND.
+        Safe only while nothing carries WS_EX_COMPOSITED (synchronous repaints
+        live-lock under that style)."""
+        try:
+            ctypes.windll.user32.RedrawWindow(
+                self._top_hwnd(), None, None, 0x181)
+        except Exception:
+            pass
+
+    def _enforce_live_exclusive(self, key: str, value: bool) -> None:
+        """Live Typing and Live Captions are mutually exclusive: both consume
+        the same streaming hypothesis, and with Live Typing on the words are
+        already appearing in the target app so a caption bar is redundant.
+        Switching either ON switches the other OFF (and persists it)."""
+        if not value:
+            return
+        other = "live_captions" if key == "live_inject" else "live_inject"
+        pill = getattr(self, "_setting_pills", {}).get(other)
+        if pill is None or not pill.get():
+            return
+        pill.set(False)
+        var = getattr(self, "_setting_vars", {}).get(other)
+        if var is not None:
+            var.set(False)
+        if self._on_settings_change:
+            self._on_settings_change(other, False)
 
     def show(self) -> None:
         self._ui_after(0, self._do_show)
@@ -538,11 +617,10 @@ class AppWindow:
         self._root.deiconify()
         try:
             u32 = ctypes.windll.user32
-            # FindWindowW by title is more reliable than winfo_id() which can
-            # return a child HWND rather than the actual top-level window handle.
-            hwnd = u32.FindWindowW(None, "FTC Whisper")
-            if not hwnd:
-                hwnd = u32.GetParent(self._root.winfo_id()) or self._root.winfo_id()
+            # GetAncestor(GA_ROOT) resolves the real top-level for our root
+            # (winfo_id alone can be a child HWND; FindWindowW by title could
+            # hit another process's window during an update handoff).
+            hwnd = self._top_hwnd()
             HWND_TOPMOST   = -1
             HWND_NOTOPMOST = -2
             SWP_NOMOVE     = 0x0002
@@ -595,11 +673,11 @@ class AppWindow:
             DWMWA_CAPTION_COLOR = 35   # Windows 11 build 22000+
             DWMWA_TEXT_COLOR = 36
             u32 = ctypes.windll.user32
-            # FindWindowW by title returns the real top-level HWND; winfo_id()
-            # can be a child HWND that DWM caption attributes don't apply to.
-            hwnd = u32.FindWindowW(None, "FTC Whisper")
-            if not hwnd:
-                hwnd = u32.GetParent(self._root.winfo_id()) or self._root.winfo_id()
+            # OUR root's top-level HWND (GetAncestor GA_ROOT) — never resolve
+            # by title: the popup Toplevel and other processes (update
+            # handoff, dev + installed) can all be titled "FTC Whisper", so a
+            # title lookup applied styles to the wrong window at random.
+            hwnd = self._top_hwnd()
             dwm = ctypes.windll.dwmapi
 
             def _set(attr, value):
@@ -614,23 +692,13 @@ class AppWindow:
             _set(DWMWA_CAPTION_COLOR, self._colorref(self._TITLEBAR_GREY))
             _set(DWMWA_TEXT_COLOR, self._colorref("#ffffff"))
 
-            # WS_EX_COMPOSITED: Windows double-buffers the whole child-window
-            # tree, painting each frame in one atomic pass. This is what stops
-            # the scroll/resize tearing where embedded card Frames left ghost
-            # copies of themselves (duplicated rows, stray floating labels) on
-            # the Settings and Hotkey tabs.
-            GWL_EXSTYLE = -20
-            WS_EX_COMPOSITED = 0x02000000
-            style = u32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            if not (style & WS_EX_COMPOSITED):
-                u32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_COMPOSITED)
-                # SetWindowLong only STORES the bit; Windows keeps painting
-                # with the cached frame data until a SWP_FRAMECHANGED forces it
-                # to re-read the style. Without this the window read back as
-                # composited while still tearing exactly as before.
-                SWP_FLAGS = 0x0037  # NOSIZE|NOMOVE|NOZORDER|NOACTIVATE|FRAMECHANGED
-                u32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_FLAGS)
-                print("[AppWindow] Composited window enabled.")
+            # NOTE: no WS_EX_COMPOSITED anywhere. It was tried on the
+            # top-level (v1.6.26) and on the scroll canvases: both variants
+            # left stale pixels on tab raises because invalidation never
+            # reliably reached the buffered subtree, and RDW_UPDATENOW
+            # live-locks under the style so no synchronous heal is possible.
+            # Uncomposited, every ghost is fixable with plain synchronous
+            # RedrawWindow calls (see _repaint/_repaint_all).
         except Exception:
             pass
 
@@ -647,7 +715,7 @@ class AppWindow:
         self._gear_btn = tk.Label(
             header, text="⚙",
             fg=C["subtext"], bg=C["bg"],
-            font=("Segoe UI", 15), cursor="hand2", padx=12,
+            font=("Segoe UI", 17), cursor="hand2", padx=12,
         )
         self._gear_btn.pack(side="right", anchor="ne")
         self._gear_btn.bind("<Button-1>", lambda _e: self._switch_dash_tab("settings"))
@@ -765,9 +833,26 @@ class AppWindow:
             "settings": self._settings_frame,
         }
 
-        # Raise the active frame — no pack/unpack, so no layout flash
+        # Map/unmap instead of tkraise: under WS_EX_COMPOSITED a child z-order
+        # flip doesn't invalidate the newly exposed region, so the previous
+        # tab's pixels bled through the raised tab until the first scroll
+        # (the "settings shows Home/History underneath" ghost). grid_remove
+        # keeps the grid slot config, so this is still layout-flash-free.
+        # Raise the active frame — no pack/unpack, so no layout flash.
+        # (Map/unmap via grid_remove was tried instead: under the composited
+        # style remapped children came back as unpainted black regions.)
         if name in tab_frames:
             tab_frames[name].tkraise()
+            # The z-order flip alone can leave the previous tab's pixels in
+            # regions the new tab doesn't immediately repaint. One synchronous
+            # full-tree repaint makes the switch land as a single clean frame;
+            # the delayed second pass mops up anything a late layout job
+            # (scrollregion sync, banner pack) redraws after the switch.
+            self._repaint_all()
+            try:
+                self._root.after(50, self._repaint_all)
+            except tk.TclError:
+                pass
 
         for n in tab_frames:
             if n in self._dash_tabs:
@@ -811,19 +896,69 @@ class AppWindow:
         self._login_ui = LoginWindow(self._auth, on_success=_on_success, on_cancel=self._do_quit)
         self._login_ui.embed(self._login_frame)
 
+    def _top_hwnd(self) -> int:
+        """Top-level HWND of OUR root. GetAncestor(GA_ROOT) — never resolve by
+        title here: during an update handoff two processes both own an
+        'FTC Whisper' window, and freezing the other one's painting via
+        WM_SETREDRAW would wedge it."""
+        try:
+            u32 = ctypes.windll.user32
+            hwnd = u32.GetAncestor(self._root.winfo_id(), 2)  # GA_ROOT
+            if not hwnd:
+                hwnd = u32.GetParent(self._root.winfo_id()) or self._root.winfo_id()
+            return hwnd
+        except Exception:
+            return 0
+
+    def _atomic_ui(self, fn) -> None:
+        """Run a multi-step layout change as ONE visual frame. WM_SETREDRAW
+        freezes painting, fn() does its pack/geometry work, update_idletasks
+        settles the layout, then a full-tree RedrawWindow presents the result
+        atomically. Without this the login→dashboard swap painted each step
+        (header pops in, window jumps size, cards reflow) as visible glitches."""
+        u32 = None
+        hwnd = 0
+        froze = False
+        try:
+            u32 = ctypes.windll.user32
+            hwnd = self._top_hwnd()
+            if hwnd:
+                u32.SendMessageW(hwnd, 0x000B, 0, 0)  # WM_SETREDRAW off
+                froze = True
+        except Exception:
+            froze = False
+        try:
+            fn()
+            try:
+                self._root.update_idletasks()
+            except Exception:
+                pass
+        finally:
+            if froze:
+                try:
+                    u32.SendMessageW(hwnd, 0x000B, 1, 0)  # WM_SETREDRAW on
+                    # RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN|RDW_UPDATENOW|RDW_FRAME
+                    u32.RedrawWindow(hwnd, None, None, 0x585)
+                except Exception:
+                    pass
+
     def _switch_to_login(self) -> None:
-        self._dash_visible = False
-        self._header_outer.pack_forget()
-        self._dash_frame.pack_forget()
-        self._login_frame.pack(fill="both", expand=True)
-        self._resize(WINDOW_W, 560)
+        def _swap():
+            self._dash_visible = False
+            self._header_outer.pack_forget()
+            self._dash_frame.pack_forget()
+            self._login_frame.pack(fill="both", expand=True)
+            self._resize(WINDOW_W, 560)
+        self._atomic_ui(_swap)
         if hasattr(self, "_login_ui"):
             self._login_ui.reset()
 
     def _switch_to_dashboard(self) -> None:
-        self._login_frame.pack_forget()
-        self._header_outer.pack(fill="x")
-        self._show_dashboard()
+        def _swap():
+            self._login_frame.pack_forget()
+            self._header_outer.pack(fill="x")
+            self._show_dashboard()
+        self._atomic_ui(_swap)
 
     def _show_dashboard(self) -> None:
         self._dash_frame.pack(fill="both", expand=True)
@@ -878,9 +1013,28 @@ class AppWindow:
     def _on_root_configure(self, event) -> None:
         """Debounced per-account size save. The root's name is in every
         descendant's bindtags, so filter to the toplevel's own events."""
-        if event.widget is not self._root or not self._dash_visible:
+        if event.widget is not self._root:
             return
-        if (event.width, event.height) == self._applied_size:
+        # Any root size change reflows the whole layout; stale pixels from the
+        # old layout are what showed as duplicated/ghost rows after a resize
+        # (including the login→dashboard size jump). One debounced async
+        # full-tree repaint clears them.
+        size = (event.width, event.height)
+        if size != getattr(self, "_last_repaint_size", None):
+            self._last_repaint_size = size
+            job = getattr(self, "_resize_repaint_job", None)
+            if job is not None:
+                try:
+                    self._root.after_cancel(job)
+                except tk.TclError:
+                    pass
+            try:
+                self._resize_repaint_job = self._root.after(80, self._repaint_all)
+            except tk.TclError:
+                pass
+        if not self._dash_visible:
+            return
+        if size == self._applied_size:
             return
         if self._win_save_job is not None:
             try:
@@ -998,8 +1152,11 @@ class AppWindow:
         )
         self._home_hotkey_lbl.pack()
 
-        _cur_mode = getattr(self._config, "mode", "hold") if self._config else "hold"
-        _hint_text = " hold to dictate" if _cur_mode != "toggle" else " press to start/stop"
+        # Hints are deliberately tiny: one short line each, plain words, no
+        # jargon. A user should get what a key does without reading twice.
+        _cur_mode = getattr(self._config, "mode", "toggle") if self._config else "toggle"
+        _hint_text = (" hold to talk, let go to type" if _cur_mode != "toggle"
+                      else " tap to start, tap to stop")
         self._home_mode_hint_lbl = tk.Label(
             hint_row, text=_hint_text,
             fg=C["subtext"], bg=C["surface"],
@@ -1022,10 +1179,30 @@ class AppWindow:
         self._home_refine_hotkey_lbl.pack()
 
         tk.Label(
-            refine_hint_row, text=" refine selection with AI",
+            refine_hint_row, text=" select text, AI improves it",
             fg=C["subtext"], bg=C["surface"],
             font=("Segoe UI", 10),
         ).pack(side="left")
+
+        # Push-to-talk pill — packed between the two rows above only while a
+        # PTT shortcut is set (see _update_home_ptt_row).
+        self._refine_hint_row = refine_hint_row
+        self._home_ptt_row = tk.Frame(sc, bg=C["surface"])
+        _ptt_pill_bg = tk.Frame(self._home_ptt_row, bg=C["accent_dim"],
+                                padx=8, pady=3)
+        _ptt_pill_bg.pack(side="left")
+        self._home_ptt_lbl = tk.Label(
+            _ptt_pill_bg, text=self._ptt_hotkey or "—",
+            fg=C["accent"], bg=C["accent_dim"],
+            font=("Segoe UI", 10, "bold"),
+        )
+        self._home_ptt_lbl.pack()
+        tk.Label(
+            self._home_ptt_row, text=" hold to talk, let go to type",
+            fg=C["subtext"], bg=C["surface"],
+            font=("Segoe UI", 10),
+        ).pack(side="left")
+        self._update_home_ptt_row()
 
         # Your impact — live per-account stats (replaces the old instructions
         # card so Home still fits on one page without scrolling)
@@ -1065,7 +1242,9 @@ class AppWindow:
             }
             cv.bind("<Configure>", lambda _e, k=key: self._layout_impact_card(k))
 
-        # The speed card is the product constant, not a measurement.
+        # Speed starts at the product's nominal 160 wpm; once the account has
+        # enough voiced-speech data, _refresh_impact replaces it with the
+        # user's real measured average (see StatsStore.snapshot).
         self._set_impact_card("speed", "160", "wpm", "4× faster than typing")
 
         # Today bar
@@ -1073,11 +1252,19 @@ class AppWindow:
         brow = tk.Frame(bar, bg=C["surface"])
         brow.pack(fill="x")
         icv = tk.Canvas(brow, bg=C["surface"], highlightthickness=0, bd=0,
-                        width=18, height=18)
+                        width=21, height=21)
         icv.pack(side="left")
-        _rr(icv, 3, 1, 15, 17, 3, fill=C["surface"], outline=C["subtext"], width=1.4)
-        icv.create_line(6, 7, 12, 7, fill=C["subtext"], width=1.4)
-        icv.create_line(6, 11, 12, 11, fill=C["subtext"], width=1.4)
+        try:
+            import ui_render
+            _doc = ui_render.icon_doc(icv, 21, C["subtext"], bg=C["surface"])
+        except Exception:
+            _doc = None
+        if _doc is not None:
+            icv.create_image(0, 0, image=_doc, anchor="nw")
+        else:
+            _rr(icv, 3, 1, 15, 17, 3, fill=C["surface"], outline=C["subtext"], width=1.4)
+            icv.create_line(6, 7, 12, 7, fill=C["subtext"], width=1.4)
+            icv.create_line(6, 11, 12, 11, fill=C["subtext"], width=1.4)
         tk.Label(
             brow, text="Today", fg=C["text"], bg=C["surface"],
             font=("Segoe UI", 10, "bold"),
@@ -1107,7 +1294,17 @@ class AppWindow:
         if w < 40:
             return
         cv.delete("all")
-        _rr(cv, 0, 0, w - 1, h - 1, 12, fill=C["surface"], outline=C["border"])
+        bgimg = None
+        try:
+            import ui_render
+            bgimg = ui_render.round_rect(cv, w, h, 12, C["surface"],
+                                         C["border"], 1, C["bg"])
+        except Exception:
+            bgimg = None
+        if bgimg is not None:
+            cv.create_image(0, 0, image=bgimg, anchor="nw")
+        else:
+            _rr(cv, 0, 0, w - 1, h - 1, 12, fill=C["surface"], outline=C["border"])
         cx = w // 2
         card["icon"](cv, cx, 32)
         # tkinter has no letter-spacing — hair spaces between characters give
@@ -1137,8 +1334,19 @@ class AppWindow:
         cv.create_text(cx, 127, text=card["sub"], fill=C["subtext"],
                        font=("Segoe UI", 8))
 
+    # Impact icons are PIL-rendered (anti-aliased, cached in ui_render); the
+    # canvas-primitive bodies below are the no-PIL fallback only.
+
     @staticmethod
     def _draw_icon_clock(cv, cx, cy):
+        try:
+            import ui_render
+            photo = ui_render.icon_clock(cv, 31, C["accent"], bg=C["surface"])
+        except Exception:
+            photo = None
+        if photo is not None:
+            cv.create_image(cx, cy, image=photo)
+            return
         r = 11
         cv.create_oval(cx - r, cy - r, cx + r, cy + r,
                        outline=C["accent"], width=2)
@@ -1149,6 +1357,14 @@ class AppWindow:
 
     @staticmethod
     def _draw_icon_bolt(cv, cx, cy):
+        try:
+            import ui_render
+            photo = ui_render.icon_bolt(cv, 31, C["success"], bg=C["surface"])
+        except Exception:
+            photo = None
+        if photo is not None:
+            cv.create_image(cx, cy, image=photo)
+            return
         pts = [(2.5, -12), (-7, 1.5), (-1, 1.5), (-2.5, 12), (7, -1.5), (1, -1.5)]
         cv.create_polygon([(cx + dx, cy + dy) for dx, dy in pts],
                           fill=C["success"], outline="")
@@ -1157,6 +1373,15 @@ class AppWindow:
     def _draw_icon_flame(cv, cx, cy):
         """Filled teardrop flame with a lick curling off the left, matching the
         reference. Filled reads far better than a stroke at this size."""
+        try:
+            import ui_render
+            photo = ui_render.icon_flame(cv, 31, C["accent"],
+                                         cutout=C["surface"], bg=C["surface"])
+        except Exception:
+            photo = None
+        if photo is not None:
+            cv.create_image(cx, cy, image=photo)
+            return
         outer = [
             (0.5, -12),      # tip
             (4.5, -6.5),
@@ -1202,6 +1427,15 @@ class AppWindow:
         else:
             v, u, s = str(int(round(m / 60))), "hrs", "Real time back"
         self._set_impact_card("time", v, u, s)
+
+        wpm = snap.get("avg_wpm") or 0
+        if wpm:
+            ratio = wpm / 40.0
+            ratio_txt = f"{ratio:.1f}".rstrip("0").rstrip(".")
+            self._set_impact_card("speed", str(int(round(wpm))), "wpm",
+                                  f"{ratio_txt}× faster than typing")
+        else:
+            self._set_impact_card("speed", "160", "wpm", "4× faster than typing")
 
         n = snap["streak_days"]
         if n == 0:
@@ -1257,26 +1491,44 @@ class AppWindow:
             _hk_win, width=e.width))
         parent = _hk_inner
 
-        # ── Dictation hotkey ─────────────────────────────────────────────────────
-        card1 = self._card(parent, margin=(0, 8))
+        def _card_title(card, icon: str, title: str) -> None:
+            row = tk.Frame(card, bg=C["surface"])
+            row.pack(fill="x")
+            ph = None
+            try:
+                import ui_render
+                ph = ui_render.icon_glyph(row, icon, 26, C["accent"],
+                                          bg=C["surface"])
+            except Exception:
+                ph = None
+            if ph is not None:
+                tk.Label(row, image=ph, bg=C["surface"]).pack(
+                    side="left", padx=(0, 8))
+            tk.Label(row, text=title, fg=C["text"], bg=C["surface"],
+                     font=("Segoe UI", 10, "bold"), anchor="w").pack(side="left")
 
-        tk.Label(card1, text="Dictation shortcut",
+        # ── Dictation hotkeys ────────────────────────────────────────────────
+        card1 = self._card(parent, margin=(0, 8))
+        _card_title(card1, "mic", "Dictation")
+
+        # Mode state must exist before the description below — its wording
+        # depends on hold vs toggle (legacy hold configs keep hold semantics
+        # on the main bind; there is no UI to change mode any more, the
+        # push-to-talk bind below covers hold-style dictation).
+        _init_mode = getattr(self._config, "mode", "toggle") if self._config else "toggle"
+        self._mode_toggle_on = (_init_mode == "toggle")
+
+        tk.Label(card1, text=" ".join("HANDS-FREE"),
                  fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
+                 font=("Segoe UI", 7, "bold"), anchor="w").pack(
+                     fill="x", pady=(10, 0))
 
         self._hotkey_display_lbl = tk.Label(
             card1, text=self._hotkey or "ALT+V",
             fg=C["accent"], bg=C["surface"],
             font=("Segoe UI", 18, "bold"), anchor="w",
         )
-        self._hotkey_display_lbl.pack(fill="x", pady=(2, 8))
-
-        tk.Frame(card1, bg=C["border"], height=1).pack(fill="x", pady=(0, 10))
-
-        # Mode state must exist before the description below — its wording
-        # depends on hold vs toggle.
-        _init_mode = getattr(self._config, "mode", "hold") if self._config else "hold"
-        self._mode_toggle_on = (_init_mode == "toggle")
+        self._hotkey_display_lbl.pack(fill="x", pady=(0, 2))
 
         self._hotkey_record_msg = tk.Label(
             card1,
@@ -1284,7 +1536,7 @@ class AppWindow:
             fg=C["subtext"], bg=C["surface"],
             font=("Segoe UI", 9), justify="left", anchor="w", wraplength=340,
         )
-        self._hotkey_record_msg.pack(fill="x", pady=(0, 8))
+        self._hotkey_record_msg.pack(fill="x", pady=(0, 6))
         self._autowrap(self._hotkey_record_msg)
 
         btn_row = tk.Frame(card1, bg=C["surface"])
@@ -1301,50 +1553,57 @@ class AppWindow:
         )
         self._save_btn.pack(side="left")
 
-        # Compact toggle switch — inline with the buttons (mode state was
-        # initialised above, before the description label).
-        _mode_right = tk.Frame(btn_row, bg=C["surface"])
-        _mode_right.pack(side="right")
+        tk.Frame(card1, bg=C["border"], height=1).pack(fill="x", pady=(12, 8))
 
-        self._mode_lbl = tk.Label(
-            _mode_right, text="Toggle",
-            fg=C["text"] if self._mode_toggle_on else C["subtext"],
+        tk.Label(card1, text=" ".join("PUSH-TO-TALK"),
+                 fg=C["subtext"], bg=C["surface"],
+                 font=("Segoe UI", 7, "bold"), anchor="w").pack(fill="x")
+
+        self._ptt_display_lbl = tk.Label(
+            card1, text=self._ptt_hotkey or "Not set",
+            fg=C["accent"] if self._ptt_hotkey else C["subtext"],
             bg=C["surface"],
-            font=("Segoe UI", 9), cursor="hand2",
+            font=("Segoe UI", 18, "bold"), anchor="w",
         )
-        self._mode_lbl.pack(side="right", padx=(6, 0))
+        self._ptt_display_lbl.pack(fill="x", pady=(0, 2))
 
-        def _click_mode_toggle_logic(new_val: bool):
-            self._mode_toggle_on = new_val
-            mode = "toggle" if new_val else "hold"
-            self._mode_lbl.configure(
-                fg=C["text"] if new_val else C["subtext"]
-            )
-            # Description follows the mode — but never clobber the "press your
-            # new key…" prompt while a shortcut recording is in progress.
-            if not self._recording_hotkey:
-                self._hotkey_record_msg.configure(
-                    text=self._hotkey_help_text(), fg=C["subtext"])
-            if hasattr(self, "_home_mode_hint_lbl"):
-                self._home_mode_hint_lbl.configure(
-                    text=" press to start/stop" if new_val else " hold to dictate"
-                )
-            if self._on_settings_change:
-                self._on_settings_change("mode", mode)
-
-        self._mode_pill = TogglePill(
-            _mode_right, value=self._mode_toggle_on, bg=C["surface"],
-            command=_click_mode_toggle_logic,
+        self._ptt_record_msg = tk.Label(
+            card1,
+            text=self._ptt_help_text(),
+            fg=C["subtext"], bg=C["surface"],
+            font=("Segoe UI", 9), justify="left", anchor="w", wraplength=340,
         )
-        self._mode_pill.pack(side="right")
-        self._mode_lbl.bind("<Button-1>", lambda _e: self._mode_pill.toggle())
+        self._ptt_record_msg.pack(fill="x", pady=(0, 6))
+        self._autowrap(self._ptt_record_msg)
+
+        btn_row_p = tk.Frame(card1, bg=C["surface"])
+        btn_row_p.pack(fill="x")
+
+        self._ptt_record_btn = self._surface_btn(
+            btn_row_p, "Change Shortcut" if self._ptt_hotkey else "Set Shortcut",
+            self._toggle_ptt_recording)
+        self._ptt_record_btn.pack(side="left", padx=(0, 8))
+
+        self._ptt_save_btn = RoundedButton(
+            btn_row_p, text="Save",
+            fg=C["subtext"], fill=C["border"],
+            font=("Segoe UI", 10, "bold"), padx=16, pady=8,
+        )
+        self._ptt_save_btn.pack(side="left")
+
+        self._ptt_clear_btn = tk.Label(
+            btn_row_p, text="Remove" if self._ptt_hotkey else "",
+            fg=C["subtext"], bg=C["surface"],
+            font=("Segoe UI", 9), cursor="hand2", anchor="e",
+        )
+        self._ptt_clear_btn.pack(side="right")
+        self._ptt_clear_btn.bind("<Button-1>", lambda _e: self._clear_ptt_hotkey())
+        self._ptt_clear_btn.bind("<Enter>", lambda _e: self._ptt_clear_btn.configure(fg=C["error"]))
+        self._ptt_clear_btn.bind("<Leave>", lambda _e: self._ptt_clear_btn.configure(fg=C["subtext"]))
 
         # ── Refine selection hotkey ───────────────────────────────────────────────
         card2 = self._card(parent, margin=(0, 8))
-
-        tk.Label(card2, text="Refine selection shortcut",
-                 fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
+        _card_title(card2, "wand", "Refine selection")
 
         self._refine_hotkey_display_lbl = tk.Label(
             card2, text=self._refine_hotkey or "ALT+R",
@@ -1357,7 +1616,7 @@ class AppWindow:
 
         self._refine_record_msg = tk.Label(
             card2,
-            text="Select text anywhere, then press this key to refine it with AI.",
+            text="Select text, then press it. AI improves the wording.",
             fg=C["subtext"], bg=C["surface"],
             font=("Segoe UI", 9), justify="left", anchor="w", wraplength=340,
         )
@@ -1378,14 +1637,35 @@ class AppWindow:
         )
         self._refine_save_btn.pack(side="left")
 
+    # Help text is one short line of plain words. It is the first thing a new
+    # user reads, so it says what the key does and stops there.
+
     def _hotkey_help_text(self) -> str:
-        """Description under the shortcut — wording tracks hold vs toggle mode."""
         hk = (self._hotkey or "ALT+V").upper()
         if getattr(self, "_mode_toggle_on", True):
-            return (f"Press {hk} once to start recording, again to stop and "
-                    "insert. Press  Change Shortcut  to set a new key combo.")
-        return (f"Hold {hk} while you speak, release to insert. "
-                "Press  Change Shortcut  to set a new key combo.")
+            return f"Tap {hk} to start, tap again to stop."
+        return f"Hold {hk} to talk, let go to type."
+
+    def _ptt_help_text(self) -> str:
+        if self._ptt_hotkey:
+            return f"Hold {self._ptt_hotkey} to talk, let go to type."
+        return "Set a key to hold while talking."
+
+    def _update_home_ptt_row(self) -> None:
+        """Show/hide the Home tab's push-to-talk hint to match the bind."""
+        row = getattr(self, "_home_ptt_row", None)
+        if row is None:
+            return
+        try:
+            if self._ptt_hotkey:
+                self._home_ptt_lbl.configure(text=self._ptt_hotkey)
+                if not row.winfo_ismapped():
+                    row.pack(fill="x", pady=(4, 0),
+                             before=self._refine_hint_row)
+            else:
+                row.pack_forget()
+        except tk.TclError:
+            pass
 
     def _toggle_hotkey_recording(self) -> None:
         if self._recording_hotkey:
@@ -1394,10 +1674,12 @@ class AppWindow:
             self._start_hotkey_recording()
 
     def _start_hotkey_recording(self) -> None:
-        # Both recorders share the root <KeyPress> binding — only one can be
+        # All recorders share the root <KeyPress> binding — only one can be
         # live, or stopping either would strand the other mid-recording.
         if self._recording_refine_hotkey:
             self._stop_refine_hotkey_recording(cancelled=True)
+        if self._recording_ptt_hotkey:
+            self._stop_ptt_recording(cancelled=True)
         self._recording_hotkey = True
         self._pending_hotkey = None
         self._record_btn.configure(text="Cancel", bg=C["error"], fg=C["text"])
@@ -1454,7 +1736,7 @@ class AppWindow:
                 text=f"New shortcut: {self._pending_hotkey.upper()} — Click Save to apply.",
                 fg=C["success"],
             )
-            self._save_btn.configure(bg=C["accent"], cursor="hand2", fg=C["bg"])
+            self._save_btn.configure(bg=C["accent"], cursor="hand2", fg=C["text"])
             self._save_btn.bind("<Button-1>", lambda _e: self._save_hotkey())
             self._save_btn.bind("<Enter>",    lambda _e: self._save_btn.configure(bg=C["accent_hover"]))
             self._save_btn.bind("<Leave>",    lambda _e: self._save_btn.configure(bg=C["accent"]))
@@ -1490,6 +1772,142 @@ class AppWindow:
             target=self._on_hotkey_change, args=(new_hotkey,), daemon=True
         ).start()
 
+    # ── Push-to-talk hotkey recorder ──────────────────────────────────────────
+
+    def _toggle_ptt_recording(self) -> None:
+        if self._recording_ptt_hotkey:
+            self._stop_ptt_recording(cancelled=True)
+        else:
+            self._start_ptt_recording()
+
+    def _start_ptt_recording(self) -> None:
+        if self._recording_hotkey:
+            self._stop_hotkey_recording(cancelled=True)
+        if self._recording_refine_hotkey:
+            self._stop_refine_hotkey_recording(cancelled=True)
+        self._recording_ptt_hotkey = True
+        self._pending_ptt_hotkey = None
+        self._ptt_record_btn.configure(text="Cancel", bg=C["error"], fg=C["text"])
+        self._ptt_record_msg.configure(
+            text="Press your new key or combination… (Escape to cancel)",
+            fg=C["accent"],
+        )
+        self._ptt_display_lbl.configure(text="…", fg=C["accent"])
+        self._root.focus_force()
+        self._root.bind("<KeyPress>",   self._on_ptt_keypress)
+        self._root.bind("<KeyRelease>", self._on_ptt_keyrelease)
+
+    def _on_ptt_keypress(self, event) -> str:
+        keysym = event.keysym.lower()
+        if keysym == "escape":
+            self._stop_ptt_recording(cancelled=True)
+            return "break"
+        if keysym in ("control_l", "control_r", "alt_l", "alt_r",
+                      "shift_l", "shift_r", "super_l", "super_r", "meta_l", "meta_r"):
+            return "break"
+        mods = []
+        if event.state & self._TK_CTRL:  mods.append("ctrl")
+        if event.state & self._TK_ALT:   mods.append("alt")
+        if event.state & self._TK_SHIFT: mods.append("shift")
+        base = self._norm_keysym(keysym)
+        combo = "+".join(mods + [base]) if mods else base
+        self._pending_ptt_hotkey = combo
+        self._ptt_display_lbl.configure(text=combo.upper())
+        self._root.after(300, lambda: self._stop_ptt_recording(cancelled=False))
+        return "break"
+
+    def _on_ptt_keyrelease(self, event) -> None:
+        pass
+
+    def _stop_ptt_recording(self, cancelled: bool) -> None:
+        self._recording_ptt_hotkey = False
+        self._root.unbind("<KeyPress>")
+        self._root.unbind("<KeyRelease>")
+        self._ptt_record_btn.configure(
+            text="Change Shortcut" if self._ptt_hotkey else "Set Shortcut",
+            bg=C["surface"], fg=C["text"], cursor="hand2")
+
+        if cancelled or not self._pending_ptt_hotkey:
+            self._ptt_display_lbl.configure(
+                text=self._ptt_hotkey or "Not set",
+                fg=C["accent"] if self._ptt_hotkey else C["subtext"])
+            self._ptt_record_msg.configure(
+                text=self._ptt_help_text(), fg=C["subtext"])
+            self._ptt_save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
+        else:
+            if (self._pending_ptt_hotkey or "").upper() == (self._hotkey or "").upper():
+                # Same combo as the hands-free bind can't hold both meanings.
+                self._pending_ptt_hotkey = None
+                self._ptt_display_lbl.configure(
+                    text=self._ptt_hotkey or "Not set",
+                    fg=C["accent"] if self._ptt_hotkey else C["subtext"])
+                self._ptt_record_msg.configure(
+                    text="That's already the hands-free shortcut. "
+                         "Pick a different combo.", fg=C["error"])
+                self._ptt_save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
+                return
+            self._ptt_display_lbl.configure(
+                text=self._pending_ptt_hotkey.upper(), fg=C["accent"])
+            self._ptt_record_msg.configure(
+                text=f"New shortcut: {self._pending_ptt_hotkey.upper()} — Click Save to apply.",
+                fg=C["success"],
+            )
+            self._ptt_save_btn.configure(bg=C["accent"], cursor="hand2", fg=C["text"])
+            self._ptt_save_btn.bind("<Button-1>", lambda _e: self._save_ptt_hotkey())
+            self._ptt_save_btn.bind("<Enter>",    lambda _e: self._ptt_save_btn.configure(bg=C["accent_hover"]))
+            self._ptt_save_btn.bind("<Leave>",    lambda _e: self._ptt_save_btn.configure(bg=C["accent"]))
+
+    def _save_ptt_hotkey(self) -> None:
+        if not self._pending_ptt_hotkey:
+            return
+        new_hotkey = self._pending_ptt_hotkey
+        self._ptt_hotkey = new_hotkey.upper()
+        self._pending_ptt_hotkey = None
+        self._ptt_display_lbl.configure(text=self._ptt_hotkey, fg=C["accent"])
+        self._ptt_clear_btn.configure(text="Remove")
+        self._ptt_record_btn.configure(text="Change Shortcut")
+        self._ptt_save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
+        self._ptt_save_btn.unbind("<Button-1>")
+        self._ptt_record_msg.configure(
+            text=f"Shortcut updated to {self._ptt_hotkey}.", fg=C["success"])
+
+        def _restore_help():
+            try:
+                if not self._recording_ptt_hotkey:
+                    self._ptt_record_msg.configure(
+                        text=self._ptt_help_text(), fg=C["subtext"])
+            except tk.TclError:
+                pass
+        if self._root:
+            self._root.after(4000, _restore_help)
+
+        self._update_home_ptt_row()
+        if self._on_settings_change:
+            threading.Thread(
+                target=self._on_settings_change,
+                args=("ptt_hotkey", new_hotkey.lower()), daemon=True,
+            ).start()
+
+    def _clear_ptt_hotkey(self) -> None:
+        if not self._ptt_hotkey and not self._pending_ptt_hotkey:
+            return
+        if self._recording_ptt_hotkey:
+            self._stop_ptt_recording(cancelled=True)
+        self._ptt_hotkey = ""
+        self._pending_ptt_hotkey = None
+        self._ptt_display_lbl.configure(text="Not set", fg=C["subtext"])
+        self._ptt_clear_btn.configure(text="")
+        self._ptt_record_btn.configure(text="Set Shortcut")
+        self._ptt_save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
+        self._ptt_save_btn.unbind("<Button-1>")
+        self._ptt_record_msg.configure(text=self._ptt_help_text(), fg=C["subtext"])
+        self._update_home_ptt_row()
+        if self._on_settings_change:
+            threading.Thread(
+                target=self._on_settings_change,
+                args=("ptt_hotkey", ""), daemon=True,
+            ).start()
+
     # ── Refine hotkey recorder ────────────────────────────────────────────────
 
     def _toggle_refine_hotkey_recording(self) -> None:
@@ -1501,6 +1919,8 @@ class AppWindow:
     def _start_refine_hotkey_recording(self) -> None:
         if self._recording_hotkey:
             self._stop_hotkey_recording(cancelled=True)
+        if self._recording_ptt_hotkey:
+            self._stop_ptt_recording(cancelled=True)
         self._recording_refine_hotkey = True
         self._pending_refine_hotkey = None
         self._refine_record_btn.configure(text="Cancel", bg=C["error"], fg=C["text"])
@@ -1545,7 +1965,7 @@ class AppWindow:
         if cancelled or not self._pending_refine_hotkey:
             self._refine_hotkey_display_lbl.configure(text=self._refine_hotkey or "—")
             self._refine_record_msg.configure(
-                text="Select text anywhere, then press this key to refine it with AI.",
+                text="Select text, then press it. AI improves the wording.",
                 fg=C["subtext"],
             )
             self._refine_save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
@@ -1555,7 +1975,7 @@ class AppWindow:
                 text=f"New shortcut: {self._pending_refine_hotkey.upper()} — Click Save to apply.",
                 fg=C["success"],
             )
-            self._refine_save_btn.configure(bg=C["accent"], cursor="hand2", fg=C["bg"])
+            self._refine_save_btn.configure(bg=C["accent"], cursor="hand2", fg=C["text"])
             self._refine_save_btn.bind("<Button-1>", lambda _e: self._save_refine_hotkey())
             self._refine_save_btn.bind("<Enter>",    lambda _e: self._refine_save_btn.configure(bg=C["accent_hover"]))
             self._refine_save_btn.bind("<Leave>",    lambda _e: self._refine_save_btn.configure(bg=C["accent"]))
@@ -1746,10 +2166,13 @@ class AppWindow:
         Frames are real child windows — fast wheel scrolling leaves torn "ghost"
         copies of rows in the uncovered regions (the expose pass never repaints
         them). Force a clean repaint of the canvas and every child after each
-        scroll step. RDW_INVALIDATE|RDW_ALLCHILDREN (0x81) WITHOUT erase:
-        repaint-over, so no background flash."""
+        scroll step. RDW_INVALIDATE|RDW_ALLCHILDREN|RDW_UPDATENOW (0x181)
+        WITHOUT erase: repaint-over, so no background flash, and the heal is
+        SYNCHRONOUS — the ghost never reaches the screen. UPDATENOW is safe
+        only because nothing is WS_EX_COMPOSITED (under that style it
+        live-locks the UI thread — verified); keep it that way."""
         try:
-            ctypes.windll.user32.RedrawWindow(widget.winfo_id(), None, None, 0x81)
+            ctypes.windll.user32.RedrawWindow(widget.winfo_id(), None, None, 0x181)
         except Exception:
             pass
 
@@ -2523,6 +2946,67 @@ class AppWindow:
         # Shadow parent so all existing code below writes into the scrollable frame
         parent = inner
         cfg = self._config
+        self._setting_pills = {}
+        self._setting_vars = {}
+
+        # ── Section + iconed toggle-card helpers ─────────────────────────────
+        def _section(icon: str, title: str) -> None:
+            row = tk.Frame(parent, bg=C["bg"])
+            row.pack(fill="x", padx=22, pady=(16, 6))
+            ph = None
+            try:
+                import ui_render
+                ph = ui_render.icon_glyph(row, icon, 19, C["accent"], bg=C["bg"])
+            except Exception:
+                ph = None
+            if ph is not None:
+                tk.Label(row, image=ph, bg=C["bg"]).pack(side="left", padx=(0, 7))
+            tk.Label(row, text=" ".join(title.upper()),
+                     fg=C["subtext"], bg=C["bg"],
+                     font=("Segoe UI", 7, "bold"), anchor="w").pack(side="left")
+
+        def _card_icon(row, icon: str, bg=None):
+            """Pack a glyph on the left of a card row. Silently absent if PIL
+            or the glyph is unavailable. 26px reads at a glance without
+            changing the row height — the two stacked text lines beside it are
+            taller than the icon either way."""
+            try:
+                import ui_render
+                ph = ui_render.icon_glyph(row, icon, 26, C["accent"],
+                                          bg=bg or C["surface"])
+            except Exception:
+                ph = None
+            if ph is not None:
+                tk.Label(row, image=ph, bg=bg or C["surface"]).pack(
+                    side="left", padx=(0, 10), anchor="n", pady=(1, 0))
+
+        def _toggle_card(key: str, title: str, subtext: str, default: bool,
+                         icon: str = ""):
+            card = self._card(parent, margin=(0, 4))
+            row = tk.Frame(card, bg=C["surface"]); row.pack(fill="x")
+            cur = bool(getattr(cfg, key, default) if cfg else default)
+            var = tk.BooleanVar(value=cur)
+            def _toggle(v: bool, _k=key, _v=var):
+                _v.set(v)
+                if self._on_settings_change:
+                    self._on_settings_change(_k, v)
+                if _k in ("live_inject", "live_captions"):
+                    self._enforce_live_exclusive(_k, v)
+            pill = TogglePill(row, value=cur, bg=C["surface"], command=_toggle)
+            pill.pack(side="right")
+            self._setting_pills[key] = pill
+            self._setting_vars[key] = var
+            if icon:
+                _card_icon(row, icon)
+            col = tk.Frame(row, bg=C["surface"]); col.pack(side="left", fill="x", expand=True)
+            tk.Label(col, text=title, fg=C["text"], bg=C["surface"],
+                     font=("Segoe UI", 9), anchor="w").pack(anchor="w")
+            desc = tk.Label(col, text=subtext, fg=C["subtext"], bg=C["surface"],
+                     font=("Segoe UI", 8), anchor="w", justify="left",
+                     wraplength=260)
+            desc.pack(fill="x")
+            self._autowrap(desc)
+            return var
 
         # ── Updates — deliberately first in Settings ─────────────────────────
         # ONE compact card carries everything update-related: the check link,
@@ -2532,6 +3016,7 @@ class AppWindow:
         ver_card = self._card(parent, margin=(0, 4), inner_pad=(18, 10))
         ver_header = tk.Frame(ver_card, bg=C["surface"])
         ver_header.pack(fill="x")
+        _card_icon(ver_header, "update")
         tk.Label(ver_header, text="Updates",
                  fg=C["subtext"], bg=C["surface"],
                  font=("Segoe UI", 9), anchor="w").pack(
@@ -2606,10 +3091,8 @@ class AppWindow:
         self._ver_update_row = tk.Frame(ver_card, bg=C["surface"])
 
         # ── Microphone ────────────────────────────────────────────────────────
-        mic_card = self._card(parent, margin=(0, 8))
-        tk.Label(mic_card, text="Microphone",
-                 fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
+        _section("mic", "Microphone")
+        mic_card = self._card(parent, margin=(0, 4))
 
         # Deduplicate by name, then sort: real mics first, virtual/system last
         def _mic_rank(d):
@@ -2748,7 +3231,7 @@ class AppWindow:
                                  fg=C["text"], fill=C["surface_hover"],
                                  font=("Segoe UI", 9), padx=14, pady=6)
         test_btn.pack(side="left", padx=(0, 6))
-        test_btn.bind("<Enter>", lambda _e: test_btn.configure(bg=C["accent"], fg=C["bg"]))
+        test_btn.bind("<Enter>", lambda _e: test_btn.configure(bg=C["accent"], fg=C["text"]))
         test_btn.bind("<Leave>", lambda _e: test_btn.configure(bg=C["surface_hover"], fg=C["text"]))
 
         scan_btn = RoundedButton(btn_row, text="Find Best Mic",
@@ -2770,7 +3253,7 @@ class AppWindow:
         mic_test_stamp = [0]
         scan_active = [False]
 
-        scan_btn.bind("<Enter>", lambda _e: scan_btn.configure(bg=C["accent"], fg=C["bg"]) if not scan_active[0] else None)
+        scan_btn.bind("<Enter>", lambda _e: scan_btn.configure(bg=C["accent"], fg=C["text"]) if not scan_active[0] else None)
         scan_btn.bind("<Leave>", lambda _e: scan_btn.configure(bg=C["surface_hover"], fg=C["text"]) if not scan_active[0] else None)
 
         def _poll_meter():
@@ -2976,12 +3459,27 @@ class AppWindow:
 
         scan_btn.bind("<Button-1>", lambda _e: _start_scan())
 
+        _toggle_card("warm_mic", "Instant Mic Start",
+                     "Keep the microphone warm so recording starts instantly and the "
+                     "first word is never clipped (mic indicator stays on; audio is "
+                     "only kept for 1.5s and never stored)", True, icon="zap")
 
-        # ── Custom Vocabulary ─────────────────────────────────────────────────
-        vocab_card = self._card(parent, margin=(0, 8))
-        tk.Label(vocab_card, text="Custom Vocabulary",
-                 fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
+        # ── Feedback ──────────────────────────────────────────────────────────
+        _section("speaker", "Feedback")
+        sound_var = _toggle_card(
+            "sound_feedback", "Sound Feedback",
+            "Beeps when recording starts, stops, and transcription finishes",
+            True, icon="speaker")
+
+        # ── Dictation ─────────────────────────────────────────────────────────
+        _section("book", "Dictation")
+        vocab_card = self._card(parent, margin=(0, 4))
+        _vocab_title_row = tk.Frame(vocab_card, bg=C["surface"])
+        _vocab_title_row.pack(fill="x")
+        _card_icon(_vocab_title_row, "book")
+        tk.Label(_vocab_title_row, text="Custom Vocabulary",
+                 fg=C["text"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(side="left")
         _vocab_desc = tk.Label(vocab_card,
                  text="Comma-separated names, acronyms, or terms to boost (e.g. FTC, Salesforce, CRM)",
                  fg=C["subtext"], bg=C["surface"],
@@ -3005,109 +3503,38 @@ class AppWindow:
         vocab_entry.bind("<FocusOut>", _save_vocab)
         vocab_entry.bind("<Return>", _save_vocab)
 
-        # ── Sound feedback ────────────────────────────────────────────────────
-        sound_card = self._card(parent, margin=(0, 4))
-        sound_row = tk.Frame(sound_card, bg=C["surface"])
-        sound_row.pack(fill="x")
-
-        current_sound = bool(cfg.sound_feedback if cfg else True)
-        sound_var = tk.BooleanVar(value=current_sound)
-
-        # Pack pill first so expand=True on label_col doesn't consume all space
-        def _on_sound_toggle(v: bool):
-            sound_var.set(v)
-            if self._on_settings_change:
-                self._on_settings_change("sound_feedback", v)
-
-        sound_pill = TogglePill(
-            sound_row, value=current_sound, bg=C["surface"],
-            command=_on_sound_toggle,
-        )
-        sound_pill.pack(side="right")
-
-        label_col = tk.Frame(sound_row, bg=C["surface"])
-        label_col.pack(side="left", fill="x", expand=True)
-        tk.Label(label_col, text="Sound Feedback",
-                 fg=C["text"], bg=C["surface"],
-                 font=("Segoe UI", 9), anchor="w").pack(anchor="w")
-        _sound_desc = tk.Label(label_col, text="Beeps when recording starts, stops, and transcription finishes",
-                 fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 8), anchor="w", justify="left",
-                 wraplength=260)
-        _sound_desc.pack(fill="x")
-        self._autowrap(_sound_desc)
-
-        # ── Live captions ─────────────────────────────────────────────────────
-        cap_card = self._card(parent, margin=(0, 4))
-        cap_row = tk.Frame(cap_card, bg=C["surface"])
-        cap_row.pack(fill="x")
-
-        current_caps = bool(getattr(cfg, "live_captions", False) if cfg else False)
-        caps_var = tk.BooleanVar(value=current_caps)
-
-        def _on_caps_toggle(v: bool):
-            caps_var.set(v)
-            if self._on_settings_change:
-                self._on_settings_change("live_captions", v)
-
-        caps_pill = TogglePill(
-            cap_row, value=current_caps, bg=C["surface"],
-            command=_on_caps_toggle,
-        )
-        caps_pill.pack(side="right")
-
-        caps_col = tk.Frame(cap_row, bg=C["surface"])
-        caps_col.pack(side="left", fill="x", expand=True)
-        tk.Label(caps_col, text="Live Captions",
-                 fg=C["text"], bg=C["surface"],
-                 font=("Segoe UI", 9), anchor="w").pack(anchor="w")
-        _caps_desc = tk.Label(caps_col, text="Show the words you're saying in real time (replaces the waveform bar while recording)",
-                 fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 8), anchor="w", justify="left",
-                 wraplength=260)
-        _caps_desc.pack(fill="x")
-        self._autowrap(_caps_desc)
-
-        # ── Behaviour toggles (auto_punctuate, trailing_space, auto_enter) ─────
-        def _toggle_card(key: str, title: str, subtext: str, default: bool):
-            card = self._card(parent, margin=(0, 4))
-            row = tk.Frame(card, bg=C["surface"]); row.pack(fill="x")
-            cur = bool(getattr(cfg, key, default) if cfg else default)
-            var = tk.BooleanVar(value=cur)
-            def _toggle(v: bool, _k=key, _v=var):
-                _v.set(v)
-                if self._on_settings_change:
-                    self._on_settings_change(_k, v)
-            TogglePill(row, value=cur, bg=C["surface"], command=_toggle).pack(side="right")
-            col = tk.Frame(row, bg=C["surface"]); col.pack(side="left", fill="x", expand=True)
-            tk.Label(col, text=title, fg=C["text"], bg=C["surface"],
-                     font=("Segoe UI", 9), anchor="w").pack(anchor="w")
-            desc = tk.Label(col, text=subtext, fg=C["subtext"], bg=C["surface"],
-                     font=("Segoe UI", 8), anchor="w", justify="left",
-                     wraplength=260)
-            desc.pack(fill="x")
-            self._autowrap(desc)
-
         _toggle_card("auto_punctuate", "Auto Punctuation",
-                     "Add a trailing period when speech ends without ending punctuation", True)
+                     "Add a trailing period when speech ends without ending punctuation",
+                     True, icon="punct")
         _toggle_card("trailing_space", "Add Trailing Space",
-                     "Append a space after each injection (useful for mid-sentence dictation)", False)
+                     "Append a space after each injection (useful for mid-sentence dictation)",
+                     False, icon="space")
         _toggle_card("auto_enter", "Press Enter After Insert",
-                     "Send Enter after injecting (useful for chat / search boxes)", False)
+                     "Send Enter after injecting (useful for chat / search boxes)",
+                     False, icon="enter")
+
+        # ── Live typing ───────────────────────────────────────────────────────
+        _section("keyboard", "Live Typing")
         _toggle_card("live_inject", "Live Typing (Beta)",
                      "Type each word into the app as you speak instead of all at once. "
-                     "Self-corrects when you finish. Available for English dictation.", False)
-        _toggle_card("warm_mic", "Instant Mic Start",
-                     "Keep the microphone warm so recording starts instantly and the "
-                     "first word is never clipped (mic indicator stays on; audio is "
-                     "only kept for 1.5s and never stored)", True)
+                     "Self-corrects when you finish. Available for English dictation.",
+                     False, icon="keyboard")
 
+        # Mutually exclusive with Live Typing (see _enforce_live_exclusive):
+        # with Live Typing on the words already land in the target app, so a
+        # caption bar is redundant, and both read the same hypothesis stream.
+        _toggle_card("live_captions", "Live Captions",
+                     "Show the words you're saying in real time (replaces the "
+                     "waveform bar while recording)", False, icon="captions")
+
+        # A config saved with both on (or an older build) resolves in favour of
+        # Live Typing rather than leaving an impossible pair on screen.
+        if (getattr(cfg, "live_inject", False) if cfg else False):
+            self._enforce_live_exclusive("live_inject", True)
 
         # ── Account card ──────────────────────────────────────────────────────
+        _section("person", "Account")
         acct_card = self._card(parent, margin=(0, 4))
-        tk.Label(acct_card, text="Account",
-                 fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
 
         acct_row = tk.Frame(acct_card, bg=C["surface"])
         acct_row.pack(fill="x", pady=(6, 0))
@@ -3300,7 +3727,7 @@ class AppWindow:
             ver_btn = RoundedButton(
                 self._ver_update_row,
                 text="Update Now",
-                fg=C["bg"], fill=C["accent"],
+                fg=C["text"], fill=C["accent"],
                 font=("Segoe UI", 9, "bold"),
                 padx=14, pady=5,
             )
@@ -3489,8 +3916,18 @@ class AppWindow:
             cv.coords(wid, px, py)
             cv.itemconfigure(wid, width=max(1, cw - 2 * px))
             cv.delete("bg")
-            _rr(cv, 0, 0, cw - 1, ch - 1, radius,
-                fill=C["surface"], outline=C["border"], tags="bg")
+            img = None
+            try:
+                import ui_render
+                img = ui_render.round_rect(cv, cw, ch, radius, C["surface"],
+                                           C["border"], 1, C["bg"])
+            except Exception:
+                img = None
+            if img is not None:
+                cv.create_image(0, 0, image=img, anchor="nw", tags="bg")
+            else:
+                _rr(cv, 0, 0, cw - 1, ch - 1, radius,
+                    fill=C["surface"], outline=C["border"], tags="bg")
             cv.tag_lower("bg")
 
         def sync(_=None):
@@ -3512,7 +3949,7 @@ class AppWindow:
             fg=C["text"], fill=C["surface_hover"],
             font=("Segoe UI", 10), padx=16, pady=8,
         )
-        btn.bind("<Enter>", lambda _e: btn.configure(bg=C["accent"], fg=C["bg"]))
+        btn.bind("<Enter>", lambda _e: btn.configure(bg=C["accent"], fg=C["text"]))
         btn.bind("<Leave>", lambda _e: btn.configure(bg=C["surface_hover"], fg=C["text"]))
         return btn
 

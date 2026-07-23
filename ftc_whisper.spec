@@ -49,28 +49,47 @@ for pkg in [
         print(f"[spec] Warning: could not collect {pkg}: {e}")
 
 # ── App data files ────────────────────────────────────────────────────────────
-# The bundled config is SANITIZED: raw API keys must never ship inside a
-# public GitHub release exe (anyone can extract them). Signed-in clients
-# fetch the AI keys from Supabase app_settings at runtime instead.
+# The bundled config is GENERATED from the Config dataclass defaults — it is
+# never a copy of the developer's local config.json. That file accumulates
+# machine- and account-specific state (a pinned `input_device` naming a mic
+# nobody else owns, `window_sizes` keyed by the dev's email, an experimental
+# `whisper_model`, raw API keys). Copying it shipped every one of those to
+# every new install; a pinned headset that doesn't exist on the user's machine
+# is a broken mic out of the box. Only the shared backend URL/key are layered
+# on top, and they are read from config.py's constants, not from disk.
 import json as _json
-_SECRET_KEYS = ("anthropic_api_key", "openrouter_api_key", "supabase_password")
-_src_cfg = os.path.join(APP_DIR, 'config.json')
+import sys as _sys
+_sys.path.insert(0, APP_DIR)
+from dataclasses import asdict as _asdict
+from config import (Config as _Config,
+                    _SHARED_SUPABASE_URL as _SB_URL,
+                    _SHARED_SUPABASE_KEY as _SB_KEY)
+
 # Must keep the basename 'config.json' — the frozen bootstrap reads
-# sys._MEIPASS/config.json — so sanitize into a build subfolder.
+# sys._MEIPASS/config.json — so write into a build subfolder.
 _build_cfg = os.path.join(APP_DIR, 'build', 'sanitized', 'config.json')
 os.makedirs(os.path.dirname(_build_cfg), exist_ok=True)
 try:
-    with open(_src_cfg, encoding='utf-8') as _f:
-        _cfg = _json.load(_f)
-    for _k in _SECRET_KEYS:
+    _cfg = _asdict(_Config())
+    _cfg.pop('_config_path', None)
+    _cfg.pop('_load_warning', None)
+    _cfg['supabase_url'] = _SB_URL
+    _cfg['supabase_key'] = _SB_KEY
+    # Secrets are never in the dataclass defaults, but assert it: a key that
+    # ships inside a public exe is extractable by anyone who downloads it.
+    for _k in ('anthropic_api_key', 'openrouter_api_key',
+               'supabase_password', 'supabase_email'):
         if _cfg.get(_k):
-            print(f"[spec] Stripping secret '{_k}' from bundled config")
-            _cfg[_k] = ""
-    _cfg["supabase_email"] = ""
+            raise SystemExit(f"[spec] Refusing to bundle non-empty '{_k}'")
     with open(_build_cfg, 'w', encoding='utf-8') as _f:
         _json.dump(_cfg, _f, indent=2)
+    print(f"[spec] Bundled config generated from Config defaults "
+          f"(input_device={_cfg.get('input_device')!r}, "
+          f"ptt_hotkey={_cfg.get('ptt_hotkey')!r})")
+except SystemExit:
+    raise
 except Exception as _e:
-    raise SystemExit(f"[spec] Could not sanitize config.json: {_e}")
+    raise SystemExit(f"[spec] Could not generate bundled config: {_e}")
 
 datas += [
     (os.path.join(APP_DIR, 'logo.png'),     '.'),

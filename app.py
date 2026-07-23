@@ -31,15 +31,14 @@ if sys.platform == "win32":
         pass
 
 from config import Config
-from recorder import Recorder
-from transcriber import Transcriber
-from asr_engine import ParakeetTranscriber, model_files_present, download_model
-from stream_session import StreamingSession
+# Recorder / Transcriber / asr_engine / StreamingSession / Injector / TrayApp
+# are deliberately NOT imported here: between them they pull in numpy,
+# sounddevice and pystray — ~3s of import time that used to run before the
+# window could paint. They are imported inside _init_core (background thread)
+# so first paint is near-instant; _core_ready gates everything that needs them.
 from spoken_commands import apply_spoken_commands
-from injector import Injector, _release_modifiers
 from hotkey_manager import HotkeyManager, TriggerHotkeyManager, AppState
 from feedback import Feedback
-from tray import TrayApp
 from popup import FloatingPopup
 from ai_refiner import AIRefiner
 from supabase_client import SupabaseLogger
@@ -47,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.27"
+APP_VERSION = "1.6.28"
 
 
 class WhisperFlowApp:
@@ -66,37 +65,18 @@ class WhisperFlowApp:
         self._started = False
         self._restart_for_reauth = False
 
-        # ── Core pipeline ──────────────────────────────────────────────
-        _ap = getattr(config, "auto_punctuate", True)
-        self.transcriber = Transcriber(
-            model_size=config.whisper_model,
-            language=config.language,
-            num_workers=2,
-            auto_punctuate=_ap,
-        )
-        # Fast model: injects text immediately; accurate model refines in background
-        # beam_size=1 = greedy decode (2-4x faster than beam search, negligible quality loss for preview)
-        # vad_speech_pad_ms=30 + min_silence_duration_ms=100 = tighter VAD for lower latency
-        # cpu_threads=4 = avoids thread-spawn overhead on short clips vs. using all cores
-        self.fast_transcriber = Transcriber(
-            model_size="base.en", beam_size=1,
-            vad_speech_pad_ms=30, min_silence_duration_ms=100,
-            cpu_threads=4, auto_punctuate=_ap,
-        )
-        # Primary engine: Parakeet TDT 0.6b v2 (int8 ONNX) — better accuracy
-        # than whisper-large-v3 at ~20x realtime on CPU with punctuation built
-        # in. English only; whisper pipeline remains the fallback (other
-        # languages, or model not yet downloaded).
-        self.parakeet = ParakeetTranscriber(
-            auto_punctuate=_ap,
-            vad_gate=bool(getattr(config, "noise_gate", True)),
-        )
+        # ── Core pipeline — built by _init_core on a background thread ──
+        # These stay None until _core_ready is set. Anything that can run
+        # before then (settings changes, authentication) must either guard
+        # for None or wait on the event.
+        self._core_ready = threading.Event()
+        self.transcriber = None
+        self.fast_transcriber = None
+        self.parakeet = None
+        self.recorder = None
+        self.injector = None
+        self.tray = None
         self._recording_timer: threading.Timer | None = None
-        self.recorder = Recorder(
-            sample_rate=config.sample_rate,
-            input_device=getattr(config, "input_device", ""),
-        )
-        self.injector = Injector(method=config.inject_method)
 
         # ── AI + logging ───────────────────────────────────────────────
         self.ai_refiner = AIRefiner(
@@ -124,22 +104,17 @@ class WhisperFlowApp:
             hotkey=config.hotkey,
             refine_hotkey=config.refine_hotkey,
             config=config,
-            get_input_devices=self.recorder.get_input_devices,
-            recorder=self.recorder,
-            transcriber=self.transcriber,
+            get_input_devices=self._get_input_devices_blocking,
+            recorder=None,          # attached by _init_core once built
+            transcriber=None,
             version=APP_VERSION,
-        )
-
-        self.tray = TrayApp(
-            on_quit=self._shutdown_and_destroy,
-            on_open_config=self._open_config,
-            on_sign_out=self._sign_out,
-            on_open=self.app_window.show,
         )
 
         self.feedback = Feedback(
             sound_enabled=config.sound_feedback,
-            on_icon_change=self.tray.update_icon,
+            # Tray is built by _init_core — forward lazily so early state
+            # changes are simply dropped instead of crashing.
+            on_icon_change=lambda s: self.tray.update_icon(s) if self.tray else None,
             on_error_notify=self._on_pipeline_error,
         )
 
@@ -148,13 +123,7 @@ class WhisperFlowApp:
         self.popup.set_voice_prompt_callback(
             lambda audio, rate, blocking=True: self._fast_engine().transcribe(audio, rate, blocking=blocking)
         )
-        self.popup.set_voice_capture_fns(
-            start=self.recorder.start_aux_capture,
-            read=lambda: (self.recorder.read_aux_audio(),
-                          self.recorder.active_sample_rate),
-            stop=lambda: (self.recorder.stop_aux_capture(),
-                          self.recorder.active_sample_rate),
-        )
+        # Voice capture fns are wired in _init_core (they need the recorder).
 
         self._recording_hwnd: int = 0
         self._recording_app = None
@@ -197,6 +166,7 @@ class WhisperFlowApp:
             on_stop_recording=self._on_stop_recording,
             on_cancel_recording=self._on_cancel_recording,
             on_state_change=self._on_state_change,
+            ptt_hotkey=getattr(config, "ptt_hotkey", ""),
         )
 
         self.refine_hotkey_manager = TriggerHotkeyManager(
@@ -204,33 +174,120 @@ class WhisperFlowApp:
             on_trigger=self._on_refine_selection,
         )
 
-        # ── Pre-load all models immediately in background ─────────────
-        threading.Thread(
-            target=self.transcriber.load_model, daemon=True, name="model-preload"
-        ).start()
-        threading.Thread(
-            target=self.fast_transcriber.load_model, daemon=True, name="fast-model-preload"
-        ).start()
-        threading.Thread(
-            target=self._init_parakeet, daemon=True, name="parakeet-preload"
-        ).start()
-
-        # Warm mic: keep a persistent input stream with a ~1.5s pre-roll ring
-        # buffer so recording starts instantly and the first syllable — even
-        # speech that began ON the go-beep — is captured.
-        if getattr(config, "warm_mic", True):
-            threading.Thread(
-                target=lambda: self.recorder.set_warm(True),
-                daemon=True, name="warm-mic",
-            ).start()
+        # Build the heavy pipeline off the UI thread so the window paints
+        # immediately (this is where numpy/sounddevice/pystray get imported).
+        threading.Thread(target=self._init_core, daemon=True,
+                         name="core-init").start()
 
         # ── Local HTTP server so the web app can detect + surface this window ──
         _start_local_server(self.app_window, APP_VERSION)
+
+    def _init_core(self) -> None:
+        """Construct the audio/ASR pipeline and tray on a background thread.
+
+        Everything imported here is what made startup slow when it ran before
+        first paint. Hotkeys aren't registered until _on_authenticated, which
+        waits on _core_ready, so a dictation can never start on a half-built
+        pipeline."""
+        # Let the window get on screen first — these imports and the model
+        # loads peg the CPU and would starve the UI build (measured: first
+        # paint at ~4.6s when racing, ~1s when sequenced).
+        self.app_window.first_paint.wait(timeout=3.0)
+        try:
+            from transcriber import Transcriber
+            from asr_engine import ParakeetTranscriber
+            from recorder import Recorder
+            from injector import Injector
+            from tray import TrayApp
+
+            config = self.config
+            _ap = getattr(config, "auto_punctuate", True)
+            self.transcriber = Transcriber(
+                model_size=config.whisper_model,
+                language=config.language,
+                num_workers=2,
+                auto_punctuate=_ap,
+            )
+            # Fast model: injects text immediately; accurate model refines in background
+            # beam_size=1 = greedy decode (2-4x faster than beam search, negligible quality loss for preview)
+            # vad_speech_pad_ms=30 + min_silence_duration_ms=100 = tighter VAD for lower latency
+            # cpu_threads=4 = avoids thread-spawn overhead on short clips vs. using all cores
+            self.fast_transcriber = Transcriber(
+                model_size="base.en", beam_size=1,
+                vad_speech_pad_ms=30, min_silence_duration_ms=100,
+                cpu_threads=4, auto_punctuate=_ap,
+            )
+            # Primary engine: Parakeet TDT 0.6b v2 (int8 ONNX) — better accuracy
+            # than whisper-large-v3 at ~20x realtime on CPU with punctuation built
+            # in. English only; whisper pipeline remains the fallback (other
+            # languages, or model not yet downloaded).
+            self.parakeet = ParakeetTranscriber(
+                auto_punctuate=_ap,
+                vad_gate=bool(getattr(config, "noise_gate", True)),
+            )
+            self.recorder = Recorder(
+                sample_rate=config.sample_rate,
+                input_device=getattr(config, "input_device", ""),
+            )
+            self.injector = Injector(method=config.inject_method)
+
+            self.tray = TrayApp(
+                on_quit=self._shutdown_and_destroy,
+                on_open_config=self._open_config,
+                on_sign_out=self._sign_out,
+                on_open=self.app_window.show,
+            )
+
+            # Late-bind the settings tab's device tools now the recorder exists.
+            try:
+                self.app_window.attach_audio(
+                    recorder=self.recorder, transcriber=self.transcriber)
+            except Exception as e:
+                print(f"[App] attach_audio failed (non-fatal): {e}")
+
+            self.popup.set_voice_capture_fns(
+                start=self.recorder.start_aux_capture,
+                read=lambda: (self.recorder.read_aux_audio(),
+                              self.recorder.active_sample_rate),
+                stop=lambda: (self.recorder.stop_aux_capture(),
+                              self.recorder.active_sample_rate),
+            )
+
+            # ── Pre-load all models immediately in background ─────────
+            threading.Thread(
+                target=self.transcriber.load_model, daemon=True, name="model-preload"
+            ).start()
+            threading.Thread(
+                target=self.fast_transcriber.load_model, daemon=True, name="fast-model-preload"
+            ).start()
+            threading.Thread(
+                target=self._init_parakeet, daemon=True, name="parakeet-preload"
+            ).start()
+
+            # Warm mic: keep a persistent input stream with a ~1.5s pre-roll ring
+            # buffer so recording starts instantly and the first syllable — even
+            # speech that began ON the go-beep — is captured.
+            if getattr(config, "warm_mic", True):
+                threading.Thread(
+                    target=lambda: self.recorder.set_warm(True),
+                    daemon=True, name="warm-mic",
+                ).start()
+        finally:
+            self._core_ready.set()
+
+    def _get_input_devices_blocking(self):
+        """Device enumeration for the settings tab (always called on a worker
+        thread there). Waits briefly for core init so the mic dropdown fills
+        even when Settings is opened seconds after launch."""
+        self._core_ready.wait(timeout=20.0)
+        rec = self.recorder
+        return rec.get_input_devices() if rec is not None else []
 
     def _init_parakeet(self) -> None:
         """Download (first run only) and load the Parakeet engine. Any failure
         leaves the whisper pipeline in charge — strictly additive."""
         try:
+            from asr_engine import model_files_present, download_model
             if not getattr(self.config, "use_parakeet", True):
                 print("[App] Parakeet disabled in config — whisper pipeline only.")
                 return
@@ -257,7 +314,8 @@ class WhisperFlowApp:
         if not getattr(self.config, "use_parakeet", True):
             return False
         lang = (getattr(self.config, "language", "en") or "en").lower()
-        return lang in ("", "en", "english") and self.parakeet.is_loaded
+        return (lang in ("", "en", "english")
+                and self.parakeet is not None and self.parakeet.is_loaded)
 
     def _fast_engine(self):
         """Engine used for immediate/injection transcription."""
@@ -288,6 +346,10 @@ class WhisperFlowApp:
         if self._started:
             return
         self._started = True
+
+        # The pipeline is built by _init_core on another thread — everything
+        # below (tray, hotkeys, popup wiring) needs it finished.
+        self._core_ready.wait(timeout=60.0)
 
         # Share the authenticated Supabase client with the logger so RLS passes
         if auth._client:
@@ -547,6 +609,18 @@ class WhisperFlowApp:
         print(f"[App] Setting changed: {key} = {value!r}")
         setattr(self.config, key, value)
         self.config.save_async()
+        if self._core_ready.is_set():
+            self._apply_runtime_setting(key, value)
+        else:
+            # Core still building (first seconds after launch) — apply the
+            # runtime side once it exists. The config value is already saved.
+            threading.Thread(
+                target=lambda: (self._core_ready.wait(30.0),
+                                self._apply_runtime_setting(key, value)),
+                daemon=True, name="deferred-setting",
+            ).start()
+
+    def _apply_runtime_setting(self, key: str, value) -> None:
         if key == "anthropic_api_key":
             self.ai_refiner.update_api_key(value)
             self.popup.set_ai_refiner(self.ai_refiner)
@@ -588,6 +662,12 @@ class WhisperFlowApp:
             if self.hotkey_manager.state == AppState.RECORDING:
                 self._on_cancel_recording()
             self.hotkey_manager.mode = value
+        elif key == "ptt_hotkey":
+            # Re-registering mid-recording wedges the state machine (same
+            # reason _on_hotkey_change cancels first).
+            if self.hotkey_manager.state == AppState.RECORDING:
+                self._on_cancel_recording()
+            self.hotkey_manager.update_ptt_hotkey(value or "")
 
     def _apply_model_change(self, value: str) -> None:
         """Swap the accurate whisper model. No-op when unchanged (every Save
@@ -599,6 +679,7 @@ class WhisperFlowApp:
             print(f"[App] Model change to '{value}' queued until recording ends.")
             return
         self._pending_model_change = None
+        from transcriber import Transcriber
         _ap = getattr(self.config, "auto_punctuate", True)
         new_t = Transcriber(
             model_size=value,
@@ -615,23 +696,25 @@ class WhisperFlowApp:
     # Recording pipeline
     # ------------------------------------------------------------------
 
-    def _on_stream_inject(self, chunk: str) -> bool:
+    def _on_stream_inject(self, chunk: str):
         """Type a locked chunk into the target app live (called from the
         StreamingSession worker thread — Win32 only, no tkinter).
 
-        Injects ONLY while the original recording target is still the foreground
-        window. A focus change mid-dictation flips _live_focus_lost and returns
-        False, which freezes the session's streaming — so we never type into, nor
-        later backspace-reconcile, the wrong window."""
+        Injects ONLY while the original recording target is still the
+        foreground window. A focus change returns None: the session SKIPS the
+        chunk and retries next tick, so a transient flick (toast, alt-tab and
+        back) pauses the stream instead of killing it. It also flips
+        _live_focus_lost so the finalize reconcile never backspaces after any
+        focus wobble. Returning False (transport failure) freezes the stream."""
         try:
             fg = ctypes.windll.user32.GetForegroundWindow()
         except Exception:
             fg = 0
         if not self._recording_hwnd or fg != self._recording_hwnd:
             self._live_focus_lost = True
-            return False
+            return None
         try:
-            return self.injector.inject_stream(chunk)
+            return bool(self.injector.inject_stream(chunk))
         except Exception as e:
             print(f"[App] Live stream-inject error: {e}")
             return False
@@ -664,13 +747,39 @@ class WhisperFlowApp:
             ok_type = self.injector.inject_stream(tail) if tail else True
             return (ok_del and ok_type), len(target)
 
-        # Append-only fallback: never delete. Add only words beyond what we streamed.
+        # Append-only fallback: never delete. Align by CONTENT, not word count:
+        # find where the tail of what we actually typed appears in the target
+        # and append only what follows it. The old count-based slice re-inserted
+        # whole passages whenever the live wording diverged from the final
+        # transcription (the "it typed my line again at the end" bug).
+        def _nw(w: str) -> str:
+            return w.strip(".,!?;:\"'").lower()
+
         sw = streamed.split()
         tw = target.split()
-        remainder = tw[len(sw):]
+        idx = None
+        k = min(8, len(sw))
+        if k:
+            probe = [_nw(w) for w in sw[-k:]]
+            tn = [_nw(w) for w in tw]
+            for i in range(len(tw) - k, -1, -1):  # rightmost match wins
+                if tn[i:i + k] == probe:
+                    idx = i + k
+                    break
+        remainder = tw[idx:] if idx is not None else tw[len(sw):]
+        # The junction word may have gained punctuation in the final pass
+        # ("end" → "end.") — carry it across since we can't backspace.
+        lead = " " if streamed else ""
+        if idx is not None and idx > 0 and sw:
+            bp = tw[idx - 1]
+            if bp and bp[-1] in ".,!?;:" and sw[-1][-1:] != bp[-1]:
+                lead = bp[-1] + (" " if remainder else "")
         if not remainder:
+            if idx is not None and lead not in ("", " "):
+                ok = self.injector.inject_stream(lead.rstrip())
+                return ok, len(streamed) + len(lead.rstrip())
             return True, len(streamed)
-        add = (" " if streamed else "") + " ".join(remainder)
+        add = lead + " ".join(remainder)
         if getattr(self.config, "trailing_space", False):
             add += " "
         ok = self.injector.inject_stream(add)
@@ -736,6 +845,7 @@ class WhisperFlowApp:
                 live = bool(getattr(self.config, "live_inject", False))
                 self._live_inject_active = live
                 self._live_focus_lost = False
+                from stream_session import StreamingSession
                 session = StreamingSession(
                     self.recorder,
                     self.parakeet,
@@ -947,6 +1057,7 @@ class WhisperFlowApp:
             # Release modifier keys BEFORE the browser focus click so Chrome never
             # receives a spurious Alt key-up that would activate its menu bar and
             # steal focus away from the search/input element we're about to click.
+            from injector import _release_modifiers
             _release_modifiers()
 
             # Browser windows (ChatGPT, Gmail, Outlook web, etc.) — Win32
@@ -1011,12 +1122,18 @@ class WhisperFlowApp:
 
             self.feedback.transcription_complete(transcribed_text)
             # Impact stats: count this dictation for the signed-in account.
-            # total_samples is the monotonic capture length, so the duration
-            # is the user's real speaking time on either engine path.
+            # total_samples is the monotonic capture length; voiced_seconds is
+            # the speech-only portion (recorder energy gate) so the wpm stat
+            # reflects how fast the user actually talks, not their pauses.
             try:
+                try:
+                    _voiced = self.recorder.voiced_seconds
+                except Exception:
+                    _voiced = 0.0
                 self.stats.record_dictation(
                     len(transcribed_text.split()),
                     total_samples / float(capture_rate or 1),
+                    voiced_seconds=_voiced,
                 )
             except Exception as e:
                 print(f"[Stats] record failed (non-fatal): {e}")
@@ -1695,7 +1812,8 @@ class WhisperFlowApp:
             self.db.set_client(auth._client)
         self.db.set_user(auth.user_id)
         self.stats.set_user(auth.user_id)
-        self.tray.set_user_email(auth.user_email or "")
+        if self.tray:
+            self.tray.set_user_email(auth.user_email or "")
         print(f"[App] Signed in as {auth.user_email}")
         if self.db.is_enabled:
             threading.Thread(
@@ -1708,7 +1826,8 @@ class WhisperFlowApp:
         self._auth.sign_in_offline()   # back to offline state immediately
         self.db.set_user(None)
         self.stats.set_user(None)
-        self.tray.set_user_email("")
+        if self.tray:
+            self.tray.set_user_email("")
         if self.app_window._root:
             self.app_window._root.after(0, self.app_window._apply_auth_ui)
         print("[App] Signed out — running in offline mode.")
@@ -1717,7 +1836,7 @@ class WhisperFlowApp:
         print("[App] Shutting down...")
         self.hotkey_manager.unregister()
         self.refine_hotkey_manager.unregister()
-        if self.recorder.is_recording:
+        if self.recorder is not None and self.recorder.is_recording:
             self.recorder.stop()
 
     def _shutdown_and_destroy(self) -> None:

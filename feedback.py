@@ -15,8 +15,8 @@ import sys
 import threading
 import wave
 from typing import Callable, Optional
-
-from error_reporter import report_error
+# error_reporter pulls in urllib/email (~100ms) — imported on first error
+# instead of at startup (this module is on the first-paint path).
 
 _SR = 22050  # sample rate for generated blips — plenty for simple sines
 
@@ -34,6 +34,30 @@ def _tone(frequency: float, ms: float, volume: float = 0.22,
         elif i > n - fade:
             env = max(0.0, (n - i) / fade)
         out.append(math.sin(2 * math.pi * frequency * i / _SR) * volume * env)
+    return out
+
+
+def _glide(f0: float, f1: float, ms: float, volume: float = 0.14,
+           peak_frac: float = 0.42, glide_frac: float = 0.38) -> list:
+    """One short pitch glide with a raised-cosine envelope peaking at
+    peak_frac of the duration. The pitch sweeps over the first glide_frac
+    then holds f1 — matching the measured Glaido shape (quick move, settle).
+    Phase-accumulated so the sweep is clickless; a quiet second harmonic
+    rounds the timbre out of pure-sine territory."""
+    n = int(_SR * ms / 1000)
+    peak = max(1, int(n * peak_frac))
+    sweep = max(1, int(n * glide_frac))
+    out = []
+    phase = 0.0
+    for i in range(n):
+        f = f0 + (f1 - f0) * min(1.0, i / sweep)
+        phase += 2 * math.pi * f / _SR
+        if i < peak:
+            env = 0.5 - 0.5 * math.cos(math.pi * i / peak)
+        else:
+            env = 0.5 + 0.5 * math.cos(math.pi * (i - peak) / (n - peak))
+        s = math.sin(phase) + 0.30 * math.sin(2 * phase)
+        out.append(s * volume * env)
     return out
 
 
@@ -61,13 +85,14 @@ def _get_sound(name: str) -> bytes:
     (callers are daemon threads), ~1ms of pure-python sine maths."""
     if name not in _SOUND_CACHE:
         recipes = {
-            # start: gentle rising two-note (E5 → G5) — "listening"
-            "start": _tone(659, 70) + _silence(15) + _tone(784, 85),
-            # stop: the same pair descending — "got it"
-            "stop": _tone(784, 70) + _silence(15) + _tone(659, 85),
-            # done: two very soft short blips
-            "done": (_tone(880, 55, volume=0.15) + _silence(45)
-                     + _tone(880, 55, volume=0.15)),
+            # Matched to the Glaido chime pair (measured from its assets:
+            # ~80ms rise 304→456 Hz / ~95ms fall 445→286 Hz, peak ≈0.15).
+            # start: one soft low rising glide — "listening"
+            "start": _glide(304, 456, 80),
+            # stop: the falling mirror — "got it"
+            "stop": _glide(445, 286, 95, peak_frac=0.55),
+            # done: a single very soft tap in the same register
+            "done": _glide(440, 452, 55, volume=0.09),
             # error: one low, quiet buzz — noticeable, not alarming
             "error": _tone(233, 220, volume=0.20),
         }
@@ -170,7 +195,11 @@ class Feedback:
             ).start()
 
         print(f"[Feedback] Error: {error}")
-        report_error(error)
+        try:
+            from error_reporter import report_error
+            report_error(error)
+        except Exception:
+            pass
 
         # Additive visibility: the buzz alone is easy to miss (and silent when
         # sound is off), print vanishes in console=False builds, and

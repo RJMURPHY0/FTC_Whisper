@@ -83,6 +83,11 @@ class Recorder:
         self._active_sample_rate: int = sample_rate
         self._last_rms: float = 0.0
         self._last_peak: float = 0.0
+        # Voiced-time meter: samples in the current recording whose chunk RMS
+        # clearly cleared the adaptive noise floor — i.e. actual speech, not
+        # pauses or room noise. Powers the real words-per-minute stat.
+        self._voiced_samples: int = 0
+        self._noise_floor: float = 0.0015
         self._monitor_rms: float = 0.0
         self._monitor_peak: float = 0.0
         self._monitor_active = False
@@ -120,6 +125,13 @@ class Recorder:
         with self._lock:
             return self._chunks_offset
 
+    @property
+    def voiced_seconds(self) -> float:
+        """Seconds of actual speech (energy above the noise floor) captured
+        since start(). Pauses and silence are excluded by construction."""
+        with self._lock:
+            return self._voiced_samples / float(self.active_sample_rate or 1)
+
     # ------------------------------------------------------------------
     # Stream callbacks
     # ------------------------------------------------------------------
@@ -144,6 +156,15 @@ class Recorder:
             if self._recording:
                 self._chunks.append(data)
                 self._chunks_samples += n
+                # Adaptive floor: drops fast onto quiet, creeps up slowly, so
+                # a noisy room raises the bar instead of counting as speech.
+                if rms < self._noise_floor:
+                    self._noise_floor = max(
+                        1e-5, 0.8 * self._noise_floor + 0.2 * rms)
+                else:
+                    self._noise_floor = min(self._noise_floor * 1.005, 0.02)
+                if rms > max(0.0025, self._noise_floor * 2.5):
+                    self._voiced_samples += n
             elif self._warm_enabled:
                 self._preroll.append(data)
                 self._preroll_samples += n
@@ -359,6 +380,7 @@ class Recorder:
                 self._preroll_samples = 0
                 self._last_rms = 0.0
                 self._last_peak = 0.0
+                self._voiced_samples = 0
                 self._recording = True
             # Trust but verify: the stream passed the liveness check, yet a
             # device can die at any moment. If no fresh callback lands shortly,
@@ -410,6 +432,7 @@ class Recorder:
             self._active_sample_rate = self.sample_rate
             self._last_rms = 0.0
             self._last_peak = 0.0
+            self._voiced_samples = 0
 
         try:
             with self._stream_lifecycle_lock:
@@ -812,6 +835,10 @@ class Recorder:
 
     @staticmethod
     def _auto_rank(name: str) -> int:
+        """Lower is better. External mics beat the built-in array: plugging in
+        a headset must switch to it even when Windows keeps the laptop mic as
+        the system default (Windows often does), which is exactly what a user
+        who just plugged one in expects."""
         n = (name or "").lower()
         if any(v in n for v in (
                 "stereo mix", "sound mapper", "primary sound", "what u hear",
@@ -820,11 +847,15 @@ class Recorder:
         if any(b in n for b in (
                 "bluetooth", "hands-free", "hfp", " ag audio")):
             return 3
+        # Dedicated / plugged-in hardware.
         if any(s in n for s in (
-                "microphone", "mic", "headset", "webcam", "usb audio",
-                "array", "logi", "jabra", "yeti", "rode", "shure", "blue ",
-                "elgato", "samson")):
+                "headset", "usb audio", "usb mic", "webcam", "logi", "jabra",
+                "yeti", "rode", "shure", "blue ", "elgato", "samson",
+                "snowball", "at2020", "fifine", "hyperx", "steelseries")):
             return 0
+        # Built-in laptop array or a plain "Microphone (…)" endpoint.
+        if any(s in n for s in ("microphone", "mic", "array")):
+            return 1
         return 2
 
     def _pick_best_input(self, devices: list[dict]) -> Optional[int]:

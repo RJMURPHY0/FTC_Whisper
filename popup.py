@@ -356,6 +356,10 @@ class FloatingPopup:
         if self.root is not None:
             return
         self.root = tk.Toplevel(main_root)
+        # Distinct title (never rendered — the window is borderless): a second
+        # window titled "FTC Whisper" made every FindWindowW-by-title lookup a
+        # coin flip between the dashboard and this popup.
+        self.root.title("FTC Whisper Overlay")
         # Hide immediately and park far off-screen BEFORE anything else, so the
         # freshly-created dark Toplevel can never flash as a little black box at
         # the top-left (0,0) for a frame before it's positioned/withdrawn.

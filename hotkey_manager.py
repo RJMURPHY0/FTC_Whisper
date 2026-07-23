@@ -123,9 +123,14 @@ class HotkeyManager:
         on_stop_recording: Optional[Callable] = None,
         on_cancel_recording: Optional[Callable] = None,
         on_state_change: Optional[Callable[[AppState], None]] = None,
+        ptt_hotkey: str = "",
     ):
         self.hotkey = hotkey.lower()
         self.mode = mode
+        # Optional SECOND bind with hold semantics (push-to-talk), sharing the
+        # same state machine so the two binds can never start two recordings.
+        # Empty string = disabled.
+        self.ptt_hotkey = (ptt_hotkey or "").lower()
         self.on_start_recording = on_start_recording
         self.on_stop_recording = on_stop_recording
         self.on_cancel_recording = on_cancel_recording
@@ -134,13 +139,17 @@ class HotkeyManager:
         self._state = AppState.IDLE
         self._lock = threading.Lock()
         self._registered = False
-        self._polling = False
+        self._pollers = {"main": False, "ptt": False}
+        # Which bind started the current recording ("main"/"ptt") — a release
+        # or toggle-press from the OTHER bind must never stop it.
+        self._rec_source = "main"
 
         # Win32 message loop state
         self._hotkey_thread_id: int = 0
         self._msg_loop_thread: Optional[threading.Thread] = None
         self._loop_ready = threading.Event()  # set once thread has registered hotkey
-        self._win32_ok = False
+        self._win32_ok = False        # main combo registered via Win32
+        self._win32_ok_ptt = False
 
         # keyboard-library hook handles (so we unhook only ours, not everything)
         self._kb_hooks: list = []
@@ -148,8 +157,10 @@ class HotkeyManager:
         # Suppresses the bare base key while recording with a combo hotkey,
         # preventing it from being typed if the modifier is released before the base key.
         self._base_key_suppress_hook = None
+        self._ptt_suppress_hook = None
 
         self._parse_hotkey(self.hotkey)
+        self._parse_ptt(self.ptt_hotkey)
 
     # ------------------------------------------------------------------
     # Hotkey parsing
@@ -167,6 +178,21 @@ class HotkeyManager:
             "caps_lock",
             "caps lock",
         )
+
+    def _parse_ptt(self, hotkey: str) -> None:
+        if not hotkey or hotkey == self.hotkey:
+            # Same combo as the main bind would double-register — disable.
+            self._ptt_base_key = ""
+            self._ptt_modifiers = []
+            self._ptt_is_combo = False
+            self._ptt_menu_modifier = False
+            return
+        parts = [p.strip() for p in hotkey.split("+")]
+        self._ptt_base_key = parts[-1]
+        self._ptt_modifiers = parts[:-1]
+        self._ptt_is_combo = len(self._ptt_modifiers) > 0
+        self._ptt_menu_modifier = any(
+            m in ("alt", "super") for m in self._ptt_modifiers)
 
     # ------------------------------------------------------------------
     # State machine
@@ -215,8 +241,12 @@ class HotkeyManager:
 
         def _should_suppress(_event):
             # Only suppress in hold mode — toggle mode needs the key through so the
-            # second Alt+V press can fire WM_HOTKEY and stop recording.
-            return None if (self._state == AppState.RECORDING and self.mode == "hold") else True
+            # second Alt+V press can fire WM_HOTKEY and stop recording. Never
+            # suppress while the PTT bind owns the recording (typing the main
+            # base key elsewhere must keep working).
+            return None if (self._state == AppState.RECORDING
+                            and self.mode == "hold"
+                            and self._rec_source == "main") else True
 
         try:
             self._base_key_suppress_hook = kb.on_press_key(
@@ -225,6 +255,27 @@ class HotkeyManager:
         except Exception as e:
             print(f"[HotkeyManager] Could not install base key suppressor: {e}")
 
+    def _install_ptt_suppressor(self) -> None:
+        """Suppress the PTT base key while a PTT recording is live — hold mode
+        auto-repeats the base key into the focused app otherwise."""
+        if not self._ptt_is_combo or not self._win32_ok_ptt:
+            return
+        if self._ptt_suppress_hook is not None:
+            return
+        if self._ptt_base_key == self._base_key:
+            return  # the main suppressor's hook already owns this key
+
+        def _should_suppress(_event):
+            return None if (self._state == AppState.RECORDING
+                            and self._rec_source == "ptt") else True
+
+        try:
+            self._ptt_suppress_hook = kb.on_press_key(
+                self._ptt_base_key, _should_suppress, suppress=True
+            )
+        except Exception as e:
+            print(f"[HotkeyManager] Could not install PTT suppressor: {e}")
+
     def _remove_base_key_suppressor(self) -> None:
         if self._base_key_suppress_hook is not None:
             try:
@@ -232,18 +283,27 @@ class HotkeyManager:
             except Exception:
                 pass
             self._base_key_suppress_hook = None
+        if self._ptt_suppress_hook is not None:
+            try:
+                kb.unhook(self._ptt_suppress_hook)
+            except Exception:
+                pass
+            self._ptt_suppress_hook = None
 
-    def _on_key_down(self, _event=None) -> None:
+    def _on_key_down(self, _event=None, source: str = "main") -> None:
         with self._lock:
-            if self.mode == "hold":
+            hold = (source == "ptt") or self.mode == "hold"
+            if hold:
                 if self._state == AppState.IDLE:
                     self._press_time = time.time()
+                    self._rec_source = source
                     self._set_state(AppState.RECORDING)
                     if self.on_start_recording:
                         threading.Thread(
                             target=self.on_start_recording, daemon=True
                         ).start()
-            elif self.mode == "toggle":
+                # else: the other bind owns an active recording — ignore.
+            else:  # toggle semantics (main bind only)
                 # Debounce: single-key hotkeys (F-keys, CapsLock fallback) auto-
                 # repeat while held, firing _on_key_down every ~30ms — without
                 # this a held key toggles recording on/off repeatedly.
@@ -252,22 +312,26 @@ class HotkeyManager:
                     return
                 self._last_toggle_ts = now
                 if self._state == AppState.IDLE:
+                    self._rec_source = "main"
                     self._set_state(AppState.RECORDING)
                     if self.on_start_recording:
                         threading.Thread(
                             target=self.on_start_recording, daemon=True
                         ).start()
-                elif self._state == AppState.RECORDING:
+                elif (self._state == AppState.RECORDING
+                      and self._rec_source == "main"):
                     self._set_state(AppState.PROCESSING)
                     if self.on_stop_recording:
                         threading.Thread(
                             target=self.on_stop_recording, daemon=True
                         ).start()
 
-    def _on_key_up(self, _event=None) -> None:
+    def _on_key_up(self, _event=None, source: str = "main") -> None:
         with self._lock:
-            if self.mode == "hold" and self._state == AppState.RECORDING:
-                self._release_combo_modifiers_if_needed()
+            hold = (source == "ptt") or self.mode == "hold"
+            if (hold and self._state == AppState.RECORDING
+                    and self._rec_source == source):
+                self._release_combo_modifiers_if_needed(source)
                 duration = time.time() - getattr(self, "_press_time", 0.0)
                 if duration < 0.3:
                     self._set_state(AppState.IDLE)
@@ -275,7 +339,7 @@ class HotkeyManager:
                         threading.Thread(
                             target=self.on_cancel_recording, daemon=True
                         ).start()
-                    if self._suppress_caps:
+                    if self._suppress_caps and source == "main":
                         threading.Thread(
                             target=self._toggle_caps_lock_threaded, daemon=True
                         ).start()
@@ -284,18 +348,22 @@ class HotkeyManager:
                 if self.on_stop_recording:
                     threading.Thread(target=self.on_stop_recording, daemon=True).start()
 
-    def _release_combo_modifiers_if_needed(self) -> None:
+    def _release_combo_modifiers_if_needed(self, source: str = "main") -> None:
         """Normalize modifier state after combo release (prevents stuck Alt/menu mode)."""
-        if not self._is_combo:
-            return
-        if not self._win32_ok:
+        if source == "ptt":
+            is_combo, win_ok = self._ptt_is_combo, self._win32_ok_ptt
+            menu_mod, mods = self._ptt_menu_modifier, self._ptt_modifiers
+        else:
+            is_combo, win_ok = self._is_combo, self._win32_ok
+            menu_mod, mods = self._menu_modifier, self._modifiers
+        if not is_combo or not win_ok:
             return
         try:
             # An injected Alt-up with nothing before it reads as a completed
             # clean Alt tap — mask first or Office pops KeyTips right here.
-            if self._menu_modifier:
+            if menu_mod:
                 _mask_menu_tap()
-            for mod in self._modifiers:
+            for mod in mods:
                 for vk in _MODIFIER_VKS.get(mod, ()):
                     _user32.keybd_event(vk, 0, _KEYEVENTF_KEYUP, 0)
         except Exception:
@@ -312,13 +380,20 @@ class HotkeyManager:
     # Win32 RegisterHotKey path
     # ------------------------------------------------------------------
 
-    def _win32_register(self, mods: int, vk: int) -> bool:
+    _MAIN_ID = 1
+    _PTT_ID = 3   # HOTKEY_ID=2 belongs to TriggerHotkeyManager
+
+    def _win32_register(self, entries) -> bool:
+        """Start ONE message loop registering every (id, mods, vk, source)
+        entry. Returns True if the MAIN entry registered (or wasn't in the
+        list); per-source success lands in _win32_ok/_win32_ok_ptt."""
         self._loop_ready.clear()
         self._hotkey_thread_id = 0
         self._win32_ok = False
+        self._win32_ok_ptt = False
         self._msg_loop_thread = threading.Thread(
             target=self._message_loop,
-            args=(mods, vk),
+            args=(entries,),
             daemon=True,
             name="hotkey-win32",
         )
@@ -327,48 +402,65 @@ class HotkeyManager:
         if not self._loop_ready.wait(timeout=3.0):
             print("[HotkeyManager] Warning: message loop did not start in time")
             return False
-        return self._win32_ok
+        has_main = any(src == "main" for _i, _m, _v, src in entries)
+        return self._win32_ok if has_main else True
 
-    def _message_loop(self, mods: int, vk: int) -> None:
-        HOTKEY_ID = 1
-        if not _user32.RegisterHotKey(None, HOTKEY_ID, mods, vk):
-            err = ctypes.GetLastError()
-            print(
-                f"[HotkeyManager] RegisterHotKey failed (error {err}) — "
-                "is another app using this combo?"
-            )
-            self._win32_ok = False
+    def _message_loop(self, entries) -> None:
+        by_id = {}
+        ok_ids = []
+        for hid, mods, vk, source in entries:
+            if _user32.RegisterHotKey(None, hid, mods, vk):
+                by_id[hid] = (vk, source)
+                ok_ids.append(hid)
+                if source == "main":
+                    self._win32_ok = True
+                else:
+                    self._win32_ok_ptt = True
+                print(f"[HotkeyManager] Win32 hotkey active "
+                      f"({source}, mods={mods:#x}, vk={vk:#x})")
+            else:
+                err = ctypes.GetLastError()
+                print(
+                    f"[HotkeyManager] RegisterHotKey failed for {source} "
+                    f"(error {err}) — is another app using this combo?"
+                )
+        if not ok_ids:
             self._loop_ready.set()
             return
 
-        self._win32_ok = True
         self._hotkey_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
         self._loop_ready.set()  # Signal: ID is set, unregister() can safely post WM_QUIT
-        print(f"[HotkeyManager] Win32 hotkey active (mods={mods:#x}, vk={vk:#x})")
 
         msg = _wt.MSG()
         while _user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-            if msg.message == _WM_HOTKEY and msg.wParam == HOTKEY_ID:
-                if self._menu_modifier:
+            if msg.message == _WM_HOTKEY and msg.wParam in by_id:
+                vk, source = by_id[msg.wParam]
+                menu_mod = (self._ptt_menu_modifier if source == "ptt"
+                            else self._menu_modifier)
+                if menu_mod:
                     _mask_menu_tap()
-                self._on_key_down()
-                if self.mode == "hold" and not self._polling:
+                self._on_key_down(source=source)
+                hold = (source == "ptt") or self.mode == "hold"
+                if hold and not self._pollers[source]:
                     # Claim the poller slot BEFORE spawning — setting it inside
                     # the thread let two rapid WM_HOTKEYs spawn two pollers.
-                    self._polling = True
+                    self._pollers[source] = True
                     threading.Thread(
-                        target=self._poll_release, args=(vk,), daemon=True
+                        target=self._poll_release, args=(vk, source),
+                        daemon=True
                     ).start()
 
-        _user32.UnregisterHotKey(None, HOTKEY_ID)
+        for hid in ok_ids:
+            _user32.UnregisterHotKey(None, hid)
         self._hotkey_thread_id = 0
         self._win32_ok = False
+        self._win32_ok_ptt = False
 
-    def _poll_release(self, vk: int) -> None:
-        self._polling = True
+    def _poll_release(self, vk: int, source: str = "main") -> None:
+        self._pollers[source] = True
         time.sleep(0.02)  # 20ms: enough to let hardware state settle after WM_HOTKEY
         _up_count = 0
-        while self._polling:
+        while self._pollers[source]:
             if _user32.GetAsyncKeyState(vk) & 0x8000:
                 _up_count = 0
             else:
@@ -376,9 +468,9 @@ class HotkeyManager:
                 if _up_count >= 2:  # 40ms of consistent key-up = real release
                     break
             time.sleep(0.02)
-        if self._polling:
-            self._on_key_up()
-        self._polling = False
+        if self._pollers[source]:
+            self._on_key_up(source=source)
+        self._pollers[source] = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -390,6 +482,16 @@ class HotkeyManager:
 
         self._kb_hooks = []
         registered = False
+        win32_entries = []
+        main_in_win32 = False
+
+        # The PTT combo rides in the same Win32 message loop when it can.
+        ptt_vk = _vk_code(self._ptt_base_key) if self._ptt_base_key else 0
+        if self._ptt_base_key and self._ptt_is_combo and ptt_vk:
+            pmods = _MOD_NOREPEAT
+            for m in self._ptt_modifiers:
+                pmods |= _MOD_FLAGS.get(m, 0)
+            win32_entries.append((self._PTT_ID, pmods, ptt_vk, "ptt"))
 
         if self._suppress_caps:
             self._kb_hooks.append(
@@ -418,7 +520,9 @@ class HotkeyManager:
                 )
                 registered = True
             else:
-                registered = self._win32_register(mods, vk)
+                win32_entries.insert(0, (self._MAIN_ID, mods, vk, "main"))
+                main_in_win32 = True
+                registered = self._win32_register(win32_entries)
                 if registered:
                     self._install_base_key_suppressor()
                 else:
@@ -459,9 +563,35 @@ class HotkeyManager:
                 self._kb_hooks.append(kb.on_release_key(self._base_key, self._on_key_up))
             registered = True
 
+        # PTT registration when the main bind didn't start the Win32 loop
+        # (caps / single-key / unknown-key main paths).
+        if win32_entries and not main_in_win32:
+            self._win32_register(win32_entries)
+        if self._win32_ok_ptt:
+            self._install_ptt_suppressor()
+        elif self._ptt_base_key and not self._ptt_is_combo:
+            # Single-key PTT (e.g. an F-key): keyboard-library hold semantics.
+            try:
+                self._kb_hooks.append(kb.on_press_key(
+                    self._ptt_base_key,
+                    lambda _e: self._on_key_down(source="ptt"), suppress=True))
+                self._kb_hooks.append(kb.on_release_key(
+                    self._ptt_base_key,
+                    lambda _e: self._on_key_up(source="ptt"), suppress=True))
+            except Exception:
+                self._kb_hooks.append(kb.on_press_key(
+                    self._ptt_base_key,
+                    lambda _e: self._on_key_down(source="ptt")))
+                self._kb_hooks.append(kb.on_release_key(
+                    self._ptt_base_key,
+                    lambda _e: self._on_key_up(source="ptt")))
+
         self._registered = registered
         if registered:
-            print(f"[HotkeyManager] Registered '{self.hotkey}' (mode: {self.mode})")
+            ptt_note = (f" + PTT '{self.ptt_hotkey}'"
+                        if self._ptt_base_key else "")
+            print(f"[HotkeyManager] Registered '{self.hotkey}' "
+                  f"(mode: {self.mode}){ptt_note}")
 
     def _kb_combo_down(self, _event=None) -> None:
         """Keyboard-library fallback for combos: fire only when all modifiers
@@ -495,7 +625,8 @@ class HotkeyManager:
         if fire_cancel and self.on_cancel_recording:
             threading.Thread(target=self.on_cancel_recording, daemon=True).start()
 
-        self._polling = False
+        self._pollers["main"] = False
+        self._pollers["ptt"] = False
         self._remove_base_key_suppressor()
 
         # Remove any keyboard-library hooks we installed
@@ -521,8 +652,20 @@ class HotkeyManager:
         self.unregister()
         self.hotkey = new_hotkey.lower()
         self._parse_hotkey(self.hotkey)
+        # A PTT combo identical to the new main combo silently disables itself
+        # (and re-enables if the main moves away again) — re-parse.
+        self._parse_ptt(self.ptt_hotkey)
         self.register()
         print(f"[HotkeyManager] Hotkey updated to '{self.hotkey}'")
+
+    def update_ptt_hotkey(self, new_hotkey: str) -> None:
+        """Swap/set/clear the push-to-talk bind ('' disables it)."""
+        self.unregister()
+        self.ptt_hotkey = (new_hotkey or "").lower()
+        self._parse_ptt(self.ptt_hotkey)
+        self.register()
+        print(f"[HotkeyManager] PTT hotkey updated to "
+              f"'{self.ptt_hotkey or '(disabled)'}'")
 
 
 # ---------------------------------------------------------------------------

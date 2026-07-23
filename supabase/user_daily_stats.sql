@@ -5,13 +5,24 @@
 -- editor (project ijeeghdxokfvlfarojlm) to enable cross-device sync.
 
 create table if not exists public.user_daily_stats (
-  user_id       uuid        not null references auth.users (id) on delete cascade,
-  day           date        not null,
-  words         integer     not null default 0,
-  audio_seconds real        not null default 0,
-  updated_at    timestamptz not null default now(),
+  user_id        uuid        not null references auth.users (id) on delete cascade,
+  day            date        not null,
+  words          integer     not null default 0,
+  audio_seconds  real        not null default 0,
+  -- Speech-only portions (energy above the mic noise floor) — powers the
+  -- real dictation-speed (wpm) card. voiced_words counts only words from
+  -- dictations with plausible voiced timing.
+  voiced_seconds real        not null default 0,
+  voiced_words   integer     not null default 0,
+  updated_at     timestamptz not null default now(),
   primary key (user_id, day)
 );
+
+-- Upgrade path for tables created before the voiced columns existed.
+alter table public.user_daily_stats
+  add column if not exists voiced_seconds real not null default 0;
+alter table public.user_daily_stats
+  add column if not exists voiced_words integer not null default 0;
 
 alter table public.user_daily_stats enable row level security;
 
