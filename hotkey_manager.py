@@ -35,6 +35,18 @@ _MODIFIER_VKS = {
     "super": (0x5B, 0x5C),
 }
 
+_KB_MODIFIER_NAMES = {
+    "alt": "alt",
+    "ctrl": "ctrl",
+    "shift": "shift",
+    "super": "windows",
+}
+
+# Human "same time" presses still arrive as ordered keyboard events. Keep this
+# deliberately short: it catches the opposite order without turning a normal
+# base-key press followed later by Alt/Ctrl into a hotkey.
+_SIMULTANEOUS_CHORD_S = 0.12
+
 # Virtual key code lookup table
 _VK_MAP: dict = {
     **{chr(c).lower(): c for c in range(ord("A"), ord("Z") + 1)},
@@ -108,6 +120,40 @@ def _vk_code(key: str) -> int:
     return 0
 
 
+def _vk_is_down(vk: int) -> bool:
+    return bool(vk and (_user32.GetAsyncKeyState(vk) & 0x8000))
+
+
+def _modifiers_are_down(modifiers, assume_down: str = "") -> bool:
+    """Return whether every modifier is physically down.
+
+    ``assume_down`` is used from a press callback because Windows may update
+    GetAsyncKeyState immediately after that callback returns.
+    """
+    for mod in modifiers:
+        if mod == assume_down:
+            continue
+        vks = _MODIFIER_VKS.get(mod, ())
+        if vks and not any(_vk_is_down(vk) for vk in vks):
+            return False
+    return True
+
+
+def _simultaneous_chord_ready(base_vk: int, modifiers, base_pressed_at: float,
+                              now: Optional[float] = None,
+                              assume_modifier_down: str = "") -> bool:
+    """True when a base-first press is still inside the chord grace window."""
+    if not base_vk or base_pressed_at <= 0:
+        return False
+    current = time.monotonic() if now is None else now
+    age = current - base_pressed_at
+    return (
+        0.0 <= age <= _SIMULTANEOUS_CHORD_S
+        and _vk_is_down(base_vk)
+        and _modifiers_are_down(modifiers, assume_modifier_down)
+    )
+
+
 class AppState(Enum):
     IDLE = "idle"
     RECORDING = "recording"
@@ -140,6 +186,10 @@ class HotkeyManager:
         self._lock = threading.Lock()
         self._registered = False
         self._pollers = {"main": False, "ptt": False}
+        self._combo_active = {"main": False, "ptt": False}
+        self._combo_base_down = {"main": False, "ptt": False}
+        self._combo_base_pressed_at = {"main": 0.0, "ptt": 0.0}
+        self._combo_guard = threading.Lock()
         # Which bind started the current recording ("main"/"ptt") — a release
         # or toggle-press from the OTHER bind must never stop it.
         self._rec_source = "main"
@@ -220,6 +270,95 @@ class HotkeyManager:
     # ------------------------------------------------------------------
     # Key event handlers
     # ------------------------------------------------------------------
+
+    def _combo_parts(self, source: str):
+        if source == "ptt":
+            return (self._ptt_base_key, self._ptt_modifiers,
+                    self._ptt_menu_modifier)
+        return self._base_key, self._modifiers, self._menu_modifier
+
+    def _observe_combo_base_press(self, _event=None,
+                                  source: str = "main") -> None:
+        """Activate whether the modifier or base key arrived first."""
+        if not self._combo_base_down[source]:
+            self._combo_base_pressed_at[source] = time.monotonic()
+            self._combo_base_down[source] = True
+        _base, modifiers, _menu = self._combo_parts(source)
+        if _modifiers_are_down(modifiers):
+            self._activate_win32_combo(source)
+
+    def _observe_combo_base_release(self, _event=None,
+                                    source: str = "main") -> None:
+        self._combo_base_down[source] = False
+        self._combo_base_pressed_at[source] = 0.0
+
+    def _observe_combo_modifier_press(self, _event=None,
+                                      source: str = "main",
+                                      modifier: str = "") -> None:
+        base, modifiers, _menu = self._combo_parts(source)
+        if _simultaneous_chord_ready(
+            _vk_code(base), modifiers, self._combo_base_pressed_at[source],
+            assume_modifier_down=modifier,
+        ):
+            self._activate_win32_combo(source)
+
+    def _activate_win32_combo(self, source: str) -> None:
+        """Latch one physical chord so hooks and WM_HOTKEY cannot double-fire."""
+        base, _modifiers, menu_modifier = self._combo_parts(source)
+        vk = _vk_code(base)
+        if not vk:
+            return
+        with self._combo_guard:
+            if self._combo_active[source]:
+                return
+            self._combo_active[source] = True
+        if menu_modifier:
+            _mask_menu_tap()
+        self._on_key_down(source=source)
+        if not self._pollers[source]:
+            self._pollers[source] = True
+            threading.Thread(
+                target=self._poll_release, args=(vk, source), daemon=True
+            ).start()
+
+    def _install_simultaneous_combo_observers(self) -> None:
+        """Observe combo parts without suppressing ordinary base-key typing."""
+        sources = []
+        if self._win32_ok:
+            sources.append("main")
+        if self._win32_ok_ptt:
+            sources.append("ptt")
+        for source in sources:
+            base, modifiers, _menu = self._combo_parts(source)
+            try:
+                self._kb_hooks.append(kb.on_press_key(
+                    base,
+                    lambda event, s=source: self._observe_combo_base_press(
+                        event, source=s),
+                    suppress=False,
+                ))
+                self._kb_hooks.append(kb.on_release_key(
+                    base,
+                    lambda event, s=source: self._observe_combo_base_release(
+                        event, source=s),
+                    suppress=False,
+                ))
+                for modifier in dict.fromkeys(modifiers):
+                    key_name = _KB_MODIFIER_NAMES.get(modifier, modifier)
+                    self._kb_hooks.append(kb.on_press_key(
+                        key_name,
+                        lambda event, s=source, m=modifier:
+                            self._observe_combo_modifier_press(
+                                event, source=s, modifier=m),
+                        suppress=False,
+                    ))
+            except Exception as e:
+                # RegisterHotKey remains operational in modifier-first order if
+                # optional chord observers cannot be installed.
+                print(
+                    "[HotkeyManager] Simultaneous chord observer unavailable "
+                    f"for {source}: {e}"
+                )
 
     def _install_base_key_suppressor(self) -> None:
         """Install a conditional hook that suppresses the base key ONLY during recording.
@@ -434,21 +573,8 @@ class HotkeyManager:
         msg = _wt.MSG()
         while _user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
             if msg.message == _WM_HOTKEY and msg.wParam in by_id:
-                vk, source = by_id[msg.wParam]
-                menu_mod = (self._ptt_menu_modifier if source == "ptt"
-                            else self._menu_modifier)
-                if menu_mod:
-                    _mask_menu_tap()
-                self._on_key_down(source=source)
-                hold = (source == "ptt") or self.mode == "hold"
-                if hold and not self._pollers[source]:
-                    # Claim the poller slot BEFORE spawning — setting it inside
-                    # the thread let two rapid WM_HOTKEYs spawn two pollers.
-                    self._pollers[source] = True
-                    threading.Thread(
-                        target=self._poll_release, args=(vk, source),
-                        daemon=True
-                    ).start()
+                _vk, source = by_id[msg.wParam]
+                self._activate_win32_combo(source)
 
         for hid in ok_ids:
             _user32.UnregisterHotKey(None, hid)
@@ -457,20 +583,25 @@ class HotkeyManager:
         self._win32_ok_ptt = False
 
     def _poll_release(self, vk: int, source: str = "main") -> None:
-        self._pollers[source] = True
         time.sleep(0.02)  # 20ms: enough to let hardware state settle after WM_HOTKEY
         _up_count = 0
         while self._pollers[source]:
-            if _user32.GetAsyncKeyState(vk) & 0x8000:
+            _base, modifiers, _menu = self._combo_parts(source)
+            # The physical chord ends when either part is released, so release
+            # order is as flexible as press order.
+            if _vk_is_down(vk) and _modifiers_are_down(modifiers):
                 _up_count = 0
             else:
                 _up_count += 1
                 if _up_count >= 2:  # 40ms of consistent key-up = real release
                     break
             time.sleep(0.02)
-        if self._pollers[source]:
+        hold = (source == "ptt") or self.mode == "hold"
+        if self._pollers[source] and hold:
             self._on_key_up(source=source)
         self._pollers[source] = False
+        with self._combo_guard:
+            self._combo_active[source] = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -586,6 +717,9 @@ class HotkeyManager:
                     self._ptt_base_key,
                     lambda _e: self._on_key_up(source="ptt")))
 
+        if self._win32_ok or self._win32_ok_ptt:
+            self._install_simultaneous_combo_observers()
+
         self._registered = registered
         if registered:
             ptt_note = (f" + PTT '{self.ptt_hotkey}'"
@@ -627,6 +761,13 @@ class HotkeyManager:
 
         self._pollers["main"] = False
         self._pollers["ptt"] = False
+        with self._combo_guard:
+            self._combo_active["main"] = False
+            self._combo_active["ptt"] = False
+        self._combo_base_down["main"] = False
+        self._combo_base_down["ptt"] = False
+        self._combo_base_pressed_at["main"] = 0.0
+        self._combo_base_pressed_at["ptt"] = 0.0
         self._remove_base_key_suppressor()
 
         # Remove any keyboard-library hooks we installed
@@ -696,6 +837,10 @@ class TriggerHotkeyManager:
         self._win32_ok = False
         self._kb_hooks: list = []
         self._kb_hotkeys: list = []
+        self._combo_active = False
+        self._combo_base_down = False
+        self._combo_base_pressed_at = 0.0
+        self._combo_guard = threading.Lock()
         self._parse_hotkey(self.hotkey)
 
     def _parse_hotkey(self, hotkey: str) -> None:
@@ -708,6 +853,76 @@ class TriggerHotkeyManager:
     def _fire(self) -> None:
         if self.on_trigger:
             threading.Thread(target=self.on_trigger, daemon=True).start()
+
+    def _activate_combo(self) -> None:
+        """Fire once per physical chord, regardless of press ordering."""
+        with self._combo_guard:
+            if self._combo_active:
+                return
+            self._combo_active = True
+        if self._menu_modifier:
+            _mask_menu_tap()
+        self._fire()
+        vk = _vk_code(self._base_key)
+        if vk:
+            threading.Thread(
+                target=self._wait_for_combo_release, args=(vk,), daemon=True
+            ).start()
+
+    def _wait_for_combo_release(self, vk: int) -> None:
+        time.sleep(0.02)
+        up_count = 0
+        while self._registered and self._combo_active:
+            if _vk_is_down(vk) and _modifiers_are_down(self._modifiers):
+                up_count = 0
+            else:
+                up_count += 1
+                if up_count >= 2:
+                    break
+            time.sleep(0.02)
+        with self._combo_guard:
+            self._combo_active = False
+
+    def _observe_combo_base_press(self, _event=None) -> None:
+        if not self._combo_base_down:
+            self._combo_base_pressed_at = time.monotonic()
+            self._combo_base_down = True
+        if _modifiers_are_down(self._modifiers):
+            self._activate_combo()
+
+    def _observe_combo_base_release(self, _event=None) -> None:
+        self._combo_base_down = False
+        self._combo_base_pressed_at = 0.0
+
+    def _observe_combo_modifier_press(self, _event=None,
+                                      modifier: str = "") -> None:
+        if _simultaneous_chord_ready(
+            _vk_code(self._base_key), self._modifiers,
+            self._combo_base_pressed_at,
+            assume_modifier_down=modifier,
+        ):
+            self._activate_combo()
+
+    def _install_simultaneous_combo_observers(self) -> None:
+        try:
+            self._kb_hooks.append(kb.on_press_key(
+                self._base_key, self._observe_combo_base_press, suppress=False))
+            self._kb_hooks.append(kb.on_release_key(
+                self._base_key, self._observe_combo_base_release,
+                suppress=False))
+            for modifier in dict.fromkeys(self._modifiers):
+                key_name = _KB_MODIFIER_NAMES.get(modifier, modifier)
+                self._kb_hooks.append(kb.on_press_key(
+                    key_name,
+                    lambda event, m=modifier:
+                        self._observe_combo_modifier_press(event, modifier=m),
+                    suppress=False,
+                ))
+        except Exception as e:
+            print(
+                "[TriggerHotkeyManager] Simultaneous chord observer "
+                f"unavailable: {e}"
+            )
 
     def _message_loop(self, mods: int, vk: int) -> None:
         HOTKEY_ID = 2
@@ -731,9 +946,7 @@ class TriggerHotkeyManager:
         msg = _wt.MSG()
         while _user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
             if msg.message == _WM_HOTKEY and msg.wParam == HOTKEY_ID:
-                if self._menu_modifier:
-                    _mask_menu_tap()
-                self._fire()
+                self._activate_combo()
 
         _user32.UnregisterHotKey(None, HOTKEY_ID)
         self._hotkey_thread_id = 0
@@ -770,7 +983,8 @@ class TriggerHotkeyManager:
                 registered = self._win32_ok
                 if not registered:
                     try:
-                        hk = kb.add_hotkey(self.hotkey, self._fire, suppress=False)
+                        hk = kb.add_hotkey(
+                            self.hotkey, self._activate_combo, suppress=False)
                         self._kb_hotkeys.append(hk)
                         registered = True
                         print(
@@ -783,7 +997,8 @@ class TriggerHotkeyManager:
                         )
             else:
                 try:
-                    hk = kb.add_hotkey(self.hotkey, self._fire, suppress=False)
+                    hk = kb.add_hotkey(
+                        self.hotkey, self._activate_combo, suppress=False)
                     self._kb_hotkeys.append(hk)
                     registered = True
                 except Exception as e:
@@ -798,6 +1013,8 @@ class TriggerHotkeyManager:
             registered = True
 
         self._registered = registered
+        if registered and self._is_combo:
+            self._install_simultaneous_combo_observers()
         if registered:
             print(f"[TriggerHotkeyManager] Registered '{self.hotkey}'")
 
@@ -816,6 +1033,10 @@ class TriggerHotkeyManager:
             except Exception:
                 pass
         self._kb_hotkeys = []
+        with self._combo_guard:
+            self._combo_active = False
+        self._combo_base_down = False
+        self._combo_base_pressed_at = 0.0
         if self._hotkey_thread_id:
             _user32.PostThreadMessageW(self._hotkey_thread_id, _WM_QUIT, 0, 0)
         if self._msg_loop_thread:

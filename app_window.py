@@ -1265,9 +1265,8 @@ class AppWindow:
 
         # Speed starts at the product's nominal 160 wpm; once the account has
         # enough voiced-speech data, _refresh_impact replaces it with the
-        # user's real measured average (see StatsStore.snapshot) and the
-        # subtitle switches to say it is their own average.
-        self._set_impact_card("speed", "160", "wpm", "typical dictation speed")
+        # user's real measured average (see StatsStore.snapshot).
+        self._set_impact_card("speed", "160", "wpm", "4× faster than typing")
 
         # Today bar
         bar = self._card(parent, inner_pad=(14, 10), margin=(8, 0))
@@ -1452,13 +1451,15 @@ class AppWindow:
 
         # avg_wpm counts voiced speech only (silence excluded upstream in
         # Recorder.voiced_seconds / StatsStore), so once it unlocks the card
-        # shows the user's real speaking speed, labelled as their average.
+        # shows the user's real speed and equivalent typing multiple.
         wpm = snap.get("avg_wpm") or 0
         if wpm:
+            ratio = wpm / 40.0
+            ratio_txt = f"{ratio:.1f}".rstrip("0").rstrip(".")
             self._set_impact_card("speed", str(int(round(wpm))), "wpm",
-                                  "your average speed")
+                                  f"{ratio_txt}× faster than typing")
         else:
-            self._set_impact_card("speed", "160", "wpm", "typical dictation speed")
+            self._set_impact_card("speed", "160", "wpm", "4× faster than typing")
 
         n = snap["streak_days"]
         if n == 0:
