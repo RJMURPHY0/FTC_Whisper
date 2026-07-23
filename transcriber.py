@@ -249,10 +249,14 @@ class Transcriber:
         text = re.sub(r",\s*,", ",", text)
         text = re.sub(r"\s+([.,!?])", r"\1", text)
 
-        # Ensure ends with punctuation (only when auto_punctuate is enabled)
+        # Ensure ends with punctuation (only when auto_punctuate is enabled).
+        # A trailing comma/semicolon/colon is replaced, never stacked ("then,.").
         text = text.strip()
-        if self.auto_punctuate and text and text[-1] not in ".!?":
-            text += "."
+        if self.auto_punctuate and text:
+            if text[-1] in ",;:":
+                text = text[:-1].rstrip()
+            if text and text[-1] not in ".!?":
+                text += "."
 
         # Re-capitalise first letter after cleanup
         if text and text[0].islower():

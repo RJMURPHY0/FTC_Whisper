@@ -36,7 +36,10 @@ class StreamingSession:
     LOCK_LAG = 1               # keep the freshest N agreed words un-injected (churn buffer)
     PAUSE_FLUSH_QUIET = 0.55   # trailing silence (s) that counts as "speaker paused"
     PAUSE_FLUSH_RMS = 0.006    # quiet floor for the pause flush (matches the commit floor)
-    PARAGRAPH_PAUSE = 2.0      # continuous quiet (s) that starts a new paragraph
+    PARAGRAPH_PAUSE = 2.5      # continuous quiet (s) that MAY start a new paragraph
+                               # (2.0 broke paragraphs on mid-sentence thinking
+                               # pauses; the text must also agree, see
+                               # _assemble_paragraphs)
     PARAGRAPH_RMS = 0.006      # absolute quiet floor for paragraph detection
 
     def __init__(
@@ -521,26 +524,31 @@ class StreamingSession:
 
     @staticmethod
     def _assemble_paragraphs(entries: list[tuple[str, bool]]) -> str:
-        """Join (text, break_before) entries into paragraph text. A break
-        lands after a finished sentence. When the pause said "break" but the
-        model left the previous part unpunctuated (common when the segment
-        cut fell inside the silence), the next part starting with a capital
-        letter confirms the sentence ended — supply the period and break. A
-        lowercase continuation joins as one paragraph: that pause was
-        mid-sentence thinking. With auto-paragraphs off every flag is False
-        and this reduces to the old single space-joined string."""
+        """Join (text, break_before) entries into paragraph text. A paragraph
+        break needs BOTH signals to agree: the pause said "break" AND the text
+        reads like a boundary (previous part ends a sentence with .!? and the
+        next starts with a capital). Anything less is mid-sentence thinking:
+        the parts join as one paragraph, and a chunk-final period contradicted
+        by a lowercase continuation is dropped (the model ends every pause
+        with a period, even mid-sentence). Punctuation is never invented here.
+        The old behaviour of supplying a period at an unpunctuated break
+        produced ",." artefacts and paragraph breaks in the middle of a
+        sentence whenever the speaker paused to think. With auto-paragraphs
+        off every flag is False and this reduces to a space-joined string."""
         paras: list[list[str]] = [[]]
         for text, brk in entries:
             if not text:
                 continue
-            if brk and paras[-1]:
+            if paras[-1]:
                 prev = paras[-1][-1].rstrip()
                 nxt = text.lstrip()
-                if prev and prev[-1] in ".!?":
+                if brk and prev and prev[-1] in ".!?" and nxt[:1].isupper():
                     paras.append([])
-                elif prev and nxt[:1].isupper():
-                    paras[-1][-1] = prev + "."
-                    paras.append([])
+                elif prev and prev[-1] == "." and not prev.endswith("...") \
+                        and nxt[:1].islower():
+                    # Pause-induced period, lowercase continuation: the model
+                    # re-read the pause as mid-sentence — the period goes.
+                    paras[-1][-1] = prev[:-1].rstrip()
             paras[-1].append(text)
         para_strs = [" ".join(" ".join(p).split()) for p in paras]
         return "\n\n".join(p for p in para_strs if p)

@@ -4,9 +4,9 @@ Microphone audio recorder using sounddevice.
 Two capture modes:
   Warm (default): a persistent input stream runs continuously, feeding a small
   pre-roll ring buffer (~1.5s). start() is then instant — it just flips a flag
-  and seeds the recording with the last ~0.35s of pre-roll, so the first
+  and seeds the recording with the last ~0.6s of pre-roll, so the first
   syllable is never lost to stream-open latency (~50-300ms on Windows) and
-  speech that begins ON the go-beep is fully captured.
+  speech that begins ON the hotkey press is fully captured.
 
   Cold (fallback): the stream is opened on start() and closed on stop(),
   exactly like the pre-1.6 behaviour. Used when the warm stream can't be
@@ -26,7 +26,11 @@ from collections import deque
 from typing import Optional
 
 _PREROLL_KEEP_SECONDS = 1.5   # ring buffer length while idle
-_PREROLL_SEED_SECONDS = 0.35  # how much pre-hotkey audio to prepend to a recording
+_PREROLL_SEED_SECONDS = 0.6   # pre-hotkey audio prepended to a recording: covers
+                              # hotkey-dispatch latency plus speech that starts
+                              # on (or a beat before) the press. 0.35 clipped
+                              # first words when the press and the first
+                              # syllable landed together under load.
 
 # A healthy input stream delivers a callback every blocksize/rate seconds
 # (~21-64ms). If none arrived for this long the stream is considered dead —
@@ -367,7 +371,7 @@ class Recorder:
                 self._chunks = []
                 self._chunks_samples = 0
                 self._chunks_offset = 0
-                # Seed with the last ~0.35s of pre-roll so speech that started
+                # Seed with the last ~0.6s of pre-roll so speech that started
                 # slightly before the hotkey (or during it) is captured — but
                 # ONLY if the stream is demonstrably live. A stale pre-roll is
                 # old room noise: transcribing it alone is how a dead mic used

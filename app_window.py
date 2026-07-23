@@ -3991,10 +3991,9 @@ class AppWindow:
 
         scan_btn.bind("<Button-1>", lambda _e: _start_scan())
 
-        _toggle_card("warm_mic", "Instant Mic Start",
-                     "Keep the microphone warm so recording starts instantly and the "
-                     "first word is never clipped (mic indicator stays on; audio is "
-                     "only kept for 1.5s and never stored)", True, icon="zap")
+        # Instant Mic Start is deliberately NOT a toggle any more: warm mode is
+        # how the first word survives stream-open latency, so it is always on
+        # (config.load forces warm_mic=True for installs that disabled it).
 
         # ── Feedback ──────────────────────────────────────────────────────────
         _section("speaker", "Feedback")
@@ -4037,6 +4036,10 @@ class AppWindow:
 
         _toggle_card("auto_punctuate", "Auto Punctuation",
                      "Add a trailing period when speech ends without ending punctuation",
+                     True, icon="punct")
+        _toggle_card("auto_paragraphs", "Auto Paragraphs",
+                     "Start a new paragraph when you pause clearly after a "
+                     "finished sentence (never breaks mid-sentence thinking pauses)",
                      True, icon="punct")
         _toggle_card("trailing_space", "Add Trailing Space",
                      "Append a space after each injection (useful for mid-sentence dictation)",

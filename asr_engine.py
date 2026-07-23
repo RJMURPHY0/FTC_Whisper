@@ -356,8 +356,13 @@ class ParakeetTranscriber:
             return ""
         if text[0].islower():
             text = text[0].upper() + text[1:]
-        if self.auto_punctuate and text[-1] not in ".!?":
-            text += "."
+        if self.auto_punctuate:
+            # A trailing comma/semicolon/colon is a pause artefact. Replace it,
+            # never stack — appending after it shipped ",." endings.
+            if text[-1] in ",;:":
+                text = text[:-1].rstrip()
+            if text and text[-1] not in ".!?":
+                text += "."
         return text
 
     @staticmethod

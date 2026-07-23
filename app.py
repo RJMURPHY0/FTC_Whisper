@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.31"
+APP_VERSION = "1.6.32"
 
 
 class WhisperFlowApp:
@@ -890,7 +890,7 @@ class WhisperFlowApp:
             self._audio_writer = DictationAudioWriter()
             # Start capture FIRST, beep second — the beep is the user's cue to
             # speak, so audio must already be flowing when they hear it. (With
-            # the warm mic this also captures ~0.35s of pre-roll.)
+            # the warm mic this also captures ~0.6s of pre-roll.)
             self.recorder.start()
             self.feedback.recording_started()
             # The status pill went up as "Starting…" on the hotkey thread;

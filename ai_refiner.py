@@ -17,14 +17,31 @@ _NO_FORMAT = (
 
 REFINE_PROMPTS = {
     "punctuation": (
-        "Fix the punctuation, capitalisation, spacing, grammar, and spelling in this transcribed speech. "
-        "Correct all errors but keep the original wording and meaning intact. "
-        "Return only the corrected text, nothing else." + _NO_FORMAT
+        "Proofread this dictated text like a professional copy editor. "
+        "Fix every punctuation, capitalisation, spacing, spelling, and grammar error: "
+        "full stops or commas dropped mid-sentence where the speaker paused, stray "
+        "sequences like ',.', run-on sentences, fragments, duplicated words and false "
+        "starts from dictation, wrong verb tense or agreement, and missing articles. "
+        "Rebuild sentence boundaries so every sentence reads as complete, correctly "
+        "punctuated English. Keep every word the speaker said, including casual "
+        "phrases and fillers like 'so yeah': this is a correction pass, not a "
+        "rewrite. The only words you may remove are immediate duplicates from "
+        "dictation stutters ('that that' becomes 'that'), and the only words you "
+        "may change are those grammar forces you to. Preserve the writer's regional "
+        "spelling. Return only the corrected text, nothing else." + _NO_FORMAT
     ),
     "email": (
-        "Rewrite this transcribed speech as a clear, professional email body. "
-        "Add proper punctuation, structure sentences properly, and use a polished tone. "
-        "Return only the rewritten email body, nothing else." + _NO_FORMAT
+        "Restructure this dictated speech into a well-written email. "
+        "Keep the sender's natural tone and voice. Reorganise the content into short, "
+        "clear paragraphs the way a good email reads: one topic per paragraph with a "
+        "blank line between paragraphs. Fix all grammar, punctuation, and "
+        "capitalisation. Remove false starts, repeated words, and filler. "
+        "Keep every point the sender made. Do not invent content, pleasantries, or "
+        "placeholders. A name at the very end of the speech is the sender signing "
+        "off: keep it as the sign-off with its dictated phrase (for example "
+        "'Cheers, Ryan'), never turn it into the greeting. Add a greeting line only "
+        "if the sender addressed the recipient in the speech. "
+        "Return only the email body, nothing else." + _NO_FORMAT
     ),
     "formal": (
         "Rewrite this transcribed speech in a formal, professional tone. "
@@ -48,15 +65,22 @@ REFINE_PROMPTS = {
         "Preserve the intent exactly. Return only the optimised prompt text, nothing else." + _NO_FORMAT
     ),
     "context_fix": (
-        "You are a transcription corrector. Fix ONLY words that were misheard or garbled "
-        "by speech recognition — homophones, similar-sounding words, garbled words that "
-        "make no sense in context.\n\n"
+        "You are a transcription corrector for dictated speech. Fix ONLY these two "
+        "kinds of error:\n"
+        "1. Misheard words: homophones, similar-sounding words, garbled words that "
+        "make no sense in context.\n"
+        "2. Pause artefacts in punctuation and capitalisation: a full stop or comma "
+        "inserted mid-sentence where the speaker merely paused to think "
+        "(\"would actually be. Inserted\" should read \"would actually be inserted\"), "
+        "stray sequences like \",.\", two sentences run together with no punctuation "
+        "between them, a wrong capital left after a removed full stop, and a "
+        "paragraph break that clearly falls in the middle of a sentence.\n\n"
         "STRICT RULES:\n"
         "- Do NOT change any word that could be correct as-is\n"
         "- Do NOT add, remove, or reorder any words\n"
-        "- Do NOT change punctuation, grammar, or sentence structure\n"
-        "- Do NOT paraphrase or improve wording\n"
-        "- When uncertain, leave the word exactly as-is\n\n"
+        "- Do NOT paraphrase, restyle, or improve wording\n"
+        "- Keep paragraph breaks unless one clearly interrupts a sentence\n"
+        "- When uncertain, leave the text exactly as-is\n\n"
         "Return ONLY the corrected text. If nothing needs fixing, return it unchanged."
     ),
 }
@@ -119,7 +143,8 @@ class AIRefiner:
     # "avoid semicolons" etc. directly contradict "change nothing but misheard
     # words" and push the model to rewrite.
     _CORRECTOR_SYSTEM_PROMPT = (
-        "You are a transcription corrector. You only fix misheard words. "
+        "You are a transcription corrector. You fix misheard words and the "
+        "punctuation artefacts dictation pauses leave behind. "
         "You never rewrite, rephrase, or restyle. "
         "Return only the corrected text, nothing else."
     )

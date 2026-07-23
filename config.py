@@ -261,6 +261,10 @@ class Config:
                 for key, value in data.items():
                     if hasattr(config, key) and not key.startswith("_"):
                         setattr(config, key, value)
+                # Instant mic start is no longer user-configurable: warm mode
+                # is how the first word survives stream-open latency, so a
+                # config that disabled it via the old toggle migrates back on.
+                config.warm_mic = True
             except (json.JSONDecodeError, IOError) as e:
                 # Reset-to-defaults fallback (kept) — but never silently:
                 # preserve the bad file and flag the reset so app.py can show
