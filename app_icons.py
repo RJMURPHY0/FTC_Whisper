@@ -22,6 +22,15 @@ import sys
 _ICON_SIZE = 36  # rendered size in the history row (fills the row height; the
                  # header's reduced pady keeps the row the same 44px tall)
 
+# ── Our own identity ─────────────────────────────────────────────────────────
+# RENAMING THE APP: change these two lines and rename the matching PNG in
+# assets/brand_icons/. Dictating into our OWN window (the History search box,
+# the refine popup) must be logged as this app with this logo — deriving it
+# from the running exe gave "Python3.12" from source and "Ftc Whisper" frozen,
+# each with the interpreter's icon instead of ours.
+SELF_APP_NAME = "FTC Whisper"
+SELF_BRAND_SLUG = "ftcwhisper"      # assets/brand_icons/<slug>.png
+
 # Base dir for bundled assets — sys._MEIPASS in a frozen build, else this file's
 # folder (same pattern as logo_cache.py).
 _BASE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
@@ -257,6 +266,14 @@ def capture_app_info(hwnd: int) -> dict:
     if not hwnd:
         return info
     try:
+        # Our own windows first: identify by PID, not by the exe name. Frozen
+        # we are FTC-Whisper.exe, from source we are python.exe — only the PID
+        # is true in both cases.
+        try:
+            if _pid_for_hwnd(hwnd) == os.getpid():
+                return {"app_name": SELF_APP_NAME, "app_exe": sys.executable}
+        except Exception:
+            pass
         exe = _exe_path_for_hwnd(hwnd)
         info["app_exe"] = exe
         stem = _stem_of(exe)
@@ -514,6 +531,7 @@ _BRAND_ALIASES = {
     "atlassian": "atlassian", "jira": "atlassian", "confluence": "atlassian",
     "google docs": "docs", "docs": "docs",
     "google drive": "drive", "drive": "drive",
+    SELF_APP_NAME.lower(): SELF_BRAND_SLUG,
 }
 
 # Slugs we actually shipped a PNG for (guards a name mapping to a missing file).

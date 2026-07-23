@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.28"
+APP_VERSION = "1.6.29"
 
 
 class WhisperFlowApp:
@@ -2004,6 +2004,41 @@ def _app_data_dir() -> str:
     return d
 
 
+def _clean_stale_runtime_dirs() -> None:
+    """Remove leftover onefile unpack folders.
+
+    The build unpacks into %LOCALAPPDATA%\\FTC Whisper\\runtime rather than
+    %TEMP% (see ftc_whisper.spec — temp-folder execution is a major AV
+    heuristic). The bootloader deletes its own folder on a clean exit, but a
+    crash or a kill leaves one behind, and unlike %TEMP% nothing else ever
+    cleans this location. Only touches _MEI* folders that are not ours and are
+    over a day old; a folder still in use simply fails to delete and is left."""
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        import shutil
+        runtime_dir = os.path.join(_app_data_dir(), "runtime")
+        if not os.path.isdir(runtime_dir):
+            return
+        live = os.path.normcase(os.path.abspath(getattr(sys, "_MEIPASS", "")))
+        cutoff = time.time() - 86400
+        for entry in os.listdir(runtime_dir):
+            if not entry.startswith("_MEI"):
+                continue
+            path = os.path.join(runtime_dir, entry)
+            if os.path.normcase(os.path.abspath(path)) == live:
+                continue          # the folder we are running from
+            try:
+                if os.path.getmtime(path) > cutoff:
+                    continue      # possibly another instance still starting
+                shutil.rmtree(path, ignore_errors=True)
+                print(f"[App] Removed stale runtime folder {entry}")
+            except OSError:
+                pass              # locked = in use, leave it
+    except Exception as e:
+        print(f"[App] Runtime cleanup skipped (non-fatal): {e}")
+
+
 def _startup_log_path() -> str:
     return os.path.join(_app_data_dir(), "startup-error.log")
 
@@ -2424,6 +2459,9 @@ def _main() -> None:
             target=_ensure_startup_task, daemon=True, name="startup-task"
         ).start()
         threading.Thread(target=_register_url_protocol, daemon=True, name="url-protocol").start()
+        threading.Thread(
+            target=_clean_stale_runtime_dirs, daemon=True, name="runtime-cleanup"
+        ).start()
         # Priority already boosted to ABOVE_NORMAL at module import time (top of file).
         try:
             if not ctypes.windll.shell32.IsUserAnAdmin():

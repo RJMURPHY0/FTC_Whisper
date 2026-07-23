@@ -153,7 +153,18 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,              # UPX disabled — packed exes trigger SmartScreen/AV false positives
-    runtime_tmpdir=None,
+    # Onefile builds unpack their DLLs before running them. Left at None that
+    # happens in %TEMP%\_MEIxxxxxx, and "executable content launched from the
+    # user's temp folder" is one of the strongest heuristics AV/EDR products
+    # have — which is why the app could be allowed through and still fail to
+    # run. Unpacking into our own app folder instead is far less suspicious,
+    # and unlike a random _MEIxxxxxx name it is a stable path that a user or
+    # IT admin can add as a single permanent exclusion.
+    # The Windows bootloader expands environment variables here (it imports
+    # ExpandEnvironmentStringsW; the "no expansion" note in --runtime-tmpdir's
+    # help applies to POSIX). We already require this folder to be writable —
+    # the model, the canonical exe and the logs all live in it.
+    runtime_tmpdir=r'%LOCALAPPDATA%\FTC Whisper\runtime',
     console=False,          # no black console window
     disable_windowed_traceback=False,
     # Embedded exe icon = the black "FTC whisper" wordmark tile — this is what

@@ -48,20 +48,50 @@ Attach the release exe and note it's a legitimate open-source dictation tool.
 
 ---
 
-## 3. What NOT to do
+## 3. What the build already does (v1.6.29)
 
-- **Don't add UPX** or any packer — already disabled in `ftc_whisper.spec` for
-  this exact reason; packed exes trigger *more* AV heuristics, not fewer.
+Don't undo these — each one exists to keep the detection rate down:
+
+- **No UPX / no packer** (`upx=False`). Packed exes trigger *more* heuristics.
+- **Unpacks outside `%TEMP%`** (`runtime_tmpdir` in `ftc_whisper.spec`). A
+  onefile exe unpacks its DLLs before running them; doing that in
+  `%TEMP%\_MEIxxxxxx` looks exactly like malware staging, and several products
+  block the DLL loads *even after the user allows the exe* — the app is
+  permitted but still won't run. It now unpacks to
+  `%LOCALAPPDATA%\FTC Whisper\runtime\`, which is both less suspicious and a
+  **stable path**: an admin can add one permanent exclusion, which is
+  impossible with a random `_MEIxxxxxx` name.
+  `app._clean_stale_runtime_dirs()` sweeps folders left behind by a crash.
+- **Full version metadata** (`version_info.txt`, including Comments and
+  LegalTrademarks). Sparse or blank metadata scores against you.
+- **Runs as `asInvoker`** — the app never requests admin.
+
+### If a user is still blocked
+
+Ask them to allow-list the two stable paths rather than the exe alone:
+
+```
+%LOCALAPPDATA%\FTC Whisper\
+```
+
+That single folder covers the exe, the unpack folder and the model.
+
+---
+
+## 4. What NOT to do
+
+- **Don't add UPX** or any packer — see above.
 - **Don't obfuscate** the code to "hide" from AV — that makes detection worse.
 
 ---
 
-## 4. Bigger free lever (needs its own planned session)
+## 5. Bigger free lever (needs its own planned session)
 
-The single most effective *free* reduction in AV false positives is switching the
-build from **onefile → onedir + an Inno Setup installer**. The onefile
-self-extract-to-temp pattern is the #1 heuristic trigger. However, this changes
-the distribution shape from a single exe to an installed folder, which **breaks
-the current auto-update swap logic** (`updater.py` copies a single exe over
-itself). So it's not a drop-in change — it needs a planned refactor of the
-updater. Track this as a future task; do not attempt it piecemeal.
+Switching the build from **onefile → onedir + an Inno Setup installer** removes
+the self-extraction step entirely, which is the strongest remaining heuristic
+after signing. `runtime_tmpdir` (above) softens that trigger but does not remove
+it. onedir changes the distribution shape from a single exe to an installed
+folder, which **breaks the current auto-update swap logic** (`updater.py` copies
+a single exe over itself) and the `FTC-Whisper.exe` release-asset contract. Not
+a drop-in change — it needs a planned refactor of the updater. Track as a future
+task; do not attempt it piecemeal.
