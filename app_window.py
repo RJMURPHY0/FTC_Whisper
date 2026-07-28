@@ -613,6 +613,12 @@ class AppWindow:
             self._login_frame = tk.Frame(self._root, bg=C["bg"])
             self._build_embedded_login()
 
+            # Brief "signing you in" splash shown to returning users while a
+            # saved session is restored in the background — so they land on the
+            # dashboard without ever seeing the login form.
+            self._signing_in_frame = tk.Frame(self._root, bg=C["bg"])
+            self._build_signing_in()
+
             # Impact cards follow the stats store: refresh after every
             # dictation/sync (marshalled to the tk thread) and at midnight.
             if self._stats is not None and not getattr(self, "_stats_listener_added", False):
@@ -625,17 +631,24 @@ class AppWindow:
             if self._auth.is_authenticated:
                 self._switch_to_dashboard()
                 self._fire_authenticated()
+            elif self._auth.has_saved_session():
+                # Returning user: a saved session exists but hasn't restored yet
+                # (the network token refresh runs async so it never blocks first
+                # paint). Show a short "signing you in" splash and restore in the
+                # background, promoting to the dashboard the moment it succeeds —
+                # so the login form is never shown on a normal launch. If the
+                # restore can't complete within the grace window (slow Wi-Fi
+                # after a cold boot, or offline) the form is revealed so the user
+                # isn't stuck; the retry keeps running and still promotes if the
+                # network recovers. (Definitive auth failures delete the file,
+                # so the loop stops and the form is the correct final state.)
+                self._switch_to_signing_in()
+                self._start_session_restore_retry()
+                self._signing_in_reveal_job = self._root.after(
+                    6000, self._reveal_login_if_pending)
             else:
+                # No saved session — first run or after sign-out: show the form.
                 self._switch_to_login()
-                # A saved session that exists but didn't restore means the startup
-                # attempt failed on network/timeout — common when the logon task
-                # launches before Wi-Fi is up after a reboot. Retry in the
-                # background and promote to the dashboard once it succeeds, so the
-                # user isn't forced to sign in again just because the network wasn't
-                # ready yet. (Definitive auth failures delete the file, so the loop
-                # stops and correctly leaves the login screen up.)
-                if self._auth.has_saved_session():
-                    self._start_session_restore_retry()
 
         except Exception:
             import traceback
@@ -1039,13 +1052,22 @@ class AppWindow:
 
     def _atomic_ui(self, fn) -> None:
         """Run a multi-step layout change as ONE visual frame. WM_SETREDRAW
-        freezes painting, fn() does its pack/geometry work, update_idletasks
-        settles the layout, then a full-tree RedrawWindow presents the result
-        atomically. Without this the login→dashboard swap painted each step
-        (header pops in, window jumps size, cards reflow) as visible glitches."""
+        freezes painting, fn() does its pack work, update_idletasks settles the
+        layout, then a full-tree RedrawWindow presents the result atomically.
+        Without this the login→dashboard swap painted each step (header pops in,
+        cards reflow) as visible glitches.
+
+        The window RESIZE is deliberately NOT done inside the freeze: calling
+        geometry() while WM_SETREDRAW is off leaves the just-packed frame
+        UNMAPPED — you get the previous frame's stale pixels plus a white strip
+        where the window grew (the 'white box' around the sign-in page, and the
+        long-standing login↔dashboard size-jump ghost). So _resize() defers to
+        `_pending_geometry` while `_in_atomic`, and it is applied here once
+        redraw is back on."""
         u32 = None
         hwnd = 0
         froze = False
+        self._pending_geometry = None
         try:
             u32 = ctypes.windll.user32
             hwnd = self._top_hwnd()
@@ -1054,6 +1076,7 @@ class AppWindow:
                 froze = True
         except Exception:
             froze = False
+        self._in_atomic = True
         try:
             fn()
             try:
@@ -1061,6 +1084,7 @@ class AppWindow:
             except Exception:
                 pass
         finally:
+            self._in_atomic = False
             if froze:
                 try:
                     u32.SendMessageW(hwnd, 0x000B, 1, 0)  # WM_SETREDRAW on
@@ -1068,12 +1092,22 @@ class AppWindow:
                     u32.RedrawWindow(hwnd, None, None, 0x585)
                 except Exception:
                     pass
+            geo = getattr(self, "_pending_geometry", None)
+            if geo:
+                self._pending_geometry = None
+                try:
+                    self._root.geometry(geo)
+                    self._root.update_idletasks()
+                except Exception:
+                    pass
 
     def _switch_to_login(self) -> None:
+        self._cancel_signing_in()
         def _swap():
             self._dash_visible = False
             self._header_outer.pack_forget()
             self._dash_frame.pack_forget()
+            self._signing_in_frame.pack_forget()
             self._login_frame.pack(fill="both", expand=True)
             self._resize(WINDOW_W, 560)
         self._atomic_ui(_swap)
@@ -1081,11 +1115,81 @@ class AppWindow:
             self._login_ui.reset()
 
     def _switch_to_dashboard(self) -> None:
+        self._cancel_signing_in()
         def _swap():
             self._login_frame.pack_forget()
+            self._signing_in_frame.pack_forget()
             self._header_outer.pack(fill="x")
             self._show_dashboard()
         self._atomic_ui(_swap)
+
+    # ── "Signing you in" splash (auto-login for returning users) ──────────────
+
+    def _build_signing_in(self) -> None:
+        """Logo + animated 'Signing you in…' — shown while a saved session
+        restores, so returning users skip the login form entirely."""
+        inner = tk.Frame(self._signing_in_frame, bg=C["bg"])
+        inner.place(relx=0.5, rely=0.5, anchor="center")
+        try:
+            from logo_cache import get_logo_photo
+            self._splash_logo = get_logo_photo(self._root, C["bg"], max_w=160, max_h=60)
+        except Exception:
+            self._splash_logo = None
+        if self._splash_logo:
+            tk.Label(inner, image=self._splash_logo, bg=C["bg"]).pack(pady=(0, 24))
+        else:
+            tk.Label(inner, text="FTC Whisper", fg=C["accent"], bg=C["bg"],
+                     font=("Segoe UI", 20, "bold")).pack(pady=(0, 24))
+        self._signing_in_lbl = tk.Label(
+            inner, text="Signing you in…", fg=C["subtext"], bg=C["bg"],
+            font=("Segoe UI", 12))
+        self._signing_in_lbl.pack()
+
+    def _switch_to_signing_in(self) -> None:
+        self._signing_in_active = True
+        def _swap():
+            self._dash_visible = False
+            self._header_outer.pack_forget()
+            self._dash_frame.pack_forget()
+            self._login_frame.pack_forget()
+            self._signing_in_frame.pack(fill="both", expand=True)
+            self._resize(WINDOW_W, 560)
+        self._atomic_ui(_swap)
+        self._animate_signing_in()
+
+    def _animate_signing_in(self) -> None:
+        # Runs off an explicit active-flag, not winfo_ismapped(): the splash is
+        # built and shown while the root is still withdrawn at startup, so a
+        # mapped-check would stop the animation before the window ever appears.
+        if not getattr(self, "_signing_in_active", False):
+            return
+        try:
+            n = (getattr(self, "_signing_dots", 0) + 1) % 4
+            self._signing_dots = n
+            self._signing_in_lbl.configure(text="Signing you in" + "." * n + " " * (3 - n))
+        except tk.TclError:
+            return
+        self._signing_anim_job = self._root.after(450, self._animate_signing_in)
+
+    def _cancel_signing_in(self) -> None:
+        self._signing_in_active = False
+        for attr in ("_signing_in_reveal_job", "_signing_anim_job"):
+            job = getattr(self, attr, None)
+            if job is not None:
+                try:
+                    self._root.after_cancel(job)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
+    def _reveal_login_if_pending(self) -> None:
+        """Grace window elapsed without a restored session — show the login form
+        so the user can act. The background retry keeps running and will still
+        promote to the dashboard if the network comes back."""
+        self._signing_in_reveal_job = None
+        if self._auth.is_authenticated:
+            return
+        self._switch_to_login()
 
     def _show_dashboard(self) -> None:
         self._dash_frame.pack(fill="both", expand=True)
@@ -4527,7 +4631,14 @@ class AppWindow:
         sh = self._root.winfo_screenheight()
         x  = (sw - w) // 2
         y  = (sh - h) // 2
-        self._root.geometry(f"{w}x{h}+{x}+{y}")
+        geo = f"{w}x{h}+{x}+{y}"
+        if getattr(self, "_in_atomic", False):
+            # Inside an _atomic_ui freeze — defer the actual geometry change
+            # until redraw is back on (see _atomic_ui): resizing while frozen
+            # leaves the newly-packed frame unmapped (white strip on the grow).
+            self._pending_geometry = geo
+            return
+        self._root.geometry(geo)
 
     # ── Rounded card ─────────────────────────────────────────────────────────
 

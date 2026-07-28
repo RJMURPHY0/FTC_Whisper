@@ -12,10 +12,11 @@ from typing import Callable, Optional
 C = {
     "bg": "#0d0d0d",
     "surface": "#1a1a1a",
-    "input_bg": "#141414",
-    "field_bg": "#141414",     # login email/password bars — dark, one colour with the page (the light bars read as white boxes)
-    "field_border": "#333333", # subtle field outline; turns accent on focus
-    "field_text": "#ffffff",   # light text on the dark bars
+    "input_bg": "#141414",     # secondary buttons (e.g. "Continue with Google") — stay dark
+    "field_bg": "#ffffff",     # login email/password bars — WHITE input fields (Ryan's explicit call): white bar, dark text, on the dark card
+    "field_border": "#d4d4d4", # subtle light outline on the white bar against the dark card; turns accent on focus
+    "field_text": "#111111",   # dark text on the white bars
+    "field_cursor": "#111111", # dark caret so it's visible against the white field
     "text": "#ffffff",
     "subtext": "#777777",
     "accent": "#f39200",
@@ -434,7 +435,7 @@ class LoginWindow:
         entry = tk.Entry(
             inner, textvariable=var, show=show,
             bg=C["field_bg"], fg=C["field_text"],
-            insertbackground=C["accent"], relief="flat", bd=0,
+            insertbackground=C["field_cursor"], relief="flat", bd=0,
             highlightthickness=0, font=("Segoe UI", 12),
         )
         entry.pack(side="left", fill="x", expand=True, ipady=1)

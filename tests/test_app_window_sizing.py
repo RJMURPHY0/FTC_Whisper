@@ -258,5 +258,31 @@ class InstallDefaultTests(unittest.TestCase):
         self.assertTrue(window._install_default_checked)
 
 
+class ResizeDeferralTests(unittest.TestCase):
+    """Resizing the window while WM_SETREDRAW is frozen (inside _atomic_ui)
+    leaves the just-packed frame UNMAPPED — the previous frame's stale pixels
+    plus a white strip where the window grew (the sign-in 'white box' and the
+    login↔dashboard size-jump ghost). So _resize must defer geometry() while
+    `_in_atomic`, and _atomic_ui applies it once redraw is back on."""
+
+    def test_resize_applies_immediately_outside_atomic(self):
+        root = _FakeRoot(screen_w=1920, screen_h=1080)
+        window = _window(root=root)
+        window._resize(440, 660)
+        self.assertEqual((440, 660), window._applied_size)
+        self.assertIn("440x660", root.geometry_calls[-1])
+
+    def test_resize_is_deferred_while_in_atomic(self):
+        root = _FakeRoot(screen_w=1920, screen_h=1080)
+        window = _window(root=root)
+        window._in_atomic = True
+        window._resize(440, 660)
+        # Size is recorded now (so the <Configure> echo guard still matches)…
+        self.assertEqual((440, 660), window._applied_size)
+        # …but the actual geometry() call is held back until the freeze lifts.
+        self.assertEqual([], root.geometry_calls)
+        self.assertIn("440x660", window._pending_geometry)
+
+
 if __name__ == "__main__":
     unittest.main()
