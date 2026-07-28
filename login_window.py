@@ -13,9 +13,9 @@ C = {
     "bg": "#0d0d0d",
     "surface": "#1a1a1a",
     "input_bg": "#141414",
-    "field_bg": "#e8e9ee",     # login email/password bars — soft light grey (easier on the eyes than white)
-    "field_border": "#c7cad3", # subtle field outline; turns accent on focus
-    "field_text": "#1a1a1a",   # dark text on the light bars
+    "field_bg": "#141414",     # login email/password bars — dark, one colour with the page (the light bars read as white boxes)
+    "field_border": "#333333", # subtle field outline; turns accent on focus
+    "field_text": "#ffffff",   # light text on the dark bars
     "text": "#ffffff",
     "subtext": "#777777",
     "accent": "#f39200",

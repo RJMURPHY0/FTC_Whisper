@@ -114,6 +114,109 @@ def show_toast(root: tk.Misc, message: str, duration_ms: int = 5000) -> None:
     toast.bind("<Button-1>", lambda _e: toast.destroy())
 
 
+# ── Blit-free scroll pane ─────────────────────────────────────────────────────
+
+class ScrollPane(tk.Frame):
+    """Vertically scrollable widget pane that scrolls by MOVING the content
+    frame with place() — never by canvas pixel-blit.
+
+    Replaces the Canvas + create_window pattern for the Settings/Hotkey tabs.
+    A tk.Canvas scrolls by bit-copying its own pixels, and the cards inside
+    those tabs are real child HWNDs — every blit could stamp a stale copy of
+    a card into a region Windows then considered valid. That is the
+    duplicated-card / torn-page ghost that kept resurfacing no matter how
+    many RedrawWindow heals ran afterwards: Tk paints asynchronously, so any
+    post-blit heal is a race it can lose. Moving a child window instead makes
+    Windows invalidate both the vacated and newly covered regions itself and
+    everything repaints from the live widget tree — no pixels are ever
+    copied, so a stale duplicate cannot exist even transiently.
+
+    Duck-types the slice of the Canvas scroll API the shared wheel /
+    scrollbar / scrollregion machinery drives (yview, yview_moveto,
+    cget("scrollregion"), bbox, configure) so callers don't care which
+    surface they're scrolling. Build content into `.content`.
+    """
+
+    def __init__(self, parent, bg):
+        super().__init__(parent, bg=bg)
+        self.content = tk.Frame(self, bg=bg)
+        self._top = 0.0
+        self._yscrollcommand = None
+        # relwidth=1.0 keeps the content exactly viewport-wide (the old
+        # itemconfigure(width=e.width) sync); height follows reqheight.
+        self.content.place(x=0, y=0, relwidth=1.0)
+        # Content growth (cards packing in, wraplength reflow) and viewport
+        # resizes both re-clamp the offset and refresh the scrollbar.
+        self.content.bind("<Configure>", lambda _e: self._refresh(), add="+")
+        self.bind("<Configure>", lambda _e: self._refresh(), add="+")
+
+    def _content_h(self) -> float:
+        try:
+            return max(float(self.content.winfo_reqheight()), 1.0)
+        except tk.TclError:
+            return 1.0
+
+    def _max_top(self) -> float:
+        return max(self._content_h() - max(float(self.winfo_height()), 1.0), 0.0)
+
+    def _refresh(self) -> None:
+        self._apply(self._top)
+
+    def _apply(self, top: float) -> None:
+        self._top = max(0.0, min(self._max_top(), float(top)))
+        try:
+            self.content.place_configure(y=-int(round(self._top)))
+        except tk.TclError:
+            return
+        if self._yscrollcommand is not None:
+            h = self._content_h()
+            try:
+                self._yscrollcommand(
+                    self._top / h,
+                    min(1.0, (self._top + max(self.winfo_height(), 1)) / h))
+            except tk.TclError:
+                pass
+
+    # ── Canvas-compatible scroll API ─────────────────────────────────────────
+    def yview(self, *args):
+        if not args:
+            h = self._content_h()
+            return (self._top / h,
+                    min(1.0, (self._top + max(self.winfo_height(), 1)) / h))
+        if args[0] == "moveto":
+            self._apply(float(args[1]) * self._content_h())
+        elif args[0] == "scroll":
+            n = int(float(args[1]))
+            unit = 30.0 if str(args[2]).startswith("unit") \
+                else max(float(self.winfo_height()), 1.0)
+            self._apply(self._top + n * unit)
+        return None
+
+    def yview_moveto(self, fraction) -> None:
+        self._apply(float(fraction) * self._content_h())
+
+    def bbox(self, _tag=None):
+        return (0, 0, int(self.winfo_width()), int(self._content_h()))
+
+    def cget(self, key):
+        if key == "scrollregion":
+            return f"0 0 {int(self.winfo_width())} {int(self._content_h())}"
+        return super().cget(key)
+
+    def configure(self, cnf=None, **kw):
+        # scrollregion is self-measured; accepting the kw keeps
+        # _queue_scrollregion_sync working unchanged on both surface kinds.
+        refresh = kw.pop("scrollregion", None) is not None
+        cmd = kw.pop("yscrollcommand", None)
+        if cmd is not None:
+            self._yscrollcommand = cmd
+            refresh = True
+        result = super().configure(cnf, **kw) if (cnf is not None or kw) else None
+        if refresh:
+            self._refresh()
+        return result
+
+
 # ── Modern scrollbar ──────────────────────────────────────────────────────────
 
 class ModernScrollbar(tk.Canvas):
@@ -854,21 +957,24 @@ class AppWindow:
             "settings": self._settings_frame,
         }
 
-        # Map/unmap instead of tkraise: under WS_EX_COMPOSITED a child z-order
-        # flip doesn't invalidate the newly exposed region, so the previous
-        # tab's pixels bled through the raised tab until the first scroll
-        # (the "settings shows Home/History underneath" ghost). grid_remove
-        # keeps the grid slot config, so this is still layout-flash-free.
-        # Raise the active frame — no pack/unpack, so no layout flash.
-        # (Map/unmap via grid_remove was tried instead: under the composited
-        # style remapped children came back as unpainted black regions.)
+        # Map/unmap, not just a z-order raise: an unmapped window has NO
+        # pixels on screen, so a hidden tab structurally cannot bleed through
+        # or survive a missed repaint (with tkraise alone the old tab's HWNDs
+        # stayed mapped underneath, and any lost invalidation race showed
+        # them — the "settings cards over History" ghost). grid_remove keeps
+        # the grid slot config, so this is still layout-flash-free.
+        # (The old note about grid_remove re-mapping as black regions applied
+        # only under WS_EX_COMPOSITED, which is gone for good — see
+        # _apply_dark_titlebar.)
         if name in tab_frames:
+            for n, f in tab_frames.items():
+                if n != name:
+                    f.grid_remove()
+            tab_frames[name].grid()
             tab_frames[name].tkraise()
-            # The z-order flip alone can leave the previous tab's pixels in
-            # regions the new tab doesn't immediately repaint. One synchronous
-            # full-tree repaint makes the switch land as a single clean frame;
-            # the delayed second pass mops up anything a late layout job
-            # (scrollregion sync, banner pack) redraws after the switch.
+            # One synchronous full-tree repaint lands the switch as a single
+            # clean frame; the delayed second pass mops up anything a late
+            # layout job (scrollregion sync, banner pack) redraws after it.
             self._repaint_all()
             try:
                 self._root.after(50, self._repaint_all)
@@ -1498,22 +1604,16 @@ class AppWindow:
     # ── Hotkey tab ────────────────────────────────────────────────────────────
 
     def _build_hotkey_tab(self, parent: tk.Frame) -> None:
-        # Scrollable container
-        self._hk_cv = tk.Canvas(parent, bg=C["bg"], highlightthickness=0, bd=0,
-                                yscrollincrement=1)
+        # Scrollable container — ScrollPane, not a Canvas: cards are child
+        # HWNDs and canvas blit-scroll is what minted the ghost duplicates.
+        self._hk_cv = ScrollPane(parent, bg=C["bg"])
         _hk_cv = self._hk_cv
         _hk_sb = ModernScrollbar(
             parent, command=lambda *a: self._scrollbar_command(_hk_cv, *a))
         _hk_cv.configure(yscrollcommand=_hk_sb.set)
         _hk_sb.pack(side="right", fill="y")
         _hk_cv.pack(side="left", fill="both", expand=True)
-        _hk_inner = tk.Frame(_hk_cv, bg=C["bg"])
-        _hk_win = _hk_cv.create_window(0, 0, window=_hk_inner, anchor="nw")
-        _hk_inner.bind("<Configure>",
-                       lambda _e: self._queue_scrollregion_sync(_hk_cv))
-        _hk_cv.bind("<Configure>", lambda e: _hk_cv.itemconfigure(
-            _hk_win, width=e.width))
-        parent = _hk_inner
+        parent = _hk_cv.content
 
         def _card_title(card, icon: str, title: str) -> None:
             row = tk.Frame(card, bg=C["surface"])
@@ -2274,12 +2374,11 @@ class AppWindow:
             state["current"] += step
         try:
             cv.yview_moveto(state["current"] / content_h)
-            # History is one native canvas and needs no descendant repaint.
-            # Widget-embedding canvases keep this even with compositing on:
-            # the repaint is the self-heal for any blit residue, and skipping
-            # it let torn pixels PERSIST on machines where the composited
-            # style failed to engage.
-            if cv is not getattr(self, "_hist_cv", None):
+            # Repaint-heal only applies to blit-scrolled canvases that embed
+            # widgets. History is one native canvas (no child HWNDs) and the
+            # Settings/Hotkey ScrollPanes never blit at all — repainting them
+            # per frame would be pure overhead that reads as scroll lag.
+            if isinstance(cv, tk.Canvas) and cv is not getattr(self, "_hist_cv", None):
                 self._repaint(cv)
         except tk.TclError:
             self._scroll_states.pop(cv, None)
@@ -2306,7 +2405,7 @@ class AppWindow:
             cv.yview(*args)
         except tk.TclError:
             return
-        if cv is not getattr(self, "_hist_cv", None):
+        if isinstance(cv, tk.Canvas) and cv is not getattr(self, "_hist_cv", None):
             self._repaint(cv)
 
     def _queue_scrollregion_sync(self, cv) -> None:
@@ -2853,6 +2952,14 @@ class AppWindow:
 
     def _on_history_canvas_configure(self, event) -> None:
         if not self._history_rendered_once:
+            # Tabs start unmapped (grid_remove), so the canvas has no real
+            # width until its first raise — a render queued before that maps
+            # parks itself in _history_pending_render. Flush it the moment a
+            # real width arrives or the first visit shows an empty page.
+            if (getattr(self, "_history_pending_render", False)
+                    and event.width > 10):
+                self._history_pending_render = False
+                self._root.after(16, self._render_history)
             return
         old = getattr(self, "_hist_canvas_width", 0)
         self._hist_canvas_width = event.width
@@ -3459,9 +3566,9 @@ class AppWindow:
     # ── Settings tab ─────────────────────────────────────────────────────────
 
     def _build_settings_tab(self, parent: tk.Frame) -> None:
-        # Scrollable container
-        self._settings_cv = tk.Canvas(parent, bg=C["bg"], highlightthickness=0,
-                                      bd=0, yscrollincrement=1)
+        # Scrollable container — ScrollPane, not a Canvas: cards are child
+        # HWNDs and canvas blit-scroll is what minted the ghost duplicates.
+        self._settings_cv = ScrollPane(parent, bg=C["bg"])
         self._settings_sb = ModernScrollbar(
             parent, command=lambda *a: self._scrollbar_command(
                 self._settings_cv, *a))
@@ -3469,15 +3576,8 @@ class AppWindow:
         self._settings_sb.pack(side="right", fill="y")
         self._settings_cv.pack(side="left", fill="both", expand=True)
 
-        inner = tk.Frame(self._settings_cv, bg=C["bg"])
-        _win = self._settings_cv.create_window(0, 0, window=inner, anchor="nw")
-        inner.bind("<Configure>",
-                   lambda _e: self._queue_scrollregion_sync(self._settings_cv))
-        self._settings_cv.bind("<Configure>", lambda e: self._settings_cv.itemconfigure(
-            _win, width=e.width))
-
         # Shadow parent so all existing code below writes into the scrollable frame
-        parent = inner
+        parent = self._settings_cv.content
         cfg = self._config
         self._setting_pills = {}
         self._setting_vars = {}

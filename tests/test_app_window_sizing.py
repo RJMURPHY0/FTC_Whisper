@@ -184,8 +184,12 @@ class RootConfigureTests(unittest.TestCase):
         window._on_root_configure(
             SimpleNamespace(widget=root, width=500, height=700))
 
+        # The echo must never arm the size-SAVE debounce. A repaint-heal job
+        # is allowed: _on_root_configure deliberately schedules a debounced
+        # _repaint_all on every real size change (login→dashboard jump ghost).
         self.assertIsNone(window._win_save_job)
-        self.assertEqual([], root.jobs)
+        self.assertNotIn(window._persist_window_size,
+                         [job[2] for job in root.jobs])
 
     def test_child_configure_events_are_ignored(self):
         root = _FakeRoot()
