@@ -195,6 +195,55 @@ class SupabaseLogger:
         threading.Thread(target=_insert, daemon=True,
                          name="supabase-update-log").start()
 
+    def log_error_event(self, event_type: str, detail=None, app_name: str = "",
+                        app_exe: str = "", window_class: str = "",
+                        app_version: str = "",
+                        transcription_created_at: str = "") -> None:
+        """Fire-and-forget: record a client-side reliability failure to the
+        error_events table — a transcription that never landed in the target
+        app, a silent mic, an evidence-based mic switch, an empty result. This
+        feeds the super-admin error log so failures across the fleet are
+        visible instead of dying in a console nobody sees. Best-effort — a
+        missing table, RLS block, or outage is swallowed.
+
+        event_type ∈ {"inject_failed","inject_false_success","mic_silent",
+                      "mic_switched","transcribe_empty"}.
+        detail: dict → stored as jsonb; anything else → {"message": str}.
+        transcription_created_at links the event to its transcriptions row.
+        """
+        if not self._enabled:
+            return
+        payload = {
+            "event_type": event_type,
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        if isinstance(detail, dict):
+            payload["detail"] = detail
+        elif detail:
+            payload["detail"] = {"message": str(detail)[:500]}
+        if app_name:
+            payload["app_name"] = app_name
+        if app_exe:
+            payload["app_exe"] = app_exe
+        if window_class:
+            payload["window_class"] = window_class
+        if app_version:
+            payload["app_version"] = app_version
+        if transcription_created_at:
+            payload["transcription_created_at"] = transcription_created_at
+        if self._user_id and self._user_id != "local":
+            payload["user_id"] = self._user_id
+
+        def _insert():
+            try:
+                self._get_client().table("error_events").insert(payload).execute()
+                print(f"[Supabase] error_event: {event_type}")
+            except Exception as e:
+                print(f"[Supabase] error_event log failed (non-fatal): {e}")
+
+        threading.Thread(target=_insert, daemon=True,
+                         name="supabase-error-log").start()
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------

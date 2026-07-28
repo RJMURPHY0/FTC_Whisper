@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.34"
+APP_VERSION = "1.6.35"
 
 
 class _RECT(ctypes.Structure):
@@ -699,6 +699,88 @@ class WhisperFlowApp:
         except Exception as e:
             print(f"[App] Pipeline error notify failed (non-fatal): {e}")
 
+    # ── Fleet error log (super-admin reliability telemetry) ──────────────────
+
+    def _log_error_event(self, event_type: str, detail: dict,
+                         window_class: str = "",
+                         transcription_created_at: str = "") -> None:
+        """Best-effort remote record of a reliability failure (error_events
+        table). The Supabase insert runs fire-and-forget on its own thread;
+        this never raises and never blocks the dictation path."""
+        try:
+            _app = getattr(self, "_recording_app", None) or {}
+            self.db.log_error_event(
+                event_type, detail=detail,
+                app_name=_app.get("app_name", ""),
+                app_exe=_app.get("app_exe", ""),
+                window_class=window_class,
+                app_version=APP_VERSION,
+                transcription_created_at=transcription_created_at,
+            )
+        except Exception as e:
+            print(f"[App] error-event log failed (non-fatal): {e}")
+
+    def _handle_no_speech(self, reason: str, duration_s: float,
+                          peak: float) -> bool:
+        """A dictation produced no usable text. If the in-recording probe
+        found another mic hearing the user (chosen mic not worn / muted /
+        wrong device), switch to it now and tell the user to repeat;
+        otherwise just record the failure in the fleet error log. Returns
+        True when a switch happened — the caller then skips the generic
+        'No speech detected' feedback."""
+        # Device name BEFORE consume — consuming advice clears the recorder's
+        # cached name, which used to leave every mic_switched event with an
+        # empty device field.
+        device_name = getattr(self.recorder, "_active_device_name", "")
+        # A short dictation can end before the ~0.9s probe has its verdict —
+        # wait briefly rather than consuming None and losing the switch.
+        try:
+            _deadline = time.monotonic() + 1.0
+            while (getattr(self.recorder, "probe_in_flight", False)
+                   and time.monotonic() < _deadline):
+                time.sleep(0.05)
+        except Exception:
+            pass
+        advice = None
+        try:
+            advice = self.recorder.consume_mic_advice()
+        except Exception:
+            pass
+        try:
+            _voiced = self.recorder.voiced_seconds
+        except Exception:
+            _voiced = 0.0
+        detail = {
+            "reason": reason,
+            "duration_s": round(duration_s, 2),
+            "peak": round(peak, 5),
+            "voiced_s": round(_voiced, 2),
+            "device": device_name or (advice or {}).get("from", ""),
+        }
+        if advice:
+            detail["switched_to"] = advice.get("to", "")
+            detail["from_rms"] = advice.get("from_rms")
+            detail["to_rms"] = advice.get("to_rms")
+            self._log_error_event("mic_switched", detail)
+            # Background thread like every other restart_warm call site — a
+            # PortAudio re-init can take seconds and must not delay the toast
+            # or hold the stop path.
+            threading.Thread(target=self.recorder.restart_warm, daemon=True,
+                             name="warm-restart-switch").start()
+            _from = advice.get("from") or "the selected mic"
+            _to = advice.get("to") or "another mic"
+            # Deliberately NOT in _EXPECTED_PIPELINE_ERRORS: the user must see
+            # this one (their words were lost; the next attempt will work).
+            self.feedback.error_occurred(
+                f"No audio on '{_from}' — switched to '{_to}'. "
+                "Please dictate again.")
+            return True
+        self._log_error_event(
+            "mic_silent" if (peak < 0.004 or _voiced < 0.2)
+            else "transcribe_empty",
+            detail)
+        return False
+
     def _on_hotkey_change(self, new_hotkey: str) -> None:
         """Called when the user saves a new hotkey in the dashboard."""
         print(f"[App] Updating hotkey to: {new_hotkey}")
@@ -745,6 +827,8 @@ class WhisperFlowApp:
             # Clear cached device index so next recording re-enumerates with the new choice
             self.recorder._active_device_index = None
             self.recorder._active_device_name = ""
+            # The user's explicit choice outranks anything the probe learned.
+            self.recorder.clear_mic_memory()
             # Warm stream is bound to the old device — reopen on the new one
             threading.Thread(
                 target=self.recorder.restart_warm, daemon=True, name="warm-restart"
@@ -1068,7 +1152,14 @@ class WhisperFlowApp:
                             self.feedback.error_occurred("Recording too short")
                         else:
                             print("[App] Empty transcription result.")
-                            self.feedback.error_occurred("No speech detected")
+                            import numpy as _np
+                            _pk = (float(_np.max(_np.abs(tail_audio)))
+                                   if tail_audio is not None and len(tail_audio)
+                                   else 0.0)
+                            if not self._handle_no_speech(
+                                    "empty_result",
+                                    total_samples / float(capture_rate), _pk):
+                                self.feedback.error_occurred("No speech detected")
                         if audio_writer is not None:
                             audio_writer.abort()
                         self.hotkey_manager.set_idle()
@@ -1104,7 +1195,10 @@ class WhisperFlowApp:
                     if audio_writer is not None:
                         audio_writer.abort()
                     self.hotkey_manager.set_idle()
-                    self.feedback.error_occurred("No speech detected")
+                    if not self._handle_no_speech(
+                            "near_silence", len(final_audio) / capture_rate,
+                            _clip_peak):
+                        self.feedback.error_occurred("No speech detected")
                     return
                 if audio_writer is not None:
                     audio_writer.write(final_audio, capture_rate)
@@ -1129,7 +1223,10 @@ class WhisperFlowApp:
                         if audio_writer is not None:
                             audio_writer.abort()
                         self.hotkey_manager.set_idle()
-                        self.feedback.error_occurred("No speech detected")
+                        if not self._handle_no_speech(
+                                "near_silence",
+                                len(final_audio) / capture_rate, peak):
+                            self.feedback.error_occurred("No speech detected")
                         return
                     text = self.transcriber.transcribe(
                         final_audio, capture_rate, context_words=_ctx, hotwords_str=_hw).strip()
@@ -1138,7 +1235,10 @@ class WhisperFlowApp:
                         if audio_writer is not None:
                             audio_writer.abort()
                         self.hotkey_manager.set_idle()
-                        self.feedback.error_occurred("No speech detected")
+                        if not self._handle_no_speech(
+                                "empty_result",
+                                len(final_audio) / capture_rate, peak):
+                            self.feedback.error_occurred("No speech detected")
                         return
                     transcribed_text = text
                     self._update_context(text)
@@ -1170,6 +1270,11 @@ class WhisperFlowApp:
         # on screen (it hides via the is_user_facing guard in _on_state_change).
         result = False
         _live_del = 0   # chars we put in the doc via live-inject (for popup Replace)
+        # Pre-set so the failure log below can read them even when the try
+        # block threw before assigning them.
+        _inject_exc = ""
+        _streamed_live = ""
+        focus_unchanged = False
         try:
             # Fast path: in the overwhelmingly common case the target window
             # never lost focus during recording (the popup is WS_EX_NOACTIVATE),
@@ -1272,6 +1377,7 @@ class WhisperFlowApp:
                         target_hwnd=hwnd, target_child=_rec_child)
                     print(f"[App] Inject result: {result}")
             except Exception as e:
+                _inject_exc = str(e)
                 print(f"[App] Injection error (popup will still appear): {e}")
 
             if result and getattr(self.config, "auto_enter", False):
@@ -1311,6 +1417,57 @@ class WhisperFlowApp:
                         "created_at": _created_at},
                 daemon=True,
             ).start()
+
+            # ── Fleet error log ──────────────────────────────────────────────
+            if not result and transcribed_text:
+                # The user SAW a transcription but it never landed in their app
+                # — exactly the failure class the super-admin error log exists
+                # to catch. The injector's structured detail says why: elevated
+                # target, moved foreground, partial WM_CHAR, clipboard refusal.
+                # Live Typing never calls inject(), so last_failure would be a
+                # STALE record from a previous dictation — skip it there.
+                _fail = ({} if _streamed_live
+                         else dict(getattr(self.injector, "last_failure",
+                                           None) or {}))
+                if _inject_exc:
+                    _fail["exception"] = _inject_exc[:300]
+                _fail.setdefault("chars", len(transcribed_text))
+                _fail["live_typing"] = bool(_streamed_live)
+                _fail["focus_unchanged"] = bool(focus_unchanged)
+                self._log_error_event(
+                    "inject_failed", _fail,
+                    window_class=self._get_window_class(hwnd),
+                    transcription_created_at=_created_at)
+            elif (result and not _streamed_live
+                    and not getattr(self.config, "auto_enter", False)):
+                # A claimed success is not always the truth ("cursor stays,
+                # text never appears"). Classic Edit controls can be read back
+                # cheaply — verify in the background and log a false success.
+                # Telemetry only: NEVER re-inject on a failed check (a false
+                # negative would duplicate the text). Skipped under auto_enter:
+                # the Enter we just sent submits-and-clears chat inputs, which
+                # would read back empty and flood the log with phantoms.
+                _v_cls = self._get_window_class(hwnd)
+
+                def _verify(_t=_text_to_inject, _c=_rec_child, _cls=_v_cls,
+                            _ca=_created_at,
+                            _m=getattr(self.injector, "last_method", "")):
+                    time.sleep(0.5)  # let the WM_CHAR queue / paste settle
+                    try:
+                        from injector import verify_text_landed
+                        landed = verify_text_landed(_c, _t)
+                    except Exception:
+                        return
+                    if landed is False:
+                        print("[App] Inject verify: text NOT found in target control.")
+                        self._log_error_event(
+                            "inject_false_success",
+                            {"method": _m, "chars": len(_t)},
+                            window_class=_cls,
+                            transcription_created_at=_ca)
+
+                threading.Thread(target=_verify, daemon=True,
+                                 name="inject-verify").start()
         except Exception as e:
             print(f"[App] Finalize error (popup will still appear): {e}")
         finally:
@@ -1604,6 +1761,9 @@ class WhisperFlowApp:
                     level * 0.75
                 )
                 self.popup.update_mic_level(self._mic_level_smooth)
+                # Silent-mic recovery: one flag check per tick; only ever acts
+                # when the recording has run voice-free past the trigger window.
+                self.recorder.maybe_probe_alternatives()
             except Exception:
                 pass
             time.sleep(0.04)

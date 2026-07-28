@@ -44,6 +44,18 @@ _START_VERIFY_SECONDS = 0.45
 _WATCHDOG_INTERVAL = 5.0      # idle heartbeat check cadence
 _DEVICE_REFRESH_TICKS = 12    # full PortAudio refresh every N watchdog ticks (~60s)
 
+# Evidence probe: when the chosen mic has been alive but voice-free for this
+# long into a recording, briefly sample the other real mics to learn whether a
+# different one is actually hearing the user (the not-worn-headset case).
+_PROBE_TRIGGER_SECONDS = 1.6  # voiced silence before probing other mics
+_PROBE_WINDOW_SECONDS = 0.9   # how long the probe streams listen
+_PROBE_MAX_CANDIDATES = 4     # cap simultaneous probe streams
+_PROBE_MIN_RMS = 0.006        # absolute speech-evidence floor for a candidate
+_PROBE_MARGIN = 4.0           # candidate must beat the primary by this factor
+_PROBE_SUSTAIN_SECONDS = 0.3  # candidate must stay above the floor this long —
+                              # a single 20ms transient (chair squeak, cough,
+                              # AGC hiss) must never count as speech evidence
+
 
 class Recorder:
     """
@@ -107,6 +119,20 @@ class Recorder:
         self._last_callback_ts: float = 0.0
         self._watchdog_started = False
         self._watchdog_lock = threading.Lock()
+        # Evidence-based mic selection (auto mode only). A device that sat
+        # silent through a dictation while another mic clearly heard the user
+        # is demoted for this session; the mic that heard the speech is
+        # preferred outright. Cleared when the device topology changes (user
+        # plugged/unplugged something) or on a manual device change — so a
+        # headset put back on gets a fresh chance instead of a permanent ban.
+        self._demoted_devices: set[str] = set()
+        self._demotion_topology: frozenset = frozenset()
+        self._evidence_preferred: str = ""
+        self._probe_active = False        # probe streams open — watchdog must
+                                          # not re-init PortAudio underneath them
+        self._probe_done = False          # one probe per recording
+        self._mic_advice: Optional[dict] = None
+        self._recording_started_ts: float = 0.0
 
     @property
     def is_recording(self) -> bool:
@@ -248,7 +274,7 @@ class Recorder:
         removed, or made default afterwards are invisible (and stale indices
         can 'successfully' reopen a dead endpoint) until a re-init. Must only
         be called with ALL of our streams closed."""
-        if self._monitor_active:
+        if self._monitor_active or self._probe_active:
             return
         try:
             sd._terminate()
@@ -317,7 +343,8 @@ class Recorder:
             tick += 1
             if not self._warm_enabled:
                 continue
-            if self.is_recording or self._monitor_active or self._aux_active:
+            if (self.is_recording or self._monitor_active or self._aux_active
+                    or self._probe_active):
                 continue
             try:
                 if not self._stream_looks_alive():
@@ -362,6 +389,13 @@ class Recorder:
                 self._chunks_samples = 0
                 self._chunks_offset = 0
                 return
+
+        with self._lock:
+            # Fresh probe window per recording: advice from a previous
+            # dictation must never switch mics under a new one.
+            self._probe_done = False
+            self._mic_advice = None
+            self._recording_started_ts = time.monotonic()
 
         warm_ready = self._warm_enabled and self._ensure_warm_stream()
 
@@ -672,6 +706,210 @@ class Recorder:
             self._monitor_rms = 0.0
             self._monitor_peak = 0.0
 
+    # ------------------------------------------------------------------
+    # Evidence probe (silent-mic recovery)
+    # ------------------------------------------------------------------
+
+    def maybe_probe_alternatives(self) -> None:
+        """Cheap per-tick check (called from the mic-level loop while
+        recording): if the chosen mic has been alive but voice-free for
+        _PROBE_TRIGGER_SECONDS — the 'headset ranked best but is on the desk'
+        case — briefly sample the other real mics once and remember which one
+        is actually hearing the user. Costs one flag check on a normal
+        dictation. Auto mode only: a manually pinned mic is the user's call.
+        Never opens Bluetooth hands-free or loopback endpoints (opening HFP
+        degrades the user's audio; virtual devices hear the speakers)."""
+        if not self.is_auto_device(self.input_device):
+            return
+        with self._lock:
+            if (not self._recording or self._probe_done or self._probe_active
+                    or self._voiced_samples > 0):
+                return
+            started = self._recording_started_ts
+        if not started or time.monotonic() - started < _PROBE_TRIGGER_SECONDS:
+            return
+        with self._lock:
+            if self._probe_active or self._probe_done or not self._recording:
+                return
+            self._probe_active = True
+            self._probe_done = True
+        try:
+            threading.Thread(target=self._probe_alternatives, daemon=True,
+                             name="mic-probe").start()
+        except Exception as e:
+            # Roll back, or a failed Thread.start() would latch _probe_active
+            # forever — silencing the watchdog and PortAudio refresh for the
+            # rest of the session.
+            with self._lock:
+                self._probe_active = False
+            print(f"[Recorder] Mic probe spawn failed (non-fatal): {e}")
+
+    def _probe_alternatives(self) -> None:
+        """One-shot parallel sample of alternative mics (~0.9s, level-only).
+        Runs while a recording is in progress, so the watchdog never touches
+        PortAudio underneath (it skips while is_recording); _probe_active
+        covers the tail where the recording stops mid-probe.
+
+        The verdict only SETS _mic_advice (stamped with the recording it
+        observed) — demotion and preference are committed exclusively in
+        consume_mic_advice(), after a confirmed no-speech result. Committing
+        here let a successful dictation silently lose its mic to the next
+        watchdog refresh."""
+        try:
+            with self._lock:
+                started = self._recording_started_ts
+            devices = self.get_input_devices()
+            active_name = self._active_device_name
+            active = (active_name or "").strip().lower()
+            candidates = [
+                d for d in devices
+                if d["name"].strip().lower() != active
+                and self._auto_rank(d["name"]) <= 2
+            ][:_PROBE_MAX_CANDIDATES]
+            if not candidates:
+                return
+
+            # Per-candidate evidence: peak rms AND how long the signal stayed
+            # above the floor. A single loud transient must not look like
+            # speech — only sustained energy counts.
+            levels: dict[str, dict] = {
+                d["name"]: {"peak": 0.0, "loud": 0,
+                            "rate": int(d.get("sample_rate") or 16000)}
+                for d in candidates}
+            levels_lock = threading.Lock()
+
+            def _make_cb(name):
+                def _cb(indata, _frames, _time_info, _status):
+                    mono = indata[:, 0] if indata.ndim > 1 else indata
+                    rms = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
+                    with levels_lock:
+                        entry = levels[name]
+                        if rms > entry["peak"]:
+                            entry["peak"] = rms
+                        if rms >= _PROBE_MIN_RMS:
+                            entry["loud"] += int(mono.shape[0])
+                return _cb
+
+            streams = []
+            for d in candidates:
+                try:
+                    s = sd.InputStream(
+                        samplerate=int(d.get("sample_rate") or 16000),
+                        channels=1,
+                        dtype="float32",
+                        callback=_make_cb(d["name"]),
+                        blocksize=1024,
+                        device=int(d["index"]),
+                    )
+                    s.start()
+                    streams.append(s)
+                except Exception as e:
+                    print(f"[Recorder] Probe skip '{d['name']}': {e}")
+            if not streams:
+                return
+
+            primary_rms = 0.0
+            deadline = time.monotonic() + _PROBE_WINDOW_SECONDS
+            while time.monotonic() < deadline:
+                with self._lock:
+                    if (not self._recording
+                            or self._recording_started_ts != started):
+                        # Recording ended (or a NEW one began — never mix
+                        # evidence across two dictations).
+                        break
+                    primary_rms = max(primary_rms, self._last_rms)
+                time.sleep(0.05)
+
+            for s in streams:
+                try:
+                    s.stop()
+                    s.close()
+                except Exception:
+                    pass
+
+            with levels_lock:
+                snapshot = {name: dict(e) for name, e in levels.items()}
+            for name, entry in snapshot.items():
+                if entry["peak"] >= _PROBE_MIN_RMS:
+                    # This mic proved it can hear — clear any old demotion.
+                    self._demoted_devices.discard(name.strip().lower())
+            # Only candidates with SUSTAINED energy qualify as speech evidence.
+            sustained = {
+                name: entry for name, entry in snapshot.items()
+                if entry["loud"] / float(entry["rate"] or 1)
+                >= _PROBE_SUSTAIN_SECONDS
+            }
+            if not sustained:
+                print("[Recorder] Mic probe: no sustained signal on any "
+                      "alternative mic.")
+                return
+            best_name, best = max(sustained.items(),
+                                  key=lambda kv: kv[1]["peak"])
+            best_rms = best["peak"]
+            if best_rms >= max(_PROBE_MIN_RMS, primary_rms * _PROBE_MARGIN):
+                with self._lock:
+                    if self._recording_started_ts != started:
+                        return  # a new recording began — verdict is stale
+                    self._mic_advice = {
+                        "from": active_name,
+                        "to": best_name,
+                        "from_rms": round(primary_rms, 5),
+                        "to_rms": round(best_rms, 5),
+                        "rec_ts": started,
+                        "topology": frozenset(
+                            d["name"].strip().lower() for d in devices),
+                    }
+                print(f"[Recorder] Mic probe: '{best_name}' hears speech "
+                      f"(rms {best_rms:.4f}) while '{active_name}'"
+                      f" is silent (rms {primary_rms:.4f}) — advice armed.")
+            else:
+                print(f"[Recorder] Mic probe: no better mic found "
+                      f"(best '{best_name}' rms {best_rms:.4f}).")
+        except Exception as e:
+            print(f"[Recorder] Mic probe failed (non-fatal): {e}")
+        finally:
+            self._probe_active = False
+
+    @property
+    def probe_in_flight(self) -> bool:
+        """True while probe streams are open / the verdict is being computed —
+        lets the no-speech path wait briefly instead of consuming None."""
+        return self._probe_active
+
+    def consume_mic_advice(self) -> Optional[dict]:
+        """Return-and-clear the probe's switch advice ({from,to,from_rms,
+        to_rms}) — the app acts on it exactly once, after a no-speech result.
+
+        This is the ONLY place demotion and evidence preference are committed:
+        advice that was never consumed (the dictation succeeded, or a new
+        recording superseded it) leaves the selection state untouched."""
+        with self._lock:
+            advice, self._mic_advice = self._mic_advice, None
+            if advice and advice.get("rec_ts") != self._recording_started_ts:
+                advice = None  # verdict belongs to a different recording
+            if advice:
+                self._demoted_devices.add(
+                    (advice.get("from") or "").strip().lower())
+                self._demotion_topology = (advice.get("topology")
+                                           or frozenset())
+                self._evidence_preferred = advice.get("to", "")
+        if advice:
+            # The cached fast-path index still points at the silent device —
+            # force full enumeration so the next open honours the evidence.
+            self._active_device_index = None
+            self._active_device_name = ""
+        return advice
+
+    def clear_mic_memory(self) -> None:
+        """Forget evidence-based demotions/preference. Called on a manual
+        device change in Settings — the user's explicit choice outranks
+        anything the probe learned."""
+        self._demoted_devices.clear()
+        self._demotion_topology = frozenset()
+        self._evidence_preferred = ""
+        with self._lock:
+            self._mic_advice = None
+
     def get_input_devices(self) -> list[dict]:
         """List available input audio devices, one clean entry per mic.
 
@@ -855,7 +1093,11 @@ class Recorder:
         n = (name or "").lower()
         if any(v in n for v in (
                 "stereo mix", "sound mapper", "primary sound", "what u hear",
-                "wave out", "pc speaker", "loopback", "virtual", "cable")):
+                "wave out", "pc speaker", "loopback", "virtual", "cable",
+                # Localised Windows loopback endpoints — the probe must never
+                # prefer a device that hears the speakers, in any language.
+                "stereomix", "mixage", "mezcla", "missaggio",
+                "микшер", "ミキサー")):
             return 4
         if any(b in n for b in (
                 "bluetooth", "hands-free", "hfp", " ag audio")):
@@ -874,11 +1116,45 @@ class Recorder:
     def _pick_best_input(self, devices: list[dict]) -> Optional[int]:
         """Best device index by rank. Within the winning rank the Windows
         default input wins (respects the user's OS-level choice among good
-        mics); otherwise the first enumerated device of that rank."""
+        mics); otherwise the first enumerated device of that rank.
+
+        Evidence beats name ranking: a mic that provably heard the user while
+        the ranked pick sat silent (probe verdict) wins outright, and the
+        silent device is skipped. The evidence resets when a NEW device
+        appears (the user plugged something in — including re-plugging the
+        demoted headset) or the preferred device vanishes. A device merely
+        disappearing does NOT reset — a PortAudio re-init transiently hiding
+        an endpoint must not cancel a switch the user was just told about."""
         if not devices:
             return None
-        best_rank = min(self._auto_rank(d["name"]) for d in devices)
-        best = [d for d in devices if self._auto_rank(d["name"]) == best_rank]
+        # Keep the ranking helper safe for lightweight callers that construct a
+        # Recorder without opening PortAudio (including diagnostics/tests).
+        demoted = getattr(self, "_demoted_devices", set())
+        preferred = getattr(self, "_evidence_preferred", "")
+        topology = getattr(self, "_demotion_topology", frozenset())
+        names_now = frozenset(d["name"].strip().lower() for d in devices)
+        if ((demoted or preferred) and topology):
+            appeared = names_now - topology
+            preferred_gone = bool(
+                preferred and preferred.strip().lower() not in names_now)
+            if appeared or preferred_gone:
+                demoted.clear()
+                preferred = ""
+                topology = frozenset()
+                self._demoted_devices = demoted
+                self._evidence_preferred = preferred
+                self._demotion_topology = topology
+        if preferred:
+            wanted = preferred.strip().lower()
+            for d in devices:
+                if d["name"].strip().lower() == wanted:
+                    return int(d["index"])
+        pool = [d for d in devices
+                if d["name"].strip().lower() not in demoted]
+        if not pool:
+            pool = devices  # every mic demoted — fall back to plain ranking
+        best_rank = min(self._auto_rank(d["name"]) for d in pool)
+        best = [d for d in pool if self._auto_rank(d["name"]) == best_rank]
         default_idx = self._get_default_input_index()
         if default_idx is not None:
             try:

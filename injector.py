@@ -60,6 +60,16 @@ _u32.PostMessageW.argtypes = [
 _u32.PostMessageW.restype = ctypes.wintypes.BOOL
 _u32.SendInput.restype = ctypes.c_uint
 
+# SendMessageTimeoutW carries a pointer in lParam and returns the message result
+# through an out-pointer — without explicit types both get truncated to c_int on
+# 64-bit and the read-back verification would compare garbage.
+_u32.SendMessageTimeoutW.argtypes = [
+    ctypes.wintypes.HWND, ctypes.c_uint, ctypes.wintypes.WPARAM,
+    ctypes.wintypes.LPARAM, ctypes.c_uint, ctypes.c_uint,
+    ctypes.POINTER(ctypes.c_size_t),
+]
+_u32.SendMessageTimeoutW.restype = ctypes.c_size_t
+
 # ── Clipboard-restore race guard ──────────────────────────────────────────────
 # Every clipboard write bumps a generation counter. A delayed restore only fires
 # if no newer write happened in the meantime, so a stale restore thread can never
@@ -308,6 +318,126 @@ def _get_fg_exe() -> str:
     return ""
 
 
+def _build_failure_detail(fg_exe: str, fg_class: str, method: str, chars: int,
+                          partial: bool, elevated: bool,
+                          target_hwnd: int = 0, fg_hwnd: int = 0,
+                          exception: str = "") -> dict:
+    """Structured record of WHY a final injection failed — the same facts as
+    the local inject-failures.log line, but machine-readable so the remote
+    error log can be filtered by cause (elevated target, moved foreground,
+    partial WM_CHAR, clipboard refusal)."""
+    detail = {
+        "fg_exe": fg_exe or "?",
+        "fg_class": fg_class or "",
+        "method": method,
+        "chars": int(chars),
+        "partial_direct": bool(partial),
+        "elevated_target": bool(elevated),
+    }
+    if target_hwnd and fg_hwnd and target_hwnd != fg_hwnd:
+        # The user clicked elsewhere mid-dictation — the paste gate refused
+        # rather than typing into the wrong window.
+        detail["foreground_moved"] = True
+    if exception:
+        detail["exception"] = exception[:300]
+    return detail
+
+
+# ── Post-injection read-back verification (telemetry only) ────────────────────
+
+_WM_GETTEXT = 0x000D
+_WM_GETTEXTLENGTH = 0x000E
+_SMTO_ABORTIFHUNG = 0x0002
+_VERIFY_MAX_CONTROL_CHARS = 200_000
+
+
+def _send_message_timeout(hwnd: int, msg: int, wparam: int = 0,
+                          lparam: int = 0, timeout_ms: int = 500):
+    """SendMessageTimeoutW wrapper → message result, or None when the target
+    is hung / the call failed. Never blocks longer than timeout_ms."""
+    try:
+        res = ctypes.c_size_t(0)
+        ok = _u32.SendMessageTimeoutW(
+            hwnd, msg, wparam, lparam, _SMTO_ABORTIFHUNG, timeout_ms,
+            ctypes.byref(res))
+        return int(res.value) if ok else None
+    except Exception:
+        return None
+
+
+def _control_class(hwnd: int) -> str:
+    try:
+        buf = ctypes.create_unicode_buffer(64)
+        _u32.GetClassNameW(hwnd, buf, 64)
+        return buf.value or ""
+    except Exception:
+        return ""
+
+
+def _control_style(hwnd: int) -> int:
+    try:
+        GWL_STYLE = -16
+        return int(_u32.GetWindowLongW(hwnd, GWL_STYLE))
+    except Exception:
+        return 0
+
+
+def _read_control_text(hwnd: int, length: int):
+    """Text of a classic Edit/RichEdit control via WM_GETTEXT (None on failure)."""
+    try:
+        buf = ctypes.create_unicode_buffer(length + 1)
+        copied = _send_message_timeout(
+            hwnd, _WM_GETTEXT, length + 1, ctypes.addressof(buf))
+        if copied is None:
+            return None
+        return buf.value
+    except Exception:
+        return None
+
+
+def verify_text_landed(child_hwnd: int, text: str):
+    """Best-effort post-injection check: did *text* actually appear in the
+    target control? Returns True/False only for classic Edit/RichEdit controls
+    (the only ones that honestly answer WM_GETTEXT); None = unverifiable —
+    browsers, Word, and custom editors don't expose content this way, and a
+    None must never be treated as a failure.
+
+    Telemetry only: the caller must NEVER re-inject on False — if the check is
+    wrong (an autocorrect rewrote the text), a re-send would duplicate it.
+    """
+    try:
+        if not child_hwnd or not text or not text.strip():
+            return None
+        if not _u32.IsWindow(child_hwnd):
+            return None
+        cls = _control_class(child_hwnd).lower()
+        if "edit" not in cls:  # Edit, RichEdit20W, RICHEDIT50W, …
+            return None
+        ES_PASSWORD = 0x0020
+        if _control_style(child_hwnd) & ES_PASSWORD:
+            return None  # masked content — unreadable by design
+        length = _send_message_timeout(child_hwnd, _WM_GETTEXTLENGTH)
+        if length is None or length > _VERIFY_MAX_CONTROL_CHARS:
+            return None  # hung target or huge document — don't stall the app
+        expected = " ".join(text.split())
+        if not expected:
+            return None
+        if length <= 0:
+            # Ambiguous, NOT a failure: chat/command inputs clear themselves
+            # when the user presses Enter within the settle window — treating
+            # that as a false success would flood the log with phantoms.
+            return None
+        content = _read_control_text(child_hwnd, length)
+        if content is None:
+            return None
+        # Compare whitespace-normalised (WM_CHAR turned \n into \r, the control
+        # renders \r\n) and only the tail — the control may hold prior content.
+        tail = expected[-60:]
+        return tail in " ".join(content.split())
+    except Exception:
+        return None
+
+
 def _log_inject_failure(detail: str) -> None:
     """Append one line to a small rolling failure log. The frozen exe has no
     console, so this file is the only way a 'text never landed' report from
@@ -494,6 +624,11 @@ class Injector:
         self.method = m if m in {"clipboard", "keystrokes", "auto"} else "clipboard"
         self._lock = threading.Lock()
         self._partial_direct = False  # set when a direct inject partially landed
+        # Diagnostics for the fleet error log: why the last final inject()
+        # failed (structured dict, None while it hasn't), and which transport
+        # actually landed the last successful injection.
+        self.last_failure: dict | None = None
+        self.last_method: str = ""
         # Capture target for the CURRENT final injection. Set by inject() and
         # read by _clipboard_paste (foreground gate) and _direct_inject (stored
         # child WM_CHAR). 0 outside a final inject — the streaming path never
@@ -522,6 +657,8 @@ class Injector:
             return False
         with self._lock:
             self._partial_direct = False
+            self.last_failure = None
+            self.last_method = ""
             self._target_hwnd = int(target_hwnd or 0)
             self._target_child = int(target_child or 0)
             try:
@@ -537,15 +674,26 @@ class Injector:
                     else:
                         print("[Injector] Retry also failed.")
                 if not result:
-                    # Hard failure: capture WHY in the rolling field log so a
-                    # "text never landed" report from any device is diagnosable.
+                    # Hard failure: capture WHY in the rolling field log (and a
+                    # structured copy for the remote error log) so a "text never
+                    # landed" report from any device is diagnosable.
+                    elevated = foreground_is_elevated_blocked()
+                    fg_now = 0
+                    try:
+                        fg_now = _u32.GetForegroundWindow()
+                    except Exception:
+                        pass
+                    self.last_failure = _build_failure_detail(
+                        _get_fg_exe(), _get_fg_class(), self.method, len(text),
+                        self._partial_direct, elevated,
+                        target_hwnd=self._target_hwnd, fg_hwnd=fg_now)
                     detail = (
                         f"target={_get_fg_exe() or '?'} class={_get_fg_class()!r} "
                         f"method={self.method} chars={len(text)}"
                         + (" partial-direct (no paste retry)"
                            if self._partial_direct else "")
                         + (" ELEVATED-TARGET (run FTC Whisper as admin)"
-                           if foreground_is_elevated_blocked() else "")
+                           if elevated else "")
                     )
                     print(f"[Injector] FAILED: {detail}")
                     _log_inject_failure(detail)
@@ -731,6 +879,7 @@ class Injector:
                 method = "SendInput/VK_PACKET (fallback)"
 
         if ok:
+            self.last_method = method
             print(f"[Injector] {len(text)} chars via {method} (class={cls!r})")
             return True
 
@@ -960,6 +1109,7 @@ class Injector:
                     print("[Injector] Foreground window is elevated — run FTC Whisper as admin to type into it.")
                 return False
 
+            self.last_method = "clipboard"
             print(f"[Injector] Clipboard paste {len(text)} chars.")
             return True
 
@@ -1000,6 +1150,7 @@ class Injector:
             if sent != 6:
                 print(f"[Injector] Terminal Ctrl+Shift+V blocked (sent={sent}/6)")
                 return False
+            self.last_method = "terminal-paste"
             print(f"[Injector] Terminal Ctrl+Shift+V paste {len(text)} chars.")
             return True
 
