@@ -289,6 +289,36 @@ class FloatingPopup:
             # Use lambda — avoids tkinter after() quirks with boolean positional args
             self.root.after(0, lambda: self._enter_status_mode(text, recording))
 
+    def flash_status(
+        self,
+        text: str,
+        hwnd: int = 0,
+        cursor_x: int = 0,
+        cursor_y: int = 0,
+        ms: int = 1800,
+    ) -> None:
+        """Show a transient status label, then auto-hide it. Used for one-off
+        notices like 'No text selected'. Stamp-guarded so a newer popup (a real
+        dictation / refine that starts within the window) is never hidden by this
+        timer."""
+        self.show_status(text, hwnd=hwnd, recording=False,
+                         cursor_x=cursor_x, cursor_y=cursor_y)
+        if not self.root:
+            return
+
+        def _schedule() -> None:
+            stamp = self._status_entered
+
+            def _maybe_hide(s=stamp) -> None:
+                if self._mode == "status" and self._status_entered == s:
+                    self._do_hide()
+
+            self.root.after(ms, _maybe_hide)
+
+        # _status_entered is stamped inside _enter_status_mode (queued by
+        # show_status via after(0)); read it there, after that has run.
+        self.root.after(0, _schedule)
+
     def set_status_text(self, text: str) -> None:
         """Update the status pill label in place, no re-layout. Used to flip
         the honest 'Starting…' cue to 'Recording' once the mic stream is
@@ -1517,6 +1547,12 @@ class FloatingPopup:
     # ── AI refinement ──────────────────────────────────────────────────────────
 
     def _run_ai(self, mode: str) -> None:
+        if not (self._original_text or "").strip():
+            # No source text (e.g. the selection capture came back empty). Never
+            # call the model with nothing — it replies "please provide the text".
+            self._ai_status.configure(text="⚠  No text to refine. Select text, then press your refine hotkey")
+            self._ai_status.pack(anchor="w")
+            return
         if not self._ai_refiner or not self._ai_refiner.is_available:
             self._ai_status.configure(text="⚠  Set anthropic_api_key in config to enable AI")
             self._ai_status.pack(anchor="w")
@@ -1542,6 +1578,12 @@ class FloatingPopup:
         instruction = "" if self._ask_showing_placeholder else self._ask_entry.get("1.0", "end-1c").strip()
         if not instruction:
             self._ai_status.configure(text="⚠  Type an instruction first")
+            self._ai_status.pack(anchor="w")
+            return
+        if not (self._original_text or "").strip():
+            # No source text captured — refining nothing makes the model reply
+            # "please provide the text". Tell the user to select text instead.
+            self._ai_status.configure(text="⚠  No text to refine. Select text, then press your refine hotkey")
             self._ai_status.pack(anchor="w")
             return
         if not self._ai_refiner or not self._ai_refiner.is_available:

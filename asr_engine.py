@@ -114,6 +114,45 @@ def download_model(
         return False
 
 
+# Coordinating conjunctions: after a full stop in dictated speech these are
+# almost always a pause artefact, not a real new sentence ("I did it. And then"
+# was one thought said with a breath in the middle). "Because"/"That"/"Which"
+# are deliberately excluded — they legitimately open sentences.
+_PAUSE_CONJUNCTIONS = ("And", "But", "So", "Or", "Nor", "Yet")
+_CONJ_AFTER_STOP = re.compile(
+    r"\.\s+(" + "|".join(_PAUSE_CONJUNCTIONS) + r")\b"
+)
+# A full stop followed by a lowercase word: no English sentence starts
+# lowercase, so the stop is a pause the model mis-heard as a boundary
+# ("would actually be. inserted"). Require >=2 letters before the stop so
+# single-letter abbreviations (i.e., e.g., a.m.) are left alone.
+_STOP_BEFORE_LOWER = re.compile(r"([a-z]{2,})\.\s+([a-z])")
+
+
+def fix_pause_punctuation(text: str) -> str:
+    """Remove the sentence breaks Parakeet stamps at mid-sentence pauses.
+
+    Only the two unambiguous cases are touched, so a real sentence boundary is
+    never merged:
+      * ". <lowercase>"  -> " <lowercase>"     (a stop can't precede lowercase)
+      * ". And/But/So/…" -> ", and/but/so/…"   (coordinating conj. after a stop)
+
+    Capitalised non-conjunction artefacts (". Name", ". That") are left for the
+    LLM correction pass, which can read the context. Punctuation is only ever
+    downgraded, never invented, and no words change."""
+    if not text:
+        return text
+    # ". And" -> ", and": a comma is the correct join for a clause continuation.
+    text = _CONJ_AFTER_STOP.sub(lambda m: ", " + m.group(1).lower(), text)
+    # ". inserted" -> " inserted": drop the spurious stop, keep the word.
+    text = _STOP_BEFORE_LOWER.sub(r"\1 \2", text)
+    # Tidy any artefacts a drop left behind (", ." / " ,." / doubled spaces).
+    text = re.sub(r"\s+,\s*\.", ".", text)
+    text = re.sub(r",\s*\.", ".", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text
+
+
 class ParakeetTranscriber:
     """Drop-in fast transcriber with the same call surface as Transcriber.
 
@@ -354,12 +393,17 @@ class ParakeetTranscriber:
         text = (text or "").strip()
         if not text:
             return ""
-        if text[0].islower():
+        if self.auto_punctuate:
+            # Kill the mid-sentence sentence-breaks Parakeet stamps at pauses
+            # BEFORE fixing the leading capital / terminal stop, so a dropped
+            # boundary can't leave a stray capital behind.
+            text = fix_pause_punctuation(text)
+        if text and text[0].islower():
             text = text[0].upper() + text[1:]
         if self.auto_punctuate:
             # A trailing comma/semicolon/colon is a pause artefact. Replace it,
             # never stack — appending after it shipped ",." endings.
-            if text[-1] in ",;:":
+            if text and text[-1] in ",;:":
                 text = text[:-1].rstrip()
             if text and text[-1] not in ".!?":
                 text += "."

@@ -244,6 +244,14 @@ def icon_glyph(master, name: str, size: int = 20, color: str = "#f39200",
             L((7.8, 10.2), (12, 14.4))
             L((16.2, 10.2), (12, 14.4))
             L((5, 16.5), (5, 19.5), (19, 19.5), (19, 16.5))
+        elif name == "clipboard":
+            # clipboard body + top clip + two text lines — copy to clipboard
+            d.rounded_rectangle([6 * u, 5.5 * u, 18 * u, 20 * u],
+                                radius=2 * u, outline=color, width=lw)
+            d.rounded_rectangle([9.5 * u, 3.6 * u, 14.5 * u, 7 * u],
+                                radius=1.2 * u, outline=color, width=lw)
+            L((9, 12), (15, 12))
+            L((9, 15.5), (15, 15.5))
         else:
             raise ValueError(f"unknown glyph {name!r}")
 

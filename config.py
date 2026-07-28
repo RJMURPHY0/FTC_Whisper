@@ -87,6 +87,7 @@ class Config:
     trim_silence: bool = True  # Drop fully-silent committed chunks (no words transcribed) from the stored clip to save local disk
     trailing_space: bool = False  # Append a space after each injection (useful when dictating mid-sentence)
     auto_enter: bool = False      # Press Enter after injection (useful for chat/search boxes)
+    copy_to_clipboard: bool = False  # Also leave every dictation on the clipboard so a manual Ctrl+V pastes it if injection landed in the wrong place (or not at all)
     toggle_timeout: int = 0       # Seconds before auto-stopping in toggle mode (0 = disabled; long dictation must not be cut off)
     max_recording_duration: int = 0  # Hard cap on recording length in seconds (0 = unlimited)
     # Dashboard window size per signed-in account: {email_lower: "WxH"}.

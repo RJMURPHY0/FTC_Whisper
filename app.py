@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.36"
+APP_VERSION = "1.6.37"
 
 
 class _RECT(ctypes.Structure):
@@ -1385,6 +1385,23 @@ class WhisperFlowApp:
                 time.sleep(0.05)
                 kb.send("enter")
 
+            # Keep the dictation on the clipboard for a manual Ctrl+V fallback,
+            # if the user enabled it. Runs AFTER injection so it wins: a
+            # clipboard-paste injection schedules a ~1.5s restore of the user's
+            # old clipboard, but _clipboard_set bumps the clip generation, which
+            # supersedes that pending restore — so the dictated text stays put.
+            # Direct-inject paths never touch the clipboard, so this is the only
+            # writer there. Fires whether injection succeeded or not: the whole
+            # point is a paste to fall back on when the text landed in the wrong
+            # box (or nowhere).
+            if getattr(self.config, "copy_to_clipboard", False) and transcribed_text:
+                try:
+                    from injector import Injector
+                    Injector._clipboard_set(_text_to_inject)
+                    print("[App] Dictation left on clipboard for manual Ctrl+V")
+                except Exception as e:
+                    print(f"[App] Copy-to-clipboard failed (non-fatal): {e}")
+
             self.feedback.transcription_complete(transcribed_text)
             # Impact stats: count this dictation for the signed-in account.
             # total_samples is the monotonic capture length; voiced_seconds is
@@ -2124,7 +2141,23 @@ class WhisperFlowApp:
             )
 
     def _on_refine_selection(self) -> None:
-        """Fires when the refine-selection hotkey is pressed."""
+        """Fires when the refine-selection hotkey is pressed.
+
+        Copies the user's current selection into our own buffer, then opens the
+        refine panel on it. The capture has to survive the two things that used
+        to break it on browser / Electron targets (where the old WM_COPY-first
+        path silently returned nothing, so the panel then asked the AI to refine
+        an empty string):
+
+          1. The hotkey chord (e.g. Alt+R) leaves Alt PHYSICALLY DOWN when this
+             fires, so a raw Ctrl+C SendInput is read by the OS as Ctrl+Alt+C and
+             copies nothing. We force every modifier up first (_release_modifiers).
+          2. WM_COPY is a no-op for Chromium / Gecko render widgets, so we ALSO
+             send a clean Ctrl+C and wait on the clipboard SEQUENCE NUMBER (not a
+             fixed sleep) to know the copy actually landed.
+
+        The user's own clipboard is saved and restored so refining never eats it.
+        """
         try:
             if self.hotkey_manager.state != AppState.IDLE:
                 return
@@ -2139,36 +2172,70 @@ class WhisperFlowApp:
             cx, cy = pt.x, pt.y
 
             self._focus_window(hwnd)
-            time.sleep(0.1)
+            time.sleep(0.05)
 
-            from injector import _Input, _KbdInput, _INPUT_KEYBOARD, _KEYEVENTF_KEYUP, _u32, _get_focused_child
+            from injector import (
+                _Input, _KbdInput, _INPUT_KEYBOARD, _KEYEVENTF_KEYUP,
+                _get_focused_child, _release_modifiers, Injector,
+            )
             u32 = ctypes.windll.user32
+            u32.GetClipboardSequenceNumber.restype = ctypes.wintypes.DWORD
 
-            if _u32.OpenClipboard(None):
-                _u32.EmptyClipboard()
-                _u32.CloseClipboard()
+            # Preserve whatever the user had copied. Refining a selection must
+            # never silently eat their clipboard.
+            original_clip = self._read_clipboard()
+            seq0 = u32.GetClipboardSequenceNumber()
 
+            # The chord modifier (Alt / Ctrl / Shift / Win) may still be held; a
+            # Ctrl+C sent while Alt is down is Ctrl+Alt+C and copies nothing.
+            _release_modifiers()
+
+            # Native controls answer WM_COPY; browsers ignore it. Send both.
             WM_COPY = 0x0301
             child = _get_focused_child(hwnd)
-            u32.SendMessageW(child, WM_COPY, 0, 0)
-            time.sleep(0.15)
-            text = self._read_clipboard().strip()
+            if child:
+                u32.SendMessageW(child, WM_COPY, 0, 0)
 
-            if not text:
-                VK_CTRL, VK_C = 0x11, 0x43
-                ctrl_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL))
-                c_dn    = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_C))
-                c_up    = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_C, dwFlags=_KEYEVENTF_KEYUP))
-                ctrl_up = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL, dwFlags=_KEYEVENTF_KEYUP))
-                u32.SendInput(4, (_Input * 4)(ctrl_dn, c_dn, c_up, ctrl_up), ctypes.sizeof(_Input))
-                for _ in range(10):
-                    time.sleep(0.05)
-                    text = self._read_clipboard().strip()
-                    if text:
+            VK_CTRL, VK_C = 0x11, 0x43
+            ctrl_dn = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL))
+            c_dn    = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_C))
+            c_up    = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_C, dwFlags=_KEYEVENTF_KEYUP))
+            ctrl_up = _Input(type=_INPUT_KEYBOARD, ki=_KbdInput(wVk=VK_CTRL, dwFlags=_KEYEVENTF_KEYUP))
+            u32.SendInput(4, (_Input * 4)(ctrl_dn, c_dn, c_up, ctrl_up), ctypes.sizeof(_Input))
+
+            # Poll the clipboard sequence number: the copy has landed only once
+            # the clipboard actually changes. Up to ~750ms, then give up.
+            text = ""
+            for _ in range(30):
+                time.sleep(0.025)
+                if u32.GetClipboardSequenceNumber() != seq0:
+                    candidate = self._read_clipboard().strip()
+                    if candidate:
+                        text = candidate
                         break
 
+            # Put the user's clipboard back (bump=False so the restore is not
+            # mistaken for a fresh paste by the delayed-restore guard).
+            try:
+                Injector._clipboard_set(original_clip, bump=False)
+            except Exception:
+                pass
+
             if not text:
+                # Nothing selected, or the app blocked the copy. Tell the user
+                # instead of opening the panel on an empty string (which used to
+                # make the AI reply "please provide the text to refine").
+                print("[App] Refine selection: no text captured (nothing selected or copy blocked).")
+                try:
+                    self.popup.flash_status(
+                        "No text selected. Highlight text first",
+                        hwnd=hwnd, cursor_x=cx, cursor_y=cy,
+                    )
+                except Exception:
+                    pass
                 return
+
+            print(f"[App] Refine selection: captured {len(text)} chars.")
 
             def _do_replace(new_text: str, _hwnd: int = hwnd) -> None:
                 time.sleep(0.25)

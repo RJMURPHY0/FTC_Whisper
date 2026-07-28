@@ -4152,6 +4152,10 @@ class AppWindow:
                      "Show the Insert / Replace / Upgrade icon near the cursor "
                      "after each dictation (it still appears if injection fails)",
                      True, icon="wand")
+        _toggle_card("copy_to_clipboard", "Copy to Clipboard",
+                     "Also leave every dictation on the clipboard, so you can "
+                     "paste it with Ctrl+V if the text landed in the wrong place",
+                     False, icon="clipboard")
 
         # ── Live typing ───────────────────────────────────────────────────────
         _section("keyboard", "Live Typing")
