@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.39"
+APP_VERSION = "1.6.40"
 
 
 class _RECT(ctypes.Structure):
@@ -553,6 +553,10 @@ class WhisperFlowApp:
         # Check for updates in the background; show banner in Settings if found
         self._start_update_check()
 
+        # Watch for system-wide memory exhaustion (Tk paints fail with a
+        # modal CreateDIBSection error box when the machine runs dry)
+        self._start_memory_guard()
+
         # If this launch is the first run of a new version, toast it
         self._announce_update_if_any()
 
@@ -601,6 +605,37 @@ class WhisperFlowApp:
         threading.Thread(
             target=_check_loop, daemon=True, name="update-check-loop"
         ).start()
+
+    def _start_memory_guard(self) -> None:
+        from memory_guard import MemoryGuard
+
+        def _trim_caches():
+            # Regenerate-on-demand caches only. PhotoImage caches stay: a
+            # cleared image still displayed on a canvas blanks that widget.
+            try:
+                import app_icons
+                app_icons._raw_icon_cache.clear()
+            except Exception:
+                pass
+            try:
+                cache = getattr(self.app_window, "_hist_elide_cache", None)
+                if cache:
+                    cache.clear()
+            except Exception:
+                pass
+
+        def _report(detail: dict) -> None:
+            self._log_error_event("memory_pressure", detail)
+
+        def _busy() -> bool:
+            try:
+                return self.hotkey_manager.state != AppState.IDLE
+            except Exception:
+                return False
+
+        self._memory_guard = MemoryGuard(
+            trims=[_trim_caches], on_pressure=_report, is_busy=_busy)
+        self._memory_guard.start()
 
     def _start_auto_update(self, version: str, url: str) -> None:
         """Download + install *version* in the background, restarting only once

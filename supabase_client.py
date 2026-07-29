@@ -207,7 +207,7 @@ class SupabaseLogger:
         missing table, RLS block, or outage is swallowed.
 
         event_type ∈ {"inject_failed","inject_false_success","mic_silent",
-                      "mic_switched","transcribe_empty"}.
+                      "mic_switched","transcribe_empty","memory_pressure"}.
         detail: dict → stored as jsonb; anything else → {"message": str}.
         transcription_created_at links the event to its transcriptions row.
         """
