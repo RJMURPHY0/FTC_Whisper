@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.38"
+APP_VERSION = "1.6.39"
 
 
 class _RECT(ctypes.Structure):
@@ -94,6 +94,49 @@ def _capture_focus_target(hwnd: int) -> tuple[int, tuple[int, int]]:
         return child, caret
     except Exception:
         return 0, (0, 0)
+
+
+# Focused-control class names whose windows reliably accept injected text, and
+# browser render-widget classes (browsers host DOM inputs Win32 can't see, but
+# are the most common dictation target). Matched case-insensitively as substrings.
+_EDITABLE_CLASS_HINTS = ("edit", "richedit", "scintilla", "textbox", "_wwg")
+_BROWSER_FOCUS_HINTS = ("chrome_widgetwin", "chrome_render", "mozilla", "cef-")
+
+
+def _looks_editable(caret: tuple[int, int], child_class: str,
+                    top_class: str) -> bool:
+    """Best-effort: can typed text land in the currently focused control?
+
+    A visible caret (a blinking insertion point) is the strongest evidence — it
+    only exists in an editable text field. Known edit-control class names and
+    browser render widgets also qualify. Used at stop time to decide whether to
+    redirect the injection to the box the user is actually focused on: they may
+    have clicked into it mid-speech, or moved from one field to another."""
+    if caret and (caret[0] or caret[1]):
+        return True
+    cc = (child_class or "").lower()
+    tc = (top_class or "").lower()
+    if any(h in cc for h in _EDITABLE_CLASS_HINTS):
+        return True
+    if any(h in cc for h in _BROWSER_FOCUS_HINTS) or \
+            any(h in tc for h in _BROWSER_FOCUS_HINTS):
+        return True
+    return False
+
+
+def _choose_inject_target(start_hwnd: int, start_child: int,
+                          live_hwnd: int, live_child: int,
+                          live_editable: bool) -> tuple[int, int, bool]:
+    """(hwnd, child, is_live_focus) — where a finished dictation should land.
+
+    Prefer the live-focused control when it can take text (the user may have
+    clicked into it during dictation); otherwise keep the start capture so a
+    stray click on non-editable space never strands the dictation. is_live_focus
+    True means the live foreground already owns an insertable control, so no
+    focus-restore dance is needed — the user's own click put focus there."""
+    if live_hwnd and live_editable:
+        return live_hwnd, live_child, True
+    return start_hwnd, start_child, False
 
 
 class WhisperFlowApp:
@@ -1286,6 +1329,43 @@ class WhisperFlowApp:
                 fg_now = ctypes.windll.user32.GetForegroundWindow()
             except Exception:
                 pass
+
+            _rec_child = getattr(self, "_recording_child", 0)
+
+            # ── Dynamic injection re-targeting ──────────────────────────────
+            # The target is captured at record START, but the user may not have
+            # clicked into a text box until DURING dictation — or may have moved
+            # from one field into another. Re-read the live focus now and, if it
+            # points at a control that can actually take text, send the dictation
+            # THERE instead of the stale start capture. If the live foreground is
+            # somewhere text can't go (a click on empty space or a button) keep
+            # the start capture, so a stray click never strands the text. Live
+            # Typing is exempt: its words already streamed into the start target
+            # as the user spoke, so retargeting would strand them.
+            _target_is_live_focus = False
+            _live_typing = session is not None and self._live_inject_active
+            if not _live_typing and fg_now:
+                try:
+                    live_child, live_caret = _capture_focus_target(fg_now)
+                    live_editable = _looks_editable(
+                        live_caret,
+                        self._get_window_class(live_child),
+                        self._get_window_class(fg_now))
+                    _new_hwnd, _new_child, _target_is_live_focus = \
+                        _choose_inject_target(hwnd, _rec_child,
+                                              fg_now, live_child, live_editable)
+                    if _target_is_live_focus and (
+                            _new_hwnd != hwnd or _new_child != _rec_child):
+                        print(f"[App] Inject retarget: start hwnd={hwnd:#x} "
+                              f"child={_rec_child:#x} -> live hwnd={_new_hwnd:#x} "
+                              f"child={_new_child:#x}")
+                        # The live control drives the browser DOM-focus click too,
+                        # if it's ever needed — keep the caret consistent with it.
+                        self._recording_caret = live_caret
+                    hwnd, _rec_child = _new_hwnd, _new_child
+                except Exception as e:
+                    print(f"[App] Inject retarget check failed (non-fatal): {e}")
+
             # In hold mode the user's hand is on the hotkey — they can't have
             # clicked elsewhere. In toggle mode, require the mouse to be where
             # it was at recording start: a click inside the same browser window
@@ -1301,9 +1381,13 @@ class WhisperFlowApp:
                     ) < 4
                 except Exception:
                     same_cursor = False
-            focus_unchanged = bool(hwnd) and fg_now == hwnd and same_cursor
+            # When the live foreground already owns an insertable control (the
+            # user's most-recent click put focus there) focus is already correct
+            # — skip the SetForegroundWindow dance AND the browser DOM-focus
+            # click. Otherwise fall back to the start-capture focus contract.
+            focus_unchanged = _target_is_live_focus or (
+                bool(hwnd) and fg_now == hwnd and same_cursor)
 
-            _rec_child = getattr(self, "_recording_child", 0)
             if not focus_unchanged:
                 self._focus_window(hwnd, child=_rec_child)
 
