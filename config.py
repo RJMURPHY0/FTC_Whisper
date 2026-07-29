@@ -84,6 +84,7 @@ class Config:
     auto_paragraphs: bool = True  # Paragraph break after a clear pause (2s+ silence following a finished sentence); Parakeet path, off during Live Typing
     parakeet_version: str = "v2"  # Parakeet model: "v2" (English) or "v3" (multilingual, lower WER); switching triggers a one-time ~660 MB download
     show_popup: bool = True  # Show the cursor-icon popup (Insert/Replace/Upgrade) after each dictation; off = text is injected silently with no popup
+    popup_height: str = "low"  # Vertical position of the popup: "low" (near the taskbar, default — out of the way of chatbot input boxes), "medium" (mid-screen), or "high" (near the top, above a chatbot window)
     trim_silence: bool = True  # Drop fully-silent committed chunks (no words transcribed) from the stored clip to save local disk
     trailing_space: bool = False  # Append a space after each injection (useful when dictating mid-sentence)
     auto_enter: bool = False      # Press Enter after injection (useful for chat/search boxes)
@@ -268,6 +269,10 @@ class Config:
                 # is how the first word survives stream-open latency, so a
                 # config that disabled it via the old toggle migrates back on.
                 config.warm_mic = True
+                # Popup height must be a known preset; coerce anything else back
+                # to the default so a stray value never breaks _reposition().
+                if config.popup_height not in ("low", "medium", "high"):
+                    config.popup_height = "low"
             except (json.JSONDecodeError, IOError) as e:
                 # Reset-to-defaults fallback (kept) — but never silently:
                 # preserve the bad file and flag the reset so app.py can show

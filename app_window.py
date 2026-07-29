@@ -4256,6 +4256,49 @@ class AppWindow:
                      "Show the Insert / Replace / Upgrade icon near the cursor "
                      "after each dictation (it still appears if injection fails)",
                      True, icon="wand")
+
+        # Popup vertical position — where the popup sits on screen. Low keeps it
+        # near the taskbar, out of the way of a chatbot's input box; High lifts
+        # it above the chat window. Applies live, no restart.
+        _height_card = self._card(parent, margin=(0, 4))
+        _height_top = tk.Frame(_height_card, bg=C["surface"]); _height_top.pack(fill="x")
+        _card_icon(_height_top, "wand")
+        _height_col = tk.Frame(_height_top, bg=C["surface"])
+        _height_col.pack(side="left", fill="x", expand=True)
+        tk.Label(_height_col, text="Popup Position", fg=C["text"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(anchor="w")
+        _height_desc = tk.Label(
+            _height_col,
+            text="How high the popup appears. Low keeps it near the taskbar and "
+                 "clear of chatbot input boxes; High lifts it above the chat window.",
+            fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 8),
+            anchor="w", justify="left", wraplength=260)
+        _height_desc.pack(fill="x")
+        self._autowrap(_height_desc)
+
+        _HEIGHT_LABELS = {"low": "Low — near the taskbar",
+                          "medium": "Medium — mid-screen",
+                          "high": "High — above the chat window"}
+        _HEIGHT_FROM_LABEL = {v: k for k, v in _HEIGHT_LABELS.items()}
+        _cur_height = (getattr(cfg, "popup_height", "low") if cfg else "low")
+        if _cur_height not in _HEIGHT_LABELS:
+            _cur_height = "low"
+        _height_var = tk.StringVar(value=_HEIGHT_LABELS[_cur_height])
+        _height_menu = tk.OptionMenu(_height_card, _height_var, *_HEIGHT_LABELS.values())
+        _height_menu.configure(bg=C["surface_hover"], fg=C["text"], relief="flat",
+                               font=("Segoe UI", 9), anchor="w", highlightthickness=0,
+                               activebackground=C["accent"], activeforeground=C["bg"])
+        _height_menu["menu"].configure(bg=C["surface"], fg=C["text"],
+                                       activebackground=C["accent"], activeforeground=C["bg"],
+                                       font=("Segoe UI", 9))
+        _height_menu.pack(fill="x", pady=(6, 0))
+
+        def _on_height_change(*_a):
+            if self._on_settings_change:
+                self._on_settings_change(
+                    "popup_height", _HEIGHT_FROM_LABEL.get(_height_var.get(), "low"))
+        _height_var.trace_add("write", _on_height_change)
+
         _toggle_card("copy_to_clipboard", "Copy to Clipboard",
                      "Also leave every dictation on the clipboard, so you can "
                      "paste it with Ctrl+V if the text landed in the wrong place",

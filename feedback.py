@@ -85,16 +85,20 @@ def _get_sound(name: str) -> bytes:
     (callers are daemon threads), ~1ms of pure-python sine maths."""
     if name not in _SOUND_CACHE:
         recipes = {
-            # Matched to the Glaido chime pair (measured from its assets:
-            # ~80ms rise 304→456 Hz / ~95ms fall 445→286 Hz, peak ≈0.15).
+            # Low, warm chime pair. Psychoacoustics: perceived annoyance climbs
+            # steeply with pitch (≈3/10 at 350 Hz vs ≈7/10 at 2 kHz), and the
+            # ear's harsh band is 2–5 kHz. So the whole figure sits low, around
+            # G3–D4 (196–294 Hz) — clearly audible on laptop speakers but calm,
+            # not the piercing rise the old 304→456 Hz pair read as. Volume is
+            # also eased back so "recording started" is a gentle cue, not a ping.
             # start: one soft low rising glide — "listening"
-            "start": _glide(304, 456, 80),
+            "start": _glide(196, 294, 95, volume=0.13, peak_frac=0.45),
             # stop: the falling mirror — "got it"
-            "stop": _glide(445, 286, 95, peak_frac=0.55),
-            # done: a single very soft tap in the same register
-            "done": _glide(440, 452, 55, volume=0.09),
+            "stop": _glide(300, 196, 105, volume=0.13, peak_frac=0.55),
+            # done: a single very soft tap in the same low register
+            "done": _glide(262, 268, 55, volume=0.08),
             # error: one low, quiet buzz — noticeable, not alarming
-            "error": _tone(233, 220, volume=0.20),
+            "error": _tone(196, 220, volume=0.18),
         }
         _SOUND_CACHE[name] = _wav_bytes(recipes[name])
     return _SOUND_CACHE[name]

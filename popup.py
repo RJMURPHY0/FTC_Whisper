@@ -232,6 +232,7 @@ class FloatingPopup:
         self._inserted_ok: bool = True
         self._ai_busy: bool = False
         self._popup_hwnd: int = 0
+        self._popup_height: str = "low"  # "low" | "medium" | "high" — vertical placement of the fixed popup
         self._upgrading: bool = False
         self._upgrade_result: Optional[str] = None
 
@@ -257,6 +258,12 @@ class FloatingPopup:
 
     def set_ai_refiner(self, refiner) -> None:
         self._ai_refiner = refiner
+
+    def set_popup_height(self, value: str) -> None:
+        """Vertical placement of the fixed popup: "low" (near the taskbar,
+        default), "medium" (mid-screen) or "high" (near the top). Applies to the
+        next _reposition — no restart needed."""
+        self._popup_height = value if value in ("low", "medium", "high") else "low"
 
     def set_voice_prompt_callback(self, fn) -> None:
         self._voice_prompt_fn = fn
@@ -1741,9 +1748,19 @@ class FloatingPopup:
             y_b = round(cy * sy) + gap
             y   = y_b if y_b + h <= bottom else max(top, round(cy * sy) - h - gap)
         else:
-            # Fixed bottom-centre of whichever monitor the cursor is on.
+            # Fixed, horizontally centred on whichever monitor the cursor is on.
+            # Vertical placement follows the user's popup_height preference so it
+            # can sit out of the way of a chatbot's input box (low, default) or
+            # up above the chat window (high).
             x = left + (right - left - w) // 2
-            y = bottom - h - 60   # 60 px above the taskbar
+            if self._popup_height == "high":
+                y = top + 90
+            elif self._popup_height == "medium":
+                y = top + (bottom - top - h) // 2
+            else:  # "low" (default) — sit close to the taskbar, clear of chat inputs
+                y = bottom - h - 24
+            # Never let a preset push the popup off the work-area.
+            y = max(top, min(y, bottom - h))
         self.root.geometry(f"+{x}+{y}")
         # Flush the position to the window BEFORE the caller deiconifies it, so it
         # never maps at the old/0,0 spot for a frame (top-left black-box flash).

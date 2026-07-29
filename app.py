@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.40"
+APP_VERSION = "1.6.41"
 
 
 class _RECT(ctypes.Structure):
@@ -210,6 +210,7 @@ class WhisperFlowApp:
 
         self.popup = FloatingPopup()
         self.popup.set_ai_refiner(self.ai_refiner)
+        self.popup.set_popup_height(getattr(self.config, "popup_height", "low"))
         self.popup.set_voice_prompt_callback(
             lambda audio, rate, blocking=True: self._fast_engine().transcribe(audio, rate, blocking=blocking)
         )
@@ -920,6 +921,8 @@ class WhisperFlowApp:
             self._apply_model_change(value)
         elif key == "sound_feedback":
             self.feedback.sound_enabled = bool(value)
+        elif key == "popup_height":
+            self.popup.set_popup_height(value)
         elif key == "openrouter_model":
             self.ai_refiner.openrouter_model = (value or "").strip() or self.ai_refiner.openrouter_model
         elif key == "auto_punctuate":
