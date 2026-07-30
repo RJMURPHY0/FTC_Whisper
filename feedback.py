@@ -85,20 +85,23 @@ def _get_sound(name: str) -> bytes:
     (callers are daemon threads), ~1ms of pure-python sine maths."""
     if name not in _SOUND_CACHE:
         recipes = {
-            # Low, warm chime pair. Psychoacoustics: perceived annoyance climbs
-            # steeply with pitch (≈3/10 at 350 Hz vs ≈7/10 at 2 kHz), and the
-            # ear's harsh band is 2–5 kHz. So the whole figure sits low, around
-            # G3–D4 (196–294 Hz) — clearly audible on laptop speakers but calm,
-            # not the piercing rise the old 304→456 Hz pair read as. Volume is
-            # also eased back so "recording started" is a gentle cue, not a ping.
-            # start: one soft low rising glide — "listening"
-            "start": _glide(196, 294, 95, volume=0.13, peak_frac=0.45),
-            # stop: the falling mirror — "got it"
-            "stop": _glide(300, 196, 105, volume=0.13, peak_frac=0.55),
-            # done: a single very soft tap in the same low register
-            "done": _glide(262, 268, 55, volume=0.08),
+            # Soft, low, pure sine tones — deliberately NOT glides. The earlier
+            # rising glide plus its second harmonic (energy up to ~590 Hz) still
+            # read as a bright chirp; a rising move also feels alerting. These
+            # are single warm sines low in the bass (F3/D3, ~147–175 Hz) at a
+            # low volume with a long fade, so recording start/stop is a quiet,
+            # rounded cue rather than a ping. Psychoacoustics: perceived
+            # annoyance climbs steeply with pitch and the ear's harsh band is
+            # 2–5 kHz, so staying this low keeps it unobtrusive. Start sits a
+            # touch above stop, giving a gentle fall (settle), not a rise.
+            # start: soft low tone — "listening"
+            "start": _tone(174.6, 120, volume=0.10, fade_ms=28.0),
+            # stop: a touch lower — "got it" (gentle fall from start)
+            "stop": _tone(146.8, 135, volume=0.10, fade_ms=32.0),
+            # done: a single very soft, short tap in the same low register
+            "done": _tone(174.6, 60, volume=0.06, fade_ms=18.0),
             # error: one low, quiet buzz — noticeable, not alarming
-            "error": _tone(196, 220, volume=0.18),
+            "error": _tone(164.8, 220, volume=0.16),
         }
         _SOUND_CACHE[name] = _wav_bytes(recipes[name])
     return _SOUND_CACHE[name]
