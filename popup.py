@@ -1757,10 +1757,21 @@ class FloatingPopup:
                 y = top + 90
             elif self._popup_height == "medium":
                 y = top + (bottom - top - h) // 2
-            else:  # "low" (default) — sit close to the taskbar, clear of chat inputs
-                y = bottom - h - 24
+            else:  # "low" (default) — hug the taskbar, clear of chat inputs
+                y = bottom - h - 6
             # Never let a preset push the popup off the work-area.
             y = max(top, min(y, bottom - h))
+        try:  # DIAGNOSTIC (temporary): log computed placement vs work-area
+            import os as _os, time as _t
+            _dbg = _os.path.join(_os.environ.get("TEMP", "."), "ftc_pos_debug.log")
+            with open(_dbg, "a", encoding="utf-8") as _f:
+                _f.write(f"{_t.strftime('%H:%M:%S')} mode={self._mode} "
+                         f"height={self._popup_height} near={near_cursor} "
+                         f"wa=({left},{top},{right},{bottom}) wh=({w},{h}) "
+                         f"-> x={x} y={y} screen=({self.root.winfo_screenwidth()},"
+                         f"{self.root.winfo_screenheight()})\n")
+        except Exception:
+            pass
         self.root.geometry(f"+{x}+{y}")
         # Flush the position to the window BEFORE the caller deiconifies it, so it
         # never maps at the old/0,0 spot for a frame (top-left black-box flash).

@@ -2,10 +2,12 @@
 Visual and audio feedback for the application.
 Plays sounds on recording start/stop and manages tray icon state changes.
 
-Sounds are soft sine blips (generated once in memory, played async via
-winsound.PlaySound) rather than winsound.Beep: Beep is a raw square wave at
-full volume, which reads as a long, harsh, high-pitched alarm. The blips are
-quiet, faded in/out, and short — unobtrusive but clearly audible.
+The recording start/stop cues play the Windows system "ding"
+(winsound.MessageBeep) so they match the sound Claude emits on Ctrl+Alt+Enter
+and are easy to hear. The remaining cues (done/error) are soft sine blips
+generated once in memory and played synchronously via winsound.PlaySound —
+never winsound.Beep, which is a raw square wave at full volume that reads as a
+long, harsh, high-pitched alarm.
 """
 
 import io
@@ -38,12 +40,14 @@ def _tone(frequency: float, ms: float, volume: float = 0.22,
 
 
 def _glide(f0: float, f1: float, ms: float, volume: float = 0.14,
-           peak_frac: float = 0.42, glide_frac: float = 0.38) -> list:
+           peak_frac: float = 0.42, glide_frac: float = 0.38,
+           harmonic: float = 0.30) -> list:
     """One short pitch glide with a raised-cosine envelope peaking at
     peak_frac of the duration. The pitch sweeps over the first glide_frac
     then holds f1 — matching the measured Glaido shape (quick move, settle).
-    Phase-accumulated so the sweep is clickless; a quiet second harmonic
-    rounds the timbre out of pure-sine territory."""
+    Phase-accumulated so the sweep is clickless; `harmonic` sets how much
+    second harmonic rounds the timbre — keep it small (≤0.12) for a soft,
+    dark chime, larger for a brighter one."""
     n = int(_SR * ms / 1000)
     peak = max(1, int(n * peak_frac))
     sweep = max(1, int(n * glide_frac))
@@ -56,7 +60,7 @@ def _glide(f0: float, f1: float, ms: float, volume: float = 0.14,
             env = 0.5 - 0.5 * math.cos(math.pi * i / peak)
         else:
             env = 0.5 + 0.5 * math.cos(math.pi * (i - peak) / (n - peak))
-        s = math.sin(phase) + 0.30 * math.sin(2 * phase)
+        s = math.sin(phase) + harmonic * math.sin(2 * phase)
         out.append(s * volume * env)
     return out
 
@@ -77,6 +81,15 @@ def _wav_bytes(samples: list) -> bytes:
     return buf.getvalue()
 
 
+# Cues that should play the actual Windows system "ding" instead of a generated
+# sine. This is the sound Windows emits for a rejected/unhandled key combo (e.g.
+# Ctrl+Alt+Enter in a terminal) — the exact chime the user hears in Claude.
+# Playing the OS sound guarantees a byte-for-byte match and, on equal-loudness
+# grounds, is far easier to hear than a soft low tone. Reverses the earlier
+# low/soft-sine preference at Ryan's explicit request (2026-07-30).
+_SYSTEM_BEEP = {"start", "stop"}
+
+
 _SOUND_CACHE: dict = {}
 
 
@@ -85,36 +98,56 @@ def _get_sound(name: str) -> bytes:
     (callers are daemon threads), ~1ms of pure-python sine maths."""
     if name not in _SOUND_CACHE:
         recipes = {
-            # Soft, low, pure sine tones — deliberately NOT glides. The earlier
-            # rising glide plus its second harmonic (energy up to ~590 Hz) still
-            # read as a bright chirp; a rising move also feels alerting. These
-            # are single warm sines low in the bass (F3/D3, ~147–175 Hz) at a
-            # low volume with a long fade, so recording start/stop is a quiet,
-            # rounded cue rather than a ping. Psychoacoustics: perceived
-            # annoyance climbs steeply with pitch and the ear's harsh band is
-            # 2–5 kHz, so staying this low keeps it unobtrusive. Start sits a
-            # touch above stop, giving a gentle fall (settle), not a rise.
-            # start: soft low tone — "listening"
-            "start": _tone(174.6, 120, volume=0.10, fade_ms=28.0),
-            # stop: a touch lower — "got it" (gentle fall from start)
-            "stop": _tone(146.8, 135, volume=0.10, fade_ms=32.0),
-            # done: a single very soft, short tap in the same low register
-            "done": _tone(174.6, 60, volume=0.06, fade_ms=18.0),
+            # Warm, low Glaido-style chime pair — soft two-note glide, kept in
+            # the low-mid register (C4–E4, ~247–330 Hz) so it stays calm but is
+            # actually audible on laptop speakers, which roll off badly below
+            # ~250 Hz. Volume is up at 0.26 because low tones need more
+            # amplitude to be heard for the same loudness (equal-loudness
+            # contours); a small second harmonic (0.12) gives warmth without
+            # brightness. Psychoacoustics: annoyance climbs steeply with pitch
+            # and the harsh band is 2–5 kHz, so this register reads as gentle.
+            # Start rises softly, stop mirrors it down (settle).
+            # start: soft low Glaido-style rise — "listening"
+            "start": _glide(262.0, 330.0, 95, volume=0.26,
+                            peak_frac=0.45, harmonic=0.12),
+            # stop: the falling mirror, a touch lower — "got it"
+            "stop": _glide(330.0, 247.0, 105, volume=0.26,
+                           peak_frac=0.55, harmonic=0.12),
+            # done: a single soft, short tap in the same register
+            "done": _glide(294.0, 300.0, 55, volume=0.16, harmonic=0.10),
             # error: one low, quiet buzz — noticeable, not alarming
-            "error": _tone(164.8, 220, volume=0.16),
+            "error": _tone(220.0, 220, volume=0.18),
         }
         _SOUND_CACHE[name] = _wav_bytes(recipes[name])
     return _SOUND_CACHE[name]
 
 
 def _play_sound(name: str) -> None:
-    """Play a named blip asynchronously (Windows only, never raises)."""
+    """Play a named blip (Windows only, never raises).
+
+    Plays SYNCHRONOUSLY from memory. This is deliberate and required: winsound
+    CANNOT play SND_MEMORY asynchronously — `SND_MEMORY | SND_ASYNC` raises
+    "Cannot play asynchronously from memory". The old async flag therefore threw
+    on EVERY cue and silently dropped to a raw 700 Hz winsound.Beep fallback, so
+    none of the soft generated tones were ever heard (they looked fine in a
+    stand-alone SND_MEMORY test, which masked the bug). Every caller already
+    runs this on its own daemon thread, so a ~100 ms synchronous play blocks
+    nothing that matters."""
     try:
         import winsound
-        winsound.PlaySound(_get_sound(name),
-                           winsound.SND_MEMORY | winsound.SND_ASYNC)
+        if name in _SYSTEM_BEEP:
+            # MessageBeep(MB_OK) plays the "Default Beep" system sound — exactly
+            # the ding Windows emits on an unhandled Ctrl+Alt+Enter. It is async
+            # by nature (never blocks) and needs no in-memory wav, so the old
+            # SND_MEMORY|SND_ASYNC crash-to-harsh-Beep bug cannot apply here.
+            winsound.MessageBeep(winsound.MB_OK)
+            return
+        winsound.PlaySound(_get_sound(name), winsound.SND_MEMORY)
     except Exception:
-        _play_beep(700, 90)  # last-resort fallback rather than going silent
+        # Never fall back to winsound.Beep here — a raw square-wave beep is the
+        # exact harsh sound these tones replace. Silent-fail instead; the visual
+        # popup still signals state.
+        pass
 
 
 def _play_beep(frequency: int = 800, duration_ms: int = 150) -> None:
