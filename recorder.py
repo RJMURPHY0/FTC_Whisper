@@ -26,11 +26,13 @@ from collections import deque
 from typing import Optional
 
 _PREROLL_KEEP_SECONDS = 1.5   # ring buffer length while idle
-_PREROLL_SEED_SECONDS = 0.6   # pre-hotkey audio prepended to a recording: covers
+_PREROLL_SEED_SECONDS = 0.8   # pre-hotkey audio prepended to a recording: covers
                               # hotkey-dispatch latency plus speech that starts
                               # on (or a beat before) the press. 0.35 clipped
                               # first words when the press and the first
-                              # syllable landed together under load.
+                              # syllable landed together under load; 0.6 still
+                              # occasionally clipped the first word or two, so
+                              # the margin is 0.8 (the ring keeps 1.5s).
 
 # A healthy input stream delivers a callback every blocksize/rate seconds
 # (~21-64ms). If none arrived for this long the stream is considered dead —
@@ -42,7 +44,16 @@ _HEARTBEAT_STALE_SECONDS = 1.2
 # warm stream and cold-opening a new one.
 _START_VERIFY_SECONDS = 0.45
 _WATCHDOG_INTERVAL = 5.0      # idle heartbeat check cadence
-_DEVICE_REFRESH_TICKS = 12    # full PortAudio refresh every N watchdog ticks (~60s)
+_DEVICE_REFRESH_TICKS = 24    # full PortAudio refresh every N watchdog ticks (~120s).
+                              # Only needed to follow a *default-device change*; a
+                              # dead stream is recovered separately within ~5s and
+                              # the evidence probe covers a mic that stops hearing
+                              # the user — so a slower cadence just means fewer
+                              # teardowns that could clip a keypress's first words.
+_DEVICE_REFRESH_QUIET_SECONDS = 20.0  # never run the periodic default-follow within
+                              # this long of a dictation (start OR stop): the ~0.1-0.3s
+                              # PortAudio re-init gap must never coincide with a press,
+                              # which is what dropped the first word or two.
 
 # Evidence probe: when the chosen mic has been alive but voice-free for this
 # long into a recording, briefly sample the other real mics to learn whether a
@@ -133,6 +144,11 @@ class Recorder:
         self._probe_done = False          # one probe per recording
         self._mic_advice: Optional[dict] = None
         self._recording_started_ts: float = 0.0
+        # Monotonic time of the last record start OR stop. The periodic
+        # default-follow bounce is deferred while this is recent so a stream
+        # teardown can never coincide with an imminent/just-finished dictation
+        # and clip its first words.
+        self._last_record_activity_ts: float = 0.0
 
     @property
     def is_recording(self) -> bool:
@@ -287,12 +303,19 @@ class Recorder:
         self._active_device_index = None
         self._active_device_name = ""
 
-    def _ensure_warm_stream(self, force_fresh: bool = False) -> bool:
+    def _ensure_warm_stream(self, force_fresh: bool = False,
+                            preserve_preroll: bool = False) -> bool:
         """Open (or verify) the persistent stream. Returns success.
 
         force_fresh=True closes any existing stream and re-initialises
         PortAudio first — used by the watchdog to recover dead streams and to
-        follow Windows default-device changes."""
+        follow Windows default-device changes.
+
+        preserve_preroll=True keeps the pre-roll ring across the reopen when the
+        device and sample rate come back unchanged (a periodic default-follow
+        that found the same device). Clearing it there would open a
+        seed-length window in which a keypress lands with no pre-roll and the
+        first words are lost."""
         with self._stream_lifecycle_lock:
             if self._recording:
                 # Never touch the stream under an active recording.
@@ -303,6 +326,11 @@ class Recorder:
                 print(f"[Recorder] Warm stream is stale (no audio callback for "
                       f"{self._heartbeat_age():.1f}s) — reopening.")
                 force_fresh = True
+                # A stale stream means the device is gone/changed — its ring is
+                # untrustworthy, so never carry it across this kind of reopen.
+                preserve_preroll = False
+            old_name = self._active_device_name
+            old_rate = self.active_sample_rate
             if force_fresh and self._stream is not None:
                 self._close_stream_locked()
             if force_fresh:
@@ -311,8 +339,16 @@ class Recorder:
                 self._stream = self._open_best_input_stream()
                 with self._lock:
                     self._last_callback_ts = time.monotonic()
-                    self._preroll.clear()
-                    self._preroll_samples = 0
+                    # Keep the ring only when the reopen landed on the SAME
+                    # device at the SAME rate (contiguous, trustworthy audio);
+                    # otherwise it is stale/wrong-device audio and must go.
+                    keep_ring = (preserve_preroll
+                                 and old_name != ""
+                                 and self._active_device_name == old_name
+                                 and self.active_sample_rate == old_rate)
+                    if not keep_ring:
+                        self._preroll.clear()
+                        self._preroll_samples = 0
                 self._stream.start()
                 self._warm_stream_is_open = True
                 where = self._active_device_name or "default input"
@@ -354,7 +390,14 @@ class Recorder:
                     # Periodic refresh: PortAudio can't see default-device
                     # changes without a re-init, so bounce the idle stream to
                     # pick up whatever Windows now routes as the default mic.
-                    self._ensure_warm_stream(force_fresh=True)
+                    # Skip it right around a dictation so the teardown can never
+                    # coincide with a keypress and clip the first words, and keep
+                    # the pre-roll when the device turns out unchanged.
+                    quiet = (time.monotonic() - self._last_record_activity_ts
+                             > _DEVICE_REFRESH_QUIET_SECONDS)
+                    if quiet:
+                        self._ensure_warm_stream(force_fresh=True,
+                                                 preserve_preroll=True)
             except Exception as e:
                 print(f"[Recorder] Watchdog error (non-fatal): {e}")
 
@@ -396,6 +439,7 @@ class Recorder:
             self._probe_done = False
             self._mic_advice = None
             self._recording_started_ts = time.monotonic()
+            self._last_record_activity_ts = self._recording_started_ts
 
         warm_ready = self._warm_enabled and self._ensure_warm_stream()
 
@@ -561,6 +605,9 @@ class Recorder:
                 print("[Recorder] Not currently recording.")
                 return None
             self._recording = False
+            # Defer the next periodic default-follow so the reopen can't land on
+            # a fast follow-up dictation and clip its first words.
+            self._last_record_activity_ts = time.monotonic()
 
         # Keep the stream open only when warm mode is (still) on and no device
         # change is pending. Closing here also covers warm mode being disabled

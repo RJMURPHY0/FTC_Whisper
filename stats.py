@@ -69,6 +69,61 @@ def _saved_minutes(words: int, audio_seconds: float) -> float:
     return max(0.0, typing_min - dictating_min)
 
 
+def _is_weekend(d: datetime.date) -> bool:
+    return d.weekday() >= 5  # Mon=0 … Sat=5, Sun=6
+
+
+def _compute_streak(used, today: datetime.date) -> int:
+    """Weekend-aware streak. `used` is a callable(date)->bool (did the user
+    dictate that day). Weekdays are required; weekend days bridge (a missed
+    Sat/Sun never breaks the run, a used one counts). Today and any trailing
+    weekend that hasn't been used yet are a grace period, not a break.
+    Returns the number of used days in the current unbroken run."""
+    one = datetime.timedelta(days=1)
+    d = today
+    # Phase 1 — walk back to the most recent used day, skipping excused
+    # (today, or weekend) non-used days. A *past weekday* with no use ends it.
+    while not used(d):
+        if d == today or _is_weekend(d):
+            d -= one
+            continue
+        return 0
+    # Phase 2 — count the unbroken run backwards, bridging weekend gaps.
+    streak = 0
+    guard = 0
+    while (used(d) or _is_weekend(d)) and guard < 3660:
+        if used(d):
+            streak += 1
+        d -= one
+        guard += 1
+    return streak
+
+
+def _words_by_range(days: dict, carry_words: int, today: datetime.date) -> dict:
+    wk_start = today - datetime.timedelta(days=today.weekday())  # Monday
+    mo_start = today.replace(day=1)
+    yr_start = today.replace(month=1, day=1)
+    totals = {"today": 0, "week": 0, "month": 0, "year": 0, "all": int(carry_words)}
+    for iso, rec in days.items():
+        try:
+            d = datetime.date.fromisoformat(iso)
+        except Exception:
+            continue
+        w = int(rec.get("w", 0))
+        totals["all"] += w
+        if d > today:
+            continue  # never count a future-dated row in the windows
+        if d == today:
+            totals["today"] += w
+        if d >= wk_start:
+            totals["week"] += w
+        if d >= mo_start:
+            totals["month"] += w
+        if d >= yr_start:
+            totals["year"] += w
+    return totals
+
+
 class StatsStore:
     """Thread-safe per-user dictation aggregates.
 
@@ -135,6 +190,7 @@ class StatsStore:
             u = self._user_blob()
             days = dict(u["days"])
             carry_saved = float(u.get("carry_saved_min", 0.0))
+            carry_words = int(u.get("carry_words", 0))
 
         today = _today()
         today_words = int(days.get(today.isoformat(), {}).get("w", 0))
@@ -154,21 +210,27 @@ class StatsStore:
         if voiced_w >= 50 and voiced_s >= 30.0:
             avg_wpm = int(round(voiced_w / (voiced_s / 60.0)))
 
-        # Streak: consecutive days with at least one dictation, ending today —
-        # or ending yesterday (streak alive, but needs a dictation today).
+        # Streak: weekend-aware. Weekdays are required; Saturday/Sunday bridge
+        # the streak (missing one never breaks it, using one counts). Today —
+        # and any trailing weekend not yet used — is a grace period, not a
+        # break, matching the old "streak alive if it ended yesterday" rule.
+        def _used(dd, _days=days):
+            return int(_days.get(dd.isoformat(), {}).get("w", 0)) > 0
         active_today = today_words > 0
-        d = today if active_today else today - datetime.timedelta(days=1)
-        streak = 0
-        while streak < 3650 and int(days.get(d.isoformat(), {}).get("w", 0)) > 0:
-            streak += 1
-            d -= datetime.timedelta(days=1)
+        streak = _compute_streak(_used, today)
+        # True when the streak is being held safe over a weekend the user
+        # hasn't needed to use yet — drives a reassuring sub-label instead
+        # of a warning.
+        streak_weekend_grace = (_is_weekend(today) and not active_today and streak > 0)
 
         return {
             "today_words": today_words,
             "streak_days": streak,
             "streak_active_today": active_today,
+            "streak_weekend_grace": streak_weekend_grace,
             "saved_minutes": saved_min,
             "avg_wpm": avg_wpm,
+            "words": _words_by_range(days, carry_words, today),
         }
 
     # ── Local persistence ─────────────────────────────────────────────
@@ -192,6 +254,7 @@ class StatsStore:
         u.setdefault("days", {})
         u.setdefault("seeded", False)
         u.setdefault("carry_saved_min", 0.0)
+        u.setdefault("carry_words", 0)
         return u
 
     def _trim_locked(self, u: dict) -> None:
@@ -202,6 +265,7 @@ class StatsStore:
             rec = days.pop(day)
             u["carry_saved_min"] = float(u.get("carry_saved_min", 0.0)) + _saved_minutes(
                 int(rec.get("w", 0)), float(rec.get("s", 0.0)))
+            u["carry_words"] = int(u.get("carry_words", 0)) + int(rec.get("w", 0))
 
     def _save_locked(self) -> None:
         try:

@@ -1726,10 +1726,10 @@ class FloatingPopup:
         self.root.update_idletasks()
         w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
 
-        # Use Win32 MonitorFromPoint to pick the correct monitor (multi-monitor
-        # aware — popup follows whichever screen the cursor is on).  Then scale
-        # the work-area from Win32 physical pixels to tkinter logical pixels so
-        # geometry() lands in the right place on any DPI configuration.
+        # Pick the monitor (multi-monitor aware — follows whichever screen the
+        # cursor is on) and convert its Win32 work-area to tkinter logical
+        # pixels. Keep the raw *physical* bounds too: the second-order guard
+        # below re-checks the real landing spot against them.
         try:
             left_p, top_p, right_p, bottom_p = self._get_monitor_workarea(cx, cy)
             sx, sy = self._dpi_scale()
@@ -1738,15 +1738,17 @@ class FloatingPopup:
             right  = round(right_p  * sx)
             bottom = round(bottom_p * sy)
         except Exception:
+            left_p, top_p = 0, 0
+            right_p  = self.root.winfo_screenwidth()
+            bottom_p = self.root.winfo_screenheight()
             left, top, sx, sy = 0, 0, 1.0, 1.0
-            right  = self.root.winfo_screenwidth()
-            bottom = self.root.winfo_screenheight()
+            right, bottom = right_p, bottom_p
 
         if near_cursor and cx > 0 and cy > 0:
             gap = 28
-            x   = max(left, min(round(cx * sx) - w // 2, right - w))
+            x   = round(cx * sx) - w // 2
             y_b = round(cy * sy) + gap
-            y   = y_b if y_b + h <= bottom else max(top, round(cy * sy) - h - gap)
+            y   = y_b if y_b + h <= bottom else round(cy * sy) - h - gap
         else:
             # Fixed, horizontally centred on whichever monitor the cursor is on.
             # Vertical placement follows the user's popup_height preference so it
@@ -1759,20 +1761,59 @@ class FloatingPopup:
                 y = top + (bottom - top - h) // 2
             else:  # "low" (default) — hug the taskbar, clear of chat inputs
                 y = bottom - h - 6
-            # Never let a preset push the popup off the work-area.
-            y = max(top, min(y, bottom - h))
-        try:  # DIAGNOSTIC (temporary): log computed placement vs work-area
-            import os as _os, time as _t
-            _dbg = _os.path.join(_os.environ.get("TEMP", "."), "ftc_pos_debug.log")
-            with open(_dbg, "a", encoding="utf-8") as _f:
-                _f.write(f"{_t.strftime('%H:%M:%S')} mode={self._mode} "
-                         f"height={self._popup_height} near={near_cursor} "
-                         f"wa=({left},{top},{right},{bottom}) wh=({w},{h}) "
-                         f"-> x={x} y={y} screen=({self.root.winfo_screenwidth()},"
-                         f"{self.root.winfo_screenheight()})\n")
-        except Exception:
-            pass
+
+        # First-order guard: keep the whole popup inside the work-area in Tk
+        # coordinates, so a stale width or an odd monitor origin can never push
+        # the fixed popup off an edge (the cut-off refine panel).
+        x = max(left, min(x, right - w))
+        y = max(top, min(y, bottom - h))
+
         self.root.geometry(f"+{x}+{y}")
         # Flush the position to the window BEFORE the caller deiconifies it, so it
         # never maps at the old/0,0 spot for a frame (top-left black-box flash).
         self.root.update_idletasks()
+
+        # Second-order guard: on a mixed-DPI multi-monitor rig tkinter's logical
+        # geometry can render the window off the monitor we targeted — so a popup
+        # that is fully on-screen in Tk maths still lands cut off physically
+        # (the user's "wrong place / cut off" bug, which the logical numbers
+        # alone never showed). Measure where it PHYSICALLY landed and, if it
+        # spills past the target monitor's physical work-area, nudge it back by
+        # the measured overflow. Empirical, so it corrects any coordinate-space
+        # mismatch without having to model the DPI topology.
+        try:
+            GA_ROOT = 2
+            u32 = ctypes.windll.user32
+            top_hwnd = u32.GetAncestor(self._popup_hwnd, GA_ROOT) or self._popup_hwnd
+            pr = _RECT()
+            if u32.GetWindowRect(top_hwnd, ctypes.byref(pr)):
+                pw, ph = pr.right - pr.left, pr.bottom - pr.top
+                nx = max(left_p, min(pr.left, right_p - pw))
+                ny = max(top_p, min(pr.top, bottom_p - ph))
+                ddx, ddy = nx - pr.left, ny - pr.top
+                if ddx or ddy:
+                    self.root.geometry(
+                        f"+{x + round(ddx * sx)}+{y + round(ddy * sy)}")
+                    self.root.update_idletasks()
+                    self._log_pos_anomaly(near_cursor, w, h, x, y,
+                                          (left_p, top_p, right_p, bottom_p),
+                                          (pr.left, pr.top), (ddx, ddy))
+        except Exception:
+            pass
+
+    def _log_pos_anomaly(self, near_cursor, w, h, x, y, wa_phys, landed, delta):
+        """Record only the anomalous placements — the ones the physical guard had
+        to nudge back on-screen. Rare by construction, so this stays silent on
+        healthy single-DPI setups and pinpoints a real coordinate mismatch (send
+        me %TEMP%\\ftc_pos_debug.log if a popup ever still lands wrong)."""
+        try:
+            import os as _os, time as _t
+            _dbg = _os.path.join(_os.environ.get("TEMP", "."), "ftc_pos_debug.log")
+            with open(_dbg, "a", encoding="utf-8") as _f:
+                _f.write(f"{_t.strftime('%H:%M:%S')} CORRECTED mode={self._mode} "
+                         f"near={near_cursor} wh=({w},{h}) asked=({x},{y}) "
+                         f"wa_phys={wa_phys} landed={landed} nudge={delta} "
+                         f"screen=({self.root.winfo_screenwidth()},"
+                         f"{self.root.winfo_screenheight()})\n")
+        except Exception:
+            pass

@@ -39,6 +39,7 @@ C = {
     "divider":       "#1f1f1f",   # hairline separator
     "border":        "#2d2d2d",   # card border
     "scrollbar":     "#2d2d2d",
+    "window_edge":   "#555555",   # Win11 window border — subtle but visible on a dark desktop
 }
 
 WINDOW_W = 420
@@ -822,12 +823,12 @@ class AppWindow:
             _set(DWMWA_USE_IMMERSIVE_DARK_MODE, 1)
             # Explicit grey caption + white text (falls through harmlessly on
             # Windows 10, which doesn't support these attributes). The border
-            # colour matches the app background — unset, Windows draws its
-            # default light frame, which reads as white edging around the
-            # dark window.
+            # is a deliberate light-grey edge (not the near-black background)
+            # so the window outline stays visible against a dark desktop —
+            # matching it to the background made the window edge invisible.
             _set(DWMWA_CAPTION_COLOR, self._colorref(self._TITLEBAR_GREY))
             _set(DWMWA_TEXT_COLOR, self._colorref("#ffffff"))
-            _set(DWMWA_BORDER_COLOR, self._colorref(C["bg"]))
+            _set(DWMWA_BORDER_COLOR, self._colorref(C["window_edge"]))
 
             # NOTE: no WS_EX_COMPOSITED anywhere. It was tried on the
             # top-level (v1.6.26) and on the scroll canvases: both variants
@@ -1496,10 +1497,52 @@ class AppWindow:
             _rr(icv, 3, 1, 15, 17, 3, fill=C["surface"], outline=C["subtext"], width=1.4)
             icv.create_line(6, 7, 12, 7, fill=C["subtext"], width=1.4)
             icv.create_line(6, 11, 12, 11, fill=C["subtext"], width=1.4)
-        tk.Label(
-            brow, text="Today", fg=C["text"], bg=C["surface"],
-            font=("Segoe UI", 10, "bold"),
-        ).pack(side="left", padx=(9, 0))
+        # Words-dictated range selector — replaces the static "Today" label so
+        # the footer count can switch between today/week/month/year/all time.
+        # Styled to match the mic (line ~3855) and popup-height (line ~4287)
+        # OptionMenu dropdowns elsewhere in this file: same dark-theme colours,
+        # flat relief, accent-highlighted menu. Left un-widened (no fill="x")
+        # so it stays compact and inline where the bold "Today" label was.
+        _RANGE_LABELS = {
+            "today": "Today",
+            "week":  "This week",
+            "month": "This month",
+            "year":  "This year",
+            "all":   "All time",
+        }
+        _RANGE_FROM_LABEL = {v: k for k, v in _RANGE_LABELS.items()}
+        _cur_range = (getattr(self._config, "impact_range", "today")
+                     if self._config else "today")
+        if _cur_range not in _RANGE_LABELS:
+            _cur_range = "today"
+        self._impact_range = _cur_range
+
+        self._impact_range_var = tk.StringVar(value=_RANGE_LABELS[_cur_range])
+        _range_menu = tk.OptionMenu(brow, self._impact_range_var,
+                                    *_RANGE_LABELS.values())
+        _range_menu.configure(bg=C["surface"], fg=C["text"], relief="flat",
+                              font=("Segoe UI", 10, "bold"), anchor="w",
+                              highlightthickness=0,
+                              activebackground=C["accent"], activeforeground=C["bg"])
+        _range_menu["menu"].configure(bg=C["surface"], fg=C["text"],
+                                      activebackground=C["accent"],
+                                      activeforeground=C["bg"],
+                                      font=("Segoe UI", 9))
+        _range_menu.pack(side="left", padx=(9, 0))
+
+        def _on_range_change(*_a):
+            key = _RANGE_FROM_LABEL.get(self._impact_range_var.get(), "today")
+            self._impact_range = key
+            if self._config is not None:
+                try:
+                    self._config.impact_range = key
+                    self._config.save_async()
+                except Exception as e:
+                    print(f"[AppWindow] Impact range save failed: {e}")
+            self._refresh_impact()
+
+        self._impact_range_var.trace_add("write", _on_range_change)
+
         self._impact_today_lbl = tk.Label(
             brow, text="·  0 words dictated",
             fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 10),
@@ -1676,11 +1719,15 @@ class AppWindow:
             sub = "Dictate today to begin"
         elif snap["streak_active_today"]:
             sub = "Keep it going"
+        elif snap.get("streak_weekend_grace"):
+            sub = "Safe over the weekend"
         else:
             sub = "Dictate to keep it"
         self._set_impact_card("streak", str(n), "day" if n == 1 else "days", sub)
 
-        tw = snap["today_words"]
+        rng = getattr(self, "_impact_range", "today")
+        words_map = snap.get("words") or {}
+        tw = int(words_map.get(rng, snap.get("today_words", 0)))
         if hasattr(self, "_impact_today_lbl"):
             self._impact_today_lbl.configure(
                 text=f"·  {tw:,} word{'' if tw == 1 else 's'} dictated")

@@ -14,6 +14,7 @@ class _Stats:
             "streak_days": 0,
             "streak_active_today": False,
             "today_words": 0,
+            "words": {"today": 0, "week": 0, "month": 0, "year": 0, "all": 0},
         }
 
 
