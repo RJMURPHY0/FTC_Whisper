@@ -4,7 +4,7 @@ Microphone audio recorder using sounddevice.
 Two capture modes:
   Warm (default): a persistent input stream runs continuously, feeding a small
   pre-roll ring buffer (~1.5s). start() is then instant — it just flips a flag
-  and seeds the recording with the last ~0.6s of pre-roll, so the first
+  and seeds the recording with the last ~0.8s of pre-roll, so the first
   syllable is never lost to stream-open latency (~50-300ms on Windows) and
   speech that begins ON the hotkey press is fully captured.
 
@@ -43,8 +43,12 @@ _HEARTBEAT_STALE_SECONDS = 1.2
 # How long start() waits for the first fresh callback before abandoning the
 # warm stream and cold-opening a new one.
 _START_VERIFY_SECONDS = 0.45
-_WATCHDOG_INTERVAL = 5.0      # idle heartbeat check cadence
-_DEVICE_REFRESH_TICKS = 24    # full PortAudio refresh every N watchdog ticks (~120s).
+_WATCHDOG_INTERVAL = 2.0      # idle heartbeat check cadence. Kept short: a
+                              # press landing on a dead warm stream loses the
+                              # first words outright, so the window in which a
+                              # stream can sit dead must be as small as the
+                              # (near-free) heartbeat check allows.
+_DEVICE_REFRESH_TICKS = 60    # full PortAudio refresh every N watchdog ticks (~120s).
                               # Only needed to follow a *default-device change*; a
                               # dead stream is recovered separately within ~5s and
                               # the evidence probe covers a mic that stops hearing
@@ -149,6 +153,13 @@ class Recorder:
         # teardown can never coincide with an imminent/just-finished dictation
         # and clip its first words.
         self._last_record_activity_ts: float = 0.0
+        # Set by _ensure_warm_stream when it actually (re)opened a stream, so
+        # start() can tell an instant press (stream was live, pre-roll seeded,
+        # zero loss) from one that had to recover — the recovering press is the
+        # ONLY path that can drop the first words, and the app reports it to
+        # the fleet log so those events are visible instead of anecdotal.
+        self._last_warm_reopened = False
+        self.last_start_recovery: Optional[dict] = None
 
     @property
     def is_recording(self) -> bool:
@@ -304,7 +315,8 @@ class Recorder:
         self._active_device_name = ""
 
     def _ensure_warm_stream(self, force_fresh: bool = False,
-                            preserve_preroll: bool = False) -> bool:
+                            preserve_preroll: bool = False,
+                            skip_refresh: bool = False) -> bool:
         """Open (or verify) the persistent stream. Returns success.
 
         force_fresh=True closes any existing stream and re-initialises
@@ -315,7 +327,15 @@ class Recorder:
         device and sample rate come back unchanged (a periodic default-follow
         that found the same device). Clearing it there would open a
         seed-length window in which a keypress lands with no pre-roll and the
-        first words are lost."""
+        first words are lost.
+
+        skip_refresh=True skips the PortAudio re-init when a stale stream has
+        to be reopened — the press path uses this because every ~100ms of that
+        re-init is spoken audio lost forever. The common stale causes (audio
+        engine restart, sleep/resume) leave the device topology unchanged, so
+        a direct reopen usually works; the zombie-open case is caught by
+        start()'s callback-verify loop, which falls back to a full-refresh
+        cold open. The watchdog keeps the full refresh — it has time."""
         with self._stream_lifecycle_lock:
             if self._recording:
                 # Never touch the stream under an active recording.
@@ -333,9 +353,10 @@ class Recorder:
             old_rate = self.active_sample_rate
             if force_fresh and self._stream is not None:
                 self._close_stream_locked()
-            if force_fresh:
+            if force_fresh and not skip_refresh:
                 self._refresh_portaudio()
             try:
+                self._last_warm_reopened = True
                 self._stream = self._open_best_input_stream()
                 with self._lock:
                     self._last_callback_ts = time.monotonic()
@@ -441,7 +462,18 @@ class Recorder:
             self._recording_started_ts = time.monotonic()
             self._last_record_activity_ts = self._recording_started_ts
 
-        warm_ready = self._warm_enabled and self._ensure_warm_stream()
+        # Recovery report for this press: stays None on the instant path (live
+        # warm stream + pre-roll seed = nothing lost); set whenever the stream
+        # had to be (re)opened, i.e. whenever first words were at risk.
+        self.last_start_recovery = None
+        self._last_warm_reopened = False
+        press_ts = time.monotonic()
+
+        # skip_refresh: if the warm stream died, reopen it directly instead of
+        # burning ~0.3-0.7s in a PortAudio re-init while the user is speaking —
+        # the verify loop below still falls back to a full-refresh cold open.
+        warm_ready = self._warm_enabled and self._ensure_warm_stream(
+            skip_refresh=True)
 
         if warm_ready:
             preroll_fresh = self._heartbeat_age() < _HEARTBEAT_STALE_SECONDS
@@ -486,6 +518,18 @@ class Recorder:
                         break
                 time.sleep(0.015)
             if verified:
+                if self._last_warm_reopened:
+                    # Stream was dead at press and the fast reopen saved it —
+                    # audio flows now, but whatever was said before the reopen
+                    # completed is gone. Report it so the fleet log shows how
+                    # often first words were at risk.
+                    self.last_start_recovery = {
+                        "mode": "warm_reopen",
+                        "elapsed_ms": int((time.monotonic() - press_ts) * 1000),
+                        "device": self._active_device_name,
+                        "seed_ms": int(seed_samples * 1000
+                                       / max(1, self.active_sample_rate)),
+                    }
                 print(
                     f"[Recorder] Recording started instantly (warm, "
                     f"{self._active_device_name or 'default input'}, {self.active_sample_rate} Hz)."
@@ -502,6 +546,11 @@ class Recorder:
                         self._last_callback_ts = time.monotonic()
                     self._stream.start()
                     self._warm_stream_is_open = True
+                    self.last_start_recovery = {
+                        "mode": "cold_recovered",
+                        "elapsed_ms": int((time.monotonic() - press_ts) * 1000),
+                        "device": self._active_device_name,
+                    }
                     print(f"[Recorder] Recording started (recovered, "
                           f"{self._active_device_name or 'default input'}, "
                           f"{self.active_sample_rate} Hz).")
@@ -529,6 +578,14 @@ class Recorder:
             with self._stream_lifecycle_lock:
                 self._stream = self._open_best_input_stream()
                 self._stream.start()
+            if self._warm_enabled:
+                # Warm mode couldn't open its stream at all — the press paid a
+                # full cold open with no pre-roll. Worth a fleet-log entry.
+                self.last_start_recovery = {
+                    "mode": "cold_open",
+                    "elapsed_ms": int((time.monotonic() - press_ts) * 1000),
+                    "device": self._active_device_name,
+                }
             where = self._active_device_name or "default input"
             print(
                 f"[Recorder] Recording started ({where}, {self.active_sample_rate} Hz)."
