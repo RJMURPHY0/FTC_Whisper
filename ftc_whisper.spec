@@ -110,6 +110,9 @@ print(f"[spec] Bundling {len(_brand_pngs)} brand icons from assets/brand_icons")
 
 # ── Extra hidden imports that PyInstaller often misses ───────────────────────
 hiddenimports += [
+    # Imported lazily inside functions (registration thread / --uninstall), so
+    # spell it out rather than trusting bytecode scanning to find it.
+    'app_install',
     'tkinter', 'tkinter.ttk', 'tkinter.messagebox', 'tkinter.simpledialog',
     'PIL._tkinter_finder',
     'numpy', 'numpy.core._multiarray_umath',

@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.45"
+APP_VERSION = "1.6.46"
 
 
 class _RECT(ctypes.Structure):
@@ -2910,6 +2910,35 @@ def _repair_desktop_shortcut(target: str) -> None:
         print(f"[App] Desktop shortcut repair skipped ({e})")
 
 
+def _uninstall_requested() -> bool:
+    return any(a.lower() in ("--uninstall", "/uninstall")
+               for a in sys.argv[1:])
+
+
+def _uninstall_silent() -> bool:
+    return any(a.lower() in ("/s", "--silent") for a in sys.argv[1:])
+
+
+def _register_application() -> None:
+    """Register the installed copy with Windows: Start-menu entry, a first-run
+    desktop shortcut, an Installed-apps entry with a working uninstaller, and
+    App Paths. Frozen builds only: a source run has no canonical exe to point
+    at and would litter the dev's Start menu.
+
+    Everything points at the CANONICAL exe path, which the auto-updater swaps
+    in place, so no shortcut or registry value goes stale after an update; the
+    version shown in Installed apps is refreshed here on the next launch.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        import app_install
+
+        app_install.register(_startup_target(), APP_VERSION)
+    except Exception as e:
+        print(f"[App] Application registration skipped (non-fatal): {e}")
+
+
 def _reconcile_legacy_launchers(task_ok: bool) -> None:
     """
     Remove every competing/legacy auto-start entry so there is ONE source of
@@ -3069,6 +3098,13 @@ def main() -> None:
 
 def _main() -> None:
     if sys.platform == "win32":
+        # BEFORE anything else, including the mutex and the version handoff.
+        # This is the UninstallString Windows runs from Installed apps, and the
+        # resident copy is normally already running, so the single-instance
+        # check would kill the uninstaller before it did anything.
+        if _uninstall_requested():
+            from app_install import run_uninstall
+            os._exit(run_uninstall(silent=_uninstall_silent()))
         # BEFORE the mutex: an old copy that defers to the installed version
         # must not be holding the single-instance mutex when the new exe starts.
         _handoff_to_canonical_if_newer()
@@ -3079,6 +3115,9 @@ def _main() -> None:
             target=_ensure_startup_task, daemon=True, name="startup-task"
         ).start()
         threading.Thread(target=_register_url_protocol, daemon=True, name="url-protocol").start()
+        threading.Thread(
+            target=_register_application, daemon=True, name="app-register"
+        ).start()
         threading.Thread(
             target=_clean_stale_runtime_dirs, daemon=True, name="runtime-cleanup"
         ).start()
