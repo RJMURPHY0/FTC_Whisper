@@ -24,6 +24,19 @@ alter table public.user_daily_stats
 alter table public.user_daily_stats
   add column if not exists voiced_words integer not null default 0;
 
+-- AI refine counters — one row per day, only APPLIED refinements (the user
+-- inserted or replaced with the result). refine_seconds is the measured in-app
+-- wall clock, refine_prompt_words the length of the instructions given; the
+-- "Time saved" breakdown recomputes the saving from these raw numbers.
+alter table public.user_daily_stats
+  add column if not exists refines integer not null default 0;
+alter table public.user_daily_stats
+  add column if not exists refine_seconds real not null default 0;
+alter table public.user_daily_stats
+  add column if not exists refine_prompt_words integer not null default 0;
+alter table public.user_daily_stats
+  add column if not exists refine_voice_prompts integer not null default 0;
+
 alter table public.user_daily_stats enable row level security;
 
 drop policy if exists "own stats select" on public.user_daily_stats;

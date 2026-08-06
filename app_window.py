@@ -58,6 +58,28 @@ SUPER_ADMIN_EMAIL = "ryan.murphy@ftc-ss.com"
 # the reference's breathing room; the layout draws against this constant.
 _IMPACT_CARD_H = 148
 
+# Impact breakdown panel — replaces the three cards in place when one is
+# clicked, so the detail still fits inside the same box on a non-scrolling Home.
+_IMPACT_PANEL_H = 252
+# The streak panel carries a full month grid, so it needs more room than the
+# two bar-chart panels. Both are sized from _impact_panel_height().
+_IMPACT_PANEL_H_STREAK = 300
+# Panel-only tones. C["border"] (#2d2d2d) is a hairline colour — as TEXT on the
+# card surface it is effectively invisible, and as an empty bar track it reads
+# as a missing element rather than an empty one.
+_PANEL_TRACK = "#333333"
+_PANEL_DIM = "#5a5a5a"
+
+# How long the "Signing you in…" splash waits before falling back to the login
+# form. A cold boot (app launched by the logon task before DHCP/DNS are up)
+# needs far longer than the old 6s: the lazy supabase import alone can take
+# seconds, then DNS, TLS and a token refresh. The reveal is ALSO suppressed
+# while an attempt is still in flight (see _reveal_login_if_pending), so this
+# is a floor, not a deadline — and a "Sign in manually" escape appears early so
+# nobody is ever trapped watching dots.
+_SIGNIN_GRACE_MS = 20000
+_SIGNIN_ESCAPE_MS = 7000
+
 
 def show_toast(root: tk.Misc, message: str, duration_ms: int = 5000) -> None:
     """Transient bottom-right notification that never takes focus.
@@ -374,6 +396,10 @@ class TogglePill(tk.Frame):
 
 # ── Rounded card helper ───────────────────────────────────────────────────────
 
+def _is_weekend_date(d) -> bool:
+    return d.weekday() >= 5
+
+
 def _rr(canvas, x1, y1, x2, y2, r, **kw):
     """Draw a smooth rounded rectangle on a Canvas."""
     pts = (
@@ -383,6 +409,248 @@ def _rr(canvas, x1, y1, x2, y2, r, **kw):
         x1,   y2-r, x1,   y1+r, x1,   y1,
     )
     return canvas.create_polygon(pts, smooth=True, **kw)
+
+
+class Dropdown(tk.Canvas):
+    """Dark, rounded select control.
+
+    tk.OptionMenu posts a NATIVE Win32 menu: on Windows it ignores the bg/fg
+    you configure and renders as a white box with a black border, which is what
+    the words-range, microphone and popup-position selectors all looked like
+    against this app's near-black UI. This draws the closed control itself and
+    posts an overrideredirect Toplevel for the list, so the whole thing obeys
+    the house palette and can carry a tick on the current value.
+
+    Behaves like the OptionMenu it replaces: a StringVar holds the visible
+    label, so existing trace_add() handlers keep working unchanged."""
+
+    _PAD_X = 10
+    _CHEV_W = 16
+
+    def __init__(self, parent, variable: tk.StringVar, values,
+                 bg=None, font=("Segoe UI", 10, "bold"), width=None,
+                 on_change=None):
+        self._bg = bg or C["surface"]
+        self._font_spec = font
+        self._values = list(values)
+        self._var = variable
+        self._on_change = on_change
+        self._menu = None
+        self._menu_cv = None
+        self._menu_h = 0
+        self._menu_scroll = 0
+        self._menu_max_scroll = 0
+        self._menu_hover = None
+        self._menu_geom = (28, 6, 0)
+        self._hover = False
+        self._font = tkfont.Font(family=font[0], size=font[1],
+                                 weight=font[2] if len(font) > 2 else "normal")
+        w = width or self._natural_width()
+        super().__init__(parent, bg=self._bg, highlightthickness=0, bd=0,
+                         width=w, height=28, cursor="hand2")
+        self.bind("<Button-1>", lambda _e: self.toggle())
+        self.bind("<Enter>", lambda _e: self._set_hover(True))
+        self.bind("<Leave>", lambda _e: self._set_hover(False))
+        self.bind("<Configure>", lambda _e: self._paint())
+        self._trace = variable.trace_add("write", lambda *_a: self._paint())
+        self._paint()
+
+    def _natural_width(self) -> int:
+        widest = max((self._font.measure(v) for v in self._values), default=60)
+        return widest + self._PAD_X * 2 + self._CHEV_W
+
+    def _set_hover(self, on: bool) -> None:
+        self._hover = on
+        self._paint()
+
+    def _paint(self) -> None:
+        w = self.winfo_width() or int(self["width"])
+        h = int(self["height"])
+        self.delete("all")
+        fill = C["surface_hover"] if (self._hover or self._menu) else self._bg
+        img = None
+        try:
+            import ui_render
+            img = ui_render.round_rect(self, w, h, 8, fill,
+                                       C["accent"] if self._menu else C["border"],
+                                       1, self._bg)
+        except Exception:
+            img = None
+        if img is not None:
+            self._bg_img = img
+            self.create_image(0, 0, image=img, anchor="nw")
+        else:
+            _rr(self, 0, 0, w - 1, h - 1, 8, fill=fill, outline=C["border"])
+        self.create_text(self._PAD_X, h // 2, text=self._var.get(), anchor="w",
+                         fill=C["text"], font=self._font_spec)
+        # Chevron — two strokes, so it stays crisp at any DPI.
+        cx = w - self._PAD_X - 5
+        cy = h // 2 - 1
+        col = C["accent"] if (self._hover or self._menu) else C["subtext"]
+        self.create_line(cx - 4, cy - 1, cx, cy + 3, fill=col, width=1.6,
+                         capstyle="round")
+        self.create_line(cx, cy + 3, cx + 4, cy - 1, fill=col, width=1.6,
+                         capstyle="round")
+
+    def toggle(self) -> None:
+        if self._menu is not None:
+            self.close()
+        else:
+            self.open()
+
+    def open(self) -> None:
+        if self._menu is not None:
+            return
+        row_h = 28
+        pad = 6
+        w = max(self.winfo_width(), self._natural_width())
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        w = min(w, screen_w - 24)
+        full_h = row_h * len(self._values) + pad * 2
+        # The mic list can run to twenty devices. Cap the popup at what the
+        # screen can show and scroll inside it rather than posting a list that
+        # runs off the bottom of the display.
+        h = min(full_h, max(row_h * 4 + pad * 2, screen_h - 120))
+        top = tk.Toplevel(self)
+        top.overrideredirect(True)
+        top.configure(bg=C["surface"])
+        try:
+            top.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        x = self.winfo_rootx()
+        y = self.winfo_rooty() + self.winfo_height() + 4
+        # Flip above the control when the list would fall off the screen, then
+        # clamp — a flipped tall list can overshoot the top edge just as easily.
+        if y + h > screen_h - 8:
+            y = self.winfo_rooty() - h - 4
+        y = max(8, min(y, screen_h - h - 8))
+        x = max(8, min(x, screen_w - w - 8))
+        top.geometry(f"{w}x{h}+{x}+{y}")
+        cv = tk.Canvas(top, bg=C["surface"], highlightthickness=0, bd=0,
+                       width=w, height=h)
+        cv.pack(fill="both", expand=True)
+        self._menu = top
+        self._menu_cv = cv
+        self._menu_geom = (row_h, pad, w)
+        self._menu_h = h
+        self._menu_max_scroll = max(0, full_h - h)
+        self._menu_scroll = 0
+        self._menu_hover = None
+        self._paint_menu()
+        cv.bind("<Motion>", self._on_menu_motion)
+        cv.bind("<Leave>", lambda _e: self._set_menu_hover(None))
+        cv.bind("<Button-1>", self._on_menu_click)
+        cv.bind("<MouseWheel>", self._on_menu_wheel)
+        top.bind("<Escape>", lambda _e: self.close())
+        # Any click elsewhere in the app dismisses it, same as a real menu.
+        self._dismiss_bind = self.winfo_toplevel().bind(
+            "<Button-1>", lambda _e: self.close(), add="+")
+        # Same DWM rounding as the floating popup and the toast — must run
+        # after update_idletasks()/geometry() or GetAncestor resolves the wrong
+        # handle and the call silently does nothing.
+        try:
+            from popup import _apply_popup_corners
+            top.update_idletasks()
+            _apply_popup_corners(top.winfo_id())
+        except Exception:
+            pass
+        self._paint()
+
+    def _paint_menu(self) -> None:
+        cv = getattr(self, "_menu_cv", None)
+        if cv is None:
+            return
+        row_h, pad, w = self._menu_geom
+        cv.delete("all")
+        h = self._menu_h
+        scroll = self._menu_scroll
+        img = None
+        try:
+            import ui_render
+            img = ui_render.round_rect(cv, w, h, 8, C["surface"],
+                                       C["border"], 1, C["surface"])
+        except Exception:
+            img = None
+        if img is not None:
+            self._menu_img = img
+            cv.create_image(0, 0, image=img, anchor="nw")
+        else:
+            _rr(cv, 0, 0, w - 1, h - 1, 8, fill=C["surface"],
+                outline=C["border"])
+        current = self._var.get()
+        for i, val in enumerate(self._values):
+            y = pad + i * row_h - scroll
+            if y < -row_h or y > h:
+                continue
+            if i == self._menu_hover:
+                _rr(cv, 4, y + 1, w - 4, y + row_h - 1, 6,
+                    fill=C["surface_hover"], outline="")
+            sel = val == current
+            cv.create_text(14, y + row_h // 2, text=val, anchor="w",
+                           fill=C["accent"] if sel else C["text"],
+                           font=("Segoe UI", 9, "bold" if sel else "normal"))
+            if sel:
+                cv.create_text(w - 14, y + row_h // 2, text="✓", anchor="e",
+                               fill=C["accent"], font=("Segoe UI", 9, "bold"))
+
+    def _row_at(self, y: int):
+        row_h, pad, _w = self._menu_geom
+        i = (y - pad + self._menu_scroll) // row_h
+        return int(i) if 0 <= i < len(self._values) else None
+
+    def _on_menu_wheel(self, event) -> None:
+        if not self._menu_max_scroll:
+            return
+        step = -1 if event.delta > 0 else 1
+        self._menu_scroll = max(0, min(self._menu_max_scroll,
+                                       self._menu_scroll + step * 28))
+        self._set_menu_hover(self._row_at(event.y))
+        self._paint_menu()
+
+    def _set_menu_hover(self, i) -> None:
+        if i == self._menu_hover:
+            return
+        self._menu_hover = i
+        self._paint_menu()
+
+    def _on_menu_motion(self, event) -> None:
+        self._set_menu_hover(self._row_at(event.y))
+
+    def _on_menu_click(self, event) -> None:
+        i = self._row_at(event.y)
+        self.close()
+        if i is None:
+            return
+        val = self._values[i]
+        if val != self._var.get():
+            self._var.set(val)
+        if self._on_change:
+            self._on_change(val)
+
+    def close(self) -> None:
+        top, self._menu = self._menu, None
+        self._menu_cv = None
+        if top is not None:
+            try:
+                top.destroy()
+            except tk.TclError:
+                pass
+        bind_id = getattr(self, "_dismiss_bind", None)
+        if bind_id:
+            try:
+                self.winfo_toplevel().unbind("<Button-1>", bind_id)
+            except tk.TclError:
+                pass
+            self._dismiss_bind = None
+        self._paint()
+
+    def set_values(self, values) -> None:
+        self._values = list(values)
+        if self._menu is not None:
+            self.close()
+        self._paint()
 
 
 class RoundedButton(tk.Canvas):
@@ -644,9 +912,18 @@ class AppWindow:
                 # network recovers. (Definitive auth failures delete the file,
                 # so the loop stops and the form is the correct final state.)
                 self._switch_to_signing_in()
+                # A restore that lands after the retry loop stopped waiting for
+                # it still promotes — a cold boot (app starts before the NIC is
+                # up) routinely finishes late, and without this the app ends up
+                # authenticated while the login form is on screen.
+                try:
+                    self._auth.set_restore_listener(
+                        lambda: self._ui_after(0, self._promote_restored_session))
+                except Exception:
+                    pass
                 self._start_session_restore_retry()
                 self._signing_in_reveal_job = self._root.after(
-                    6000, self._reveal_login_if_pending)
+                    _SIGNIN_GRACE_MS, self._reveal_login_if_pending)
             else:
                 # No saved session — first run or after sign-out: show the form.
                 self._switch_to_login()
@@ -714,14 +991,26 @@ class AppWindow:
         if retranscribe is not None:
             self._retranscribe = retranscribe
 
-    def _repaint_all(self) -> None:
+    def _repaint_all(self, erase: bool = False) -> None:
         """Synchronous full repaint of the whole window tree:
         RDW_INVALIDATE|RDW_ALLCHILDREN|RDW_UPDATENOW from the top-level HWND.
         Safe only while nothing carries WS_EX_COMPOSITED (synchronous repaints
-        live-lock under that style)."""
+        live-lock under that style).
+
+        erase=True adds RDW_ERASE|RDW_FRAME. Repaint-over (the default) only
+        clears pixels some widget draws over — after a page swap that GREW the
+        window, the newly exposed strip has no widget above it, so the previous
+        page's bits survive there. That strip is the login ghost. Erase costs a
+        background flash, which is invisible when the whole page is changing
+        anyway, so every page swap heals with erase=True."""
         try:
+            hwnd = self._top_hwnd()
+            if not hwnd:
+                # RedrawWindow(NULL) means the DESKTOP — repainting the whole
+                # screen instead of this app. Do nothing rather than that.
+                return
             ctypes.windll.user32.RedrawWindow(
-                self._top_hwnd(), None, None, 0x181)
+                hwnd, None, None, 0x585 if erase else 0x181)
         except Exception:
             pass
 
@@ -1064,15 +1353,29 @@ class AppWindow:
         where the window grew (the 'white box' around the sign-in page, and the
         long-standing login↔dashboard size-jump ghost). So _resize() defers to
         `_pending_geometry` while `_in_atomic`, and it is applied here once
-        redraw is back on."""
+        redraw is back on — and the geometry change is FOLLOWED by an erasing
+        repaint plus a queued one, because RDW_UPDATENOW only validates Tk's
+        update region (Tk turns WM_PAINT into a queued Expose and draws on a
+        later mainloop spin), so the move/resize would otherwise blit the old
+        page's pixels into their new position and leave them there.
+
+        The freeze is SKIPPED while the root is still unmapped: toggling
+        WM_SETREDRAW clears WS_VISIBLE, and doing that across an in-progress
+        map leaves the on-screen bits and Tk's idea of what it has drawn out of
+        sync — the intermittent ghost on the returning-user path, where a fast
+        restore promotes the dashboard microseconds after deiconify()."""
         u32 = None
         hwnd = 0
         froze = False
         self._pending_geometry = None
         try:
+            mapped = bool(self._root.winfo_ismapped())
+        except Exception:
+            mapped = True
+        try:
             u32 = ctypes.windll.user32
             hwnd = self._top_hwnd()
-            if hwnd:
+            if hwnd and mapped:
                 u32.SendMessageW(hwnd, 0x000B, 0, 0)  # WM_SETREDRAW off
                 froze = True
         except Exception:
@@ -1101,9 +1404,19 @@ class AppWindow:
                     self._root.update_idletasks()
                 except Exception:
                     pass
+            # Heal the move/resize itself. update_idletasks() above drains idle
+            # callbacks, NOT the Expose events the swap and the geometry change
+            # just queued, so without this the old page's bits stay on screen
+            # until something else happens to invalidate them.
+            self._repaint_all(erase=True)
+            try:
+                self._root.after(0, lambda: self._repaint_all(erase=True))
+            except Exception:
+                pass
 
     def _switch_to_login(self) -> None:
         self._cancel_signing_in()
+        self._login_visible = True
         def _swap():
             self._dash_visible = False
             self._header_outer.pack_forget()
@@ -1117,6 +1430,7 @@ class AppWindow:
 
     def _switch_to_dashboard(self) -> None:
         self._cancel_signing_in()
+        self._login_visible = False
         def _swap():
             self._login_frame.pack_forget()
             self._signing_in_frame.pack_forget()
@@ -1146,8 +1460,28 @@ class AppWindow:
             font=("Segoe UI", 12))
         self._signing_in_lbl.pack()
 
+        # Escape hatch — packed by _show_signin_escape a few seconds in, so a
+        # genuinely stuck restore never traps the user, while a slow-but-fine
+        # one is left alone to land.
+        self._signing_in_escape_lbl = tk.Label(
+            inner, text="Sign in manually", fg=C["subtext"], bg=C["bg"],
+            font=("Segoe UI", 9, "underline"), cursor="hand2")
+        self._signing_in_escape_lbl.bind(
+            "<Button-1>", lambda _e: self._reveal_login_now())
+        self._signing_in_escape_lbl.bind(
+            "<Enter>", lambda _e: self._signing_in_escape_lbl.configure(fg=C["accent"]))
+        self._signing_in_escape_lbl.bind(
+            "<Leave>", lambda _e: self._signing_in_escape_lbl.configure(fg=C["subtext"]))
+
     def _switch_to_signing_in(self) -> None:
         self._signing_in_active = True
+        self._login_visible = False
+        try:
+            self._signing_in_escape_lbl.pack_forget()
+            self._signing_in_escape_job = self._root.after(
+                _SIGNIN_ESCAPE_MS, self._show_signin_escape)
+        except (tk.TclError, AttributeError):
+            pass
         def _swap():
             self._dash_visible = False
             self._header_outer.pack_forget()
@@ -1174,7 +1508,8 @@ class AppWindow:
 
     def _cancel_signing_in(self) -> None:
         self._signing_in_active = False
-        for attr in ("_signing_in_reveal_job", "_signing_anim_job"):
+        for attr in ("_signing_in_reveal_job", "_signing_anim_job",
+                     "_signing_in_escape_job"):
             job = getattr(self, attr, None)
             if job is not None:
                 try:
@@ -1184,13 +1519,50 @@ class AppWindow:
                 setattr(self, attr, None)
 
     def _reveal_login_if_pending(self) -> None:
-        """Grace window elapsed without a restored session — show the login form
-        so the user can act. The background retry keeps running and will still
-        promote to the dashboard if the network comes back."""
+        """Grace window elapsed without a restored session. Only give up on the
+        splash when nothing is in flight — yanking the form up mid-attempt is
+        what made a reboot look like a forced re-sign-in, since the restore was
+        usually seconds from landing. The background retry keeps running either
+        way and still promotes if the network comes back."""
         self._signing_in_reveal_job = None
         if self._auth.is_authenticated:
+            self._promote_restored_session()
+            return
+        if not self._auth.has_saved_session():
+            self._reveal_login_now()
+            return
+        if getattr(self._auth, "restore_in_flight", False):
+            # Still talking to the server — wait it out rather than flipping the
+            # user to a form they don't need.
+            try:
+                self._signing_in_reveal_job = self._root.after(
+                    2000, self._reveal_login_if_pending)
+            except tk.TclError:
+                pass
+            return
+        self._reveal_login_now()
+
+    def _reveal_login_now(self) -> None:
+        """Show the login form (no-op once signed in)."""
+        if self._auth.is_authenticated:
+            return
+        if getattr(self, "_login_visible", False):
             return
         self._switch_to_login()
+
+    def _show_signin_escape(self) -> None:
+        """After a few seconds of dots, offer a way out of the splash without
+        taking the dashboard away from a restore that is about to land."""
+        self._signing_in_escape_job = None
+        if not getattr(self, "_signing_in_active", False):
+            return
+        lbl = getattr(self, "_signing_in_escape_lbl", None)
+        if lbl is None:
+            return
+        try:
+            lbl.pack(pady=(18, 0))
+        except tk.TclError:
+            pass
 
     def _show_dashboard(self) -> None:
         self._dash_frame.pack(fill="both", expand=True)
@@ -1252,7 +1624,14 @@ class AppWindow:
         # (including the login→dashboard size jump). One debounced async
         # full-tree repaint clears them.
         size = (event.width, event.height)
-        if size != getattr(self, "_last_repaint_size", None):
+        # Gate on the full GEOMETRY, not just the size: _resize() recentres, so
+        # a page swap between two same-height pages is a pure MOVE — and a move
+        # blits the old pixels to the new position just as happily. Gating on
+        # size alone meant that swap healed never.
+        geom = (event.width, event.height,
+                getattr(event, "x", 0), getattr(event, "y", 0))
+        if geom != getattr(self, "_last_repaint_geom", None):
+            self._last_repaint_geom = geom
             self._last_repaint_size = size
             job = getattr(self, "_resize_repaint_job", None)
             if job is not None:
@@ -1261,7 +1640,8 @@ class AppWindow:
                 except tk.TclError:
                     pass
             try:
-                self._resize_repaint_job = self._root.after(80, self._repaint_all)
+                self._resize_repaint_job = self._root.after(
+                    80, lambda: self._repaint_all(erase=True))
             except tk.TclError:
                 pass
         if not self._dash_visible:
@@ -1449,8 +1829,12 @@ class AppWindow:
             font=("Segoe UI", 12, "bold"), anchor="w",
         ).pack(fill="x", padx=20, pady=(10, 8))
 
-        row = tk.Frame(parent, bg=C["bg"])
-        row.pack(fill="x", padx=20)
+        # Stack: the three cards and the breakdown panel occupy the same slot.
+        self._impact_stack = tk.Frame(parent, bg=C["bg"])
+        self._impact_stack.pack(fill="x", padx=20)
+        row = tk.Frame(self._impact_stack, bg=C["bg"])
+        row.pack(fill="x")
+        self._impact_row = row
         for i in range(3):
             row.grid_columnconfigure(i, weight=1, uniform="impact")
         row.grid_rowconfigure(0, minsize=_IMPACT_CARD_H)
@@ -1473,6 +1857,23 @@ class AppWindow:
                 "value": "", "unit": "", "sub": "",
             }
             cv.bind("<Configure>", lambda _e, k=key: self._layout_impact_card(k))
+            # Every card opens its own breakdown. The panel takes the row's
+            # place rather than pushing content down, so Home still fits on one
+            # page with no scrolling.
+            cv.bind("<Button-1>", lambda _e, k=key: self._open_impact_detail(k))
+            cv.bind("<Enter>", lambda _e, k=key: self._hover_impact_card(k, True))
+            cv.bind("<Leave>", lambda _e, k=key: self._hover_impact_card(k, False))
+            cv.configure(cursor="hand2")
+
+        # Breakdown panel — same slot as the three cards, shown one at a time.
+        self._impact_detail = tk.Canvas(
+            self._impact_stack, bg=C["bg"], highlightthickness=0, bd=0,
+            height=_IMPACT_PANEL_H)
+        self._impact_detail.bind(
+            "<Configure>", lambda _e: self._layout_impact_detail())
+        self._impact_detail.bind("<Button-1>", self._on_impact_detail_click)
+        self._impact_open = None
+        self._impact_detail_hits = []
 
         # Speed starts at the product's nominal 160 wpm; once the account has
         # enough voiced-speech data, _refresh_impact replaces it with the
@@ -1499,10 +1900,11 @@ class AppWindow:
             icv.create_line(6, 11, 12, 11, fill=C["subtext"], width=1.4)
         # Words-dictated range selector — replaces the static "Today" label so
         # the footer count can switch between today/week/month/year/all time.
-        # Styled to match the mic (line ~3855) and popup-height (line ~4287)
-        # OptionMenu dropdowns elsewhere in this file: same dark-theme colours,
-        # flat relief, accent-highlighted menu. Left un-widened (no fill="x")
-        # so it stays compact and inline where the bold "Today" label was.
+        # Uses the shared Dropdown control (same as the mic and popup-position
+        # selectors), not tk.OptionMenu — that posts a native Win32 menu which
+        # ignores the configured colours and rendered as a white box. Left
+        # un-widened (no fill="x") so it stays compact and inline where the
+        # bold "Today" label was.
         _RANGE_LABELS = {
             "today": "Today",
             "week":  "This week",
@@ -1518,17 +1920,10 @@ class AppWindow:
         self._impact_range = _cur_range
 
         self._impact_range_var = tk.StringVar(value=_RANGE_LABELS[_cur_range])
-        _range_menu = tk.OptionMenu(brow, self._impact_range_var,
-                                    *_RANGE_LABELS.values())
-        _range_menu.configure(bg=C["surface"], fg=C["text"], relief="flat",
-                              font=("Segoe UI", 10, "bold"), anchor="w",
-                              highlightthickness=0,
-                              activebackground=C["accent"], activeforeground=C["bg"])
-        _range_menu["menu"].configure(bg=C["surface"], fg=C["text"],
-                                      activebackground=C["accent"],
-                                      activeforeground=C["bg"],
-                                      font=("Segoe UI", 9))
-        _range_menu.pack(side="left", padx=(9, 0))
+        _range_menu = Dropdown(brow, self._impact_range_var,
+                               list(_RANGE_LABELS.values()), bg=C["surface"],
+                               font=("Segoe UI", 10, "bold"))
+        _range_menu.pack(side="left", padx=(6, 0))
 
         def _on_range_change(*_a):
             key = _RANGE_FROM_LABEL.get(self._impact_range_var.get(), "today")
@@ -1568,19 +1963,25 @@ class AppWindow:
         if w < 40:
             return
         cv.delete("all")
+        # Hover lifts the card so the whole tile reads as the clickable control
+        # it is (it opens the breakdown). Same surface_hover token History uses.
+        hovered = bool(card.get("hover"))
+        surface = C["surface_hover"] if hovered else C["surface"]
         bgimg = None
         try:
             import ui_render
-            bgimg = ui_render.round_rect(cv, w, h, 12, C["surface"],
-                                         C["border"], 1, C["bg"])
+            bgimg = ui_render.round_rect(cv, w, h, 12, surface,
+                                         C["accent"] if hovered else C["border"],
+                                         1, C["bg"])
         except Exception:
             bgimg = None
         if bgimg is not None:
             cv.create_image(0, 0, image=bgimg, anchor="nw")
         else:
-            _rr(cv, 0, 0, w - 1, h - 1, 12, fill=C["surface"], outline=C["border"])
+            _rr(cv, 0, 0, w - 1, h - 1, 12, fill=surface,
+                outline=C["accent"] if hovered else C["border"])
         cx = w // 2
-        card["icon"](cv, cx, 32)
+        card["icon"](cv, cx, 32, surface)
         # tkinter has no letter-spacing — hair spaces between characters give
         # the reference's tracked-out caption look.
         cv.create_text(cx, 66, text=" ".join(card["label"]),
@@ -1608,14 +2009,378 @@ class AppWindow:
         cv.create_text(cx, 127, text=card["sub"], fill=C["subtext"],
                        font=("Segoe UI", 8))
 
+    # ── Impact breakdown panels ───────────────────────────────────────────────
+    #
+    # Every headline number on Home is a claim, and a claim the user can't check
+    # is just decoration. Clicking a card swaps the three-card row for a panel
+    # that shows the working: where the minutes came from, what the wpm was
+    # measured against, which days the streak actually covers. The panel takes
+    # the row's slot rather than pushing content down, so Home keeps fitting on
+    # one page with no scrolling.
+
+    def _hover_impact_card(self, key: str, on: bool) -> None:
+        card = self._impact_cards.get(key)
+        if not card or card.get("hover") == on:
+            return
+        card["hover"] = on
+        self._layout_impact_card(key)
+
+    def _open_impact_detail(self, key: str) -> None:
+        if getattr(self, "_impact_open", None) == key:
+            self._close_impact_detail()
+            return
+        first_open = not getattr(self, "_impact_open", None)
+        self._impact_open = key
+        try:
+            self._impact_row.pack_forget()
+            self._impact_detail.pack(fill="x")
+        except tk.TclError:
+            return
+        if first_open:
+            self._grow_for_impact_detail()
+        self._layout_impact_detail()
+
+    def _grow_for_impact_detail(self) -> None:
+        """The panel is taller than the row it replaces, so make room for it and
+        remember what to go back to. _resize() records the size it applied, and
+        _on_root_configure skips saving a size it applied itself, so this
+        temporary height never becomes the account's remembered window size."""
+        try:
+            w = self._root.winfo_width()
+            h = self._root.winfo_height()
+        except tk.TclError:
+            return
+        if w < MIN_W or h < MIN_H:
+            return
+        self._impact_size_restore = (w, h)
+        need = h + (_IMPACT_PANEL_H_STREAK - _IMPACT_CARD_H)
+        cap = max(MIN_H, self._root.winfo_screenheight() - 120)
+        self._resize(w, min(need, cap))
+
+    def _close_impact_detail(self) -> None:
+        was_open = getattr(self, "_impact_open", None)
+        self._impact_open = None
+        try:
+            self._impact_detail.pack_forget()
+            self._impact_row.pack(fill="x")
+        except tk.TclError:
+            pass
+        prev = getattr(self, "_impact_size_restore", None)
+        if was_open and prev:
+            self._impact_size_restore = None
+            self._resize(*prev)
+        for k in self._impact_cards:
+            self._impact_cards[k]["hover"] = False
+            self._layout_impact_card(k)
+
+    def _on_impact_detail_click(self, event) -> None:
+        for x0, y0, x1, y1, action in getattr(self, "_impact_detail_hits", ()):
+            if x0 <= event.x <= x1 and y0 <= event.y <= y1:
+                action()
+                return
+        # Anywhere else in the panel closes it — the whole card is the control,
+        # same as clicking it open.
+        self._close_impact_detail()
+
+    # ── panel chrome ──────────────────────────────────────────────────────────
+
+    def _panel_head(self, cv, w: int, key: str, title: str) -> None:
+        """Card background, icon, tracked-out title and the close control."""
+        h = self._impact_panel_height(key)
+        bgimg = None
+        try:
+            import ui_render
+            bgimg = ui_render.round_rect(cv, w, h, 12,
+                                         C["surface"], C["border"], 1, C["bg"])
+        except Exception:
+            bgimg = None
+        if bgimg is not None:
+            cv.create_image(0, 0, image=bgimg, anchor="nw")
+        else:
+            _rr(cv, 0, 0, w - 1, h - 1, 12,
+                fill=C["surface"], outline=C["border"])
+        card = self._impact_cards.get(key) or {}
+        icon = card.get("icon")
+        if icon:
+            icon(cv, 32, 30)
+        cv.create_text(56, 24, text=" ".join(title), anchor="w",
+                       fill=C["subtext"], font=("Segoe UI", 7, "bold"))
+        cv.create_text(w - 20, 26, text="✕", anchor="e",
+                       fill=C["subtext"], font=("Segoe UI", 11))
+        self._impact_detail_hits.append(
+            (w - 36, 12, w - 8, 40, self._close_impact_detail))
+
+    @staticmethod
+    def _panel_bar(cv, x: int, y: int, w: int, frac: float, colour: str) -> None:
+        """Proportion bar. Always draws the full-width track so an empty
+        measure still reads as 'none of this', not as a missing element."""
+        _rr(cv, x, y, x + w, y + 6, 3, fill=_PANEL_TRACK, outline="")
+        fill_w = int(max(0.0, min(1.0, frac)) * w)
+        if fill_w >= 3:
+            _rr(cv, x, y, x + fill_w, y + 6, 3, fill=colour, outline="")
+
+    @staticmethod
+    def _fmt_span(minutes: float) -> str:
+        """Human duration from minutes: '48s' / '1.5 min' / '24 min' / '5.4 hrs'.
+
+        Small figures keep a decimal because this panel exists to be checked —
+        rounding 1.5 min to '2 min' next to a '47s saved' headline makes the
+        arithmetic look wrong."""
+        m = max(0.0, float(minutes or 0.0))
+        if m < 1:
+            return f"{int(round(m * 60))}s"
+        if m < 10:
+            return f"{m:.1f}".rstrip("0").rstrip(".") + " min"
+        if m < 90:
+            return f"{int(round(m))} min"
+        hrs = m / 60.0
+        return f"{hrs:.1f} hrs" if hrs < 10 else f"{int(round(hrs))} hrs"
+
+    @staticmethod
+    def _impact_panel_height(key: str) -> int:
+        return _IMPACT_PANEL_H_STREAK if key == "streak" else _IMPACT_PANEL_H
+
+    def _layout_impact_detail(self) -> None:
+        key = getattr(self, "_impact_open", None)
+        cv = getattr(self, "_impact_detail", None)
+        if not key or cv is None:
+            return
+        h = self._impact_panel_height(key)
+        try:
+            if int(cv["height"]) != h:
+                cv.configure(height=h)
+        except (tk.TclError, ValueError):
+            pass
+        w = cv.winfo_width()
+        if w < 60:
+            return
+        cv.delete("all")
+        self._impact_detail_hits = []
+        snap = self._stats.snapshot() if self._stats else {}
+        if key == "time":
+            self._draw_detail_time(cv, w, snap)
+        elif key == "speed":
+            self._draw_detail_speed(cv, w, snap)
+        else:
+            self._draw_detail_streak(cv, w, snap)
+
+    # ── Time saved ────────────────────────────────────────────────────────────
+
+    def _draw_detail_time(self, cv, w: int, snap: dict) -> None:
+        import stats as stats_mod
+        self._panel_head(cv, w, "time", "TIME SAVED")
+        pad = 20
+        inner = w - pad * 2
+        dict_min = float(snap.get("dictation_saved_minutes", 0.0))
+        ref_min = float(snap.get("refine_saved_minutes", 0.0))
+        total = dict_min + ref_min
+        biggest = max(dict_min, ref_min, 0.0001)
+
+        cv.create_text(pad, 52, text=self._fmt_span(total), anchor="w",
+                       fill=C["text"], font=("Segoe UI", 17, "bold"))
+        cv.create_text(pad + self._impact_font_value.measure(
+            self._fmt_span(total)) + 10, 55, text="saved so far", anchor="w",
+            fill=C["subtext"], font=("Segoe UI", 9))
+
+        # Dictation
+        words = int(snap.get("total_words", 0))
+        spoke_min = float(snap.get("total_audio_seconds", 0.0)) / 60.0
+        typing_min = words / float(stats_mod.TYPING_WPM) if words else 0.0
+        cv.create_text(pad, 86, text="Dictation", anchor="w",
+                       fill=C["text"], font=("Segoe UI", 10, "bold"))
+        cv.create_text(w - pad, 86, text=self._fmt_span(dict_min), anchor="e",
+                       fill=C["accent"], font=("Segoe UI", 10, "bold"))
+        self._panel_bar(cv, pad, 100, inner, dict_min / biggest, C["accent"])
+        cv.create_text(
+            pad, 114, anchor="nw", width=inner,
+            text=(f"{words:,} words. Typing them takes "
+                  f"{self._fmt_span(typing_min)}; speaking them took "
+                  f"{self._fmt_span(spoke_min)}."),
+            fill=C["subtext"], font=("Segoe UI", 8))
+
+        # AI refine
+        n = int(snap.get("refine_count", 0))
+        cv.create_text(pad, 158, text="AI refine", anchor="w",
+                       fill=C["text"], font=("Segoe UI", 10, "bold"))
+        cv.create_text(w - pad, 158, text=self._fmt_span(ref_min), anchor="e",
+                       fill=C["success"], font=("Segoe UI", 10, "bold"))
+        self._panel_bar(cv, pad, 172, inner, ref_min / biggest, C["success"])
+        if n:
+            in_app = float(snap.get("refine_seconds", 0.0)) / n
+            manual = stats_mod.refine_manual_seconds(
+                int(snap.get("refine_prompt_words", 0)) // max(1, n))
+            body = (f"{n:,} applied. By hand — switch to a chat assistant, "
+                    f"paste, type the instruction, wait, copy back, paste over "
+                    f"— that is about {manual:.0f}s each. Here it took "
+                    f"{in_app:.0f}s.")
+        else:
+            body = ("Nothing refined yet. Each applied result saves about "
+                    f"{stats_mod.refine_manual_seconds(0) - 9:.0f}s over "
+                    "pasting the text into a chat window and back.")
+        cv.create_text(pad, 186, anchor="nw", width=inner, text=body,
+                       fill=C["subtext"], font=("Segoe UI", 8))
+        cv.create_text(pad, _IMPACT_PANEL_H - 16, anchor="w",
+                       text=f"Typing compared at {stats_mod.TYPING_WPM} wpm",
+                       fill=_PANEL_DIM, font=("Segoe UI", 8))
+
+    # ── Dictation speed ───────────────────────────────────────────────────────
+
+    def _draw_detail_speed(self, cv, w: int, snap: dict) -> None:
+        import stats as stats_mod
+        self._panel_head(cv, w, "speed", "DICTATION SPEED")
+        pad = 20
+        inner = w - pad * 2
+        wpm = int(snap.get("avg_wpm", 0) or 0)
+        measured = wpm > 0
+        shown = wpm or stats_mod.DICTATION_WPM
+        ratio = shown / float(stats_mod.TYPING_WPM)
+
+        cv.create_text(pad, 52, text=f"{shown} wpm", anchor="w",
+                       fill=C["text"], font=("Segoe UI", 17, "bold"))
+        cv.create_text(w - pad, 55, text=f"{ratio:.1f}× faster than typing".replace(".0×", "×"),
+                       anchor="e", fill=C["subtext"], font=("Segoe UI", 9))
+
+        rows = [
+            ("You" if measured else "Dictation", shown, C["accent"]),
+            ("Typing", stats_mod.TYPING_WPM, C["subtext"]),
+            ("Handwriting", 20, _PANEL_DIM),
+        ]
+        top = max(r[1] for r in rows)
+        y = 88
+        for label, value, colour in rows:
+            cv.create_text(pad, y, text=label, anchor="w", fill=C["text"],
+                           font=("Segoe UI", 9))
+            cv.create_text(w - pad, y, text=f"{value} wpm", anchor="e",
+                           fill=C["subtext"], font=("Segoe UI", 9))
+            self._panel_bar(cv, pad, y + 12, inner, value / float(top), colour)
+            y += 40
+
+        voiced_w = int(snap.get("voiced_words", 0))
+        voiced_m = float(snap.get("voiced_seconds", 0.0)) / 60.0
+        if measured:
+            body = (f"Measured from {voiced_w:,} words over "
+                    f"{self._fmt_span(voiced_m)} of speech. Silence is left "
+                    f"out, so this is how fast you actually talk.")
+        else:
+            body = (f"Showing the nominal {stats_mod.DICTATION_WPM} wpm. "
+                    f"Dictate 50 words ({voiced_w:,} so far) and this becomes "
+                    f"your own measured speed.")
+        cv.create_text(pad, 212, anchor="nw", width=inner, text=body,
+                       fill=C["subtext"], font=("Segoe UI", 8))
+
+    # ── Day streak ────────────────────────────────────────────────────────────
+
+    def _draw_detail_streak(self, cv, w: int, snap: dict) -> None:
+        import datetime
+        self._panel_head(cv, w, "streak", "DAY STREAK")
+        pad = 20
+        days = int(snap.get("streak_days", 0))
+        best = int(snap.get("best_streak", 0))
+        active = set(snap.get("active_days", ()))
+
+        cv.create_text(pad, 52, text=f"{days} day{'' if days == 1 else 's'}",
+                       anchor="w", fill=C["text"], font=("Segoe UI", 17, "bold"))
+        cv.create_text(w - pad, 55, text=f"best {best}", anchor="e",
+                       fill=C["subtext"], font=("Segoe UI", 9))
+
+        today = datetime.date.today()
+        month = getattr(self, "_streak_month", None) or today.replace(day=1)
+        self._streak_month = month
+
+        # Month header with prev/next — the calendar is only useful if you can
+        # look back at the run you built.
+        cv.create_text(w // 2, 80, text=month.strftime("%B %Y"),
+                       fill=C["text"], font=("Segoe UI", 10, "bold"))
+        cv.create_text(pad + 6, 80, text="‹", fill=C["subtext"],
+                       font=("Segoe UI", 14, "bold"))
+        self._impact_detail_hits.append(
+            (pad - 4, 68, pad + 20, 94, lambda: self._step_streak_month(-1)))
+        if month < today.replace(day=1):
+            cv.create_text(w - pad - 6, 80, text="›", fill=C["subtext"],
+                           font=("Segoe UI", 14, "bold"))
+            self._impact_detail_hits.append(
+                (w - pad - 20, 68, w - pad + 4, 94,
+                 lambda: self._step_streak_month(1)))
+
+        # 26px rows keep all six possible week rows clear of the footnote (a
+        # month starting on a Sunday spills to six rows — August 2026 does).
+        cell = min(26, (w - pad * 2) // 7)
+        grid_w = cell * 7
+        x0 = (w - grid_w) // 2
+        for i, name in enumerate(("M", "T", "W", "T", "F", "S", "S")):
+            cv.create_text(x0 + i * cell + cell // 2, 102, text=name,
+                           fill=_PANEL_DIM, font=("Segoe UI", 7, "bold"))
+
+        flame = None
+        try:
+            import ui_render
+            flame = ui_render.icon_flame(cv, cell - 8, C["accent"],
+                                         cutout=C["surface"], bg=C["surface"])
+        except Exception:
+            flame = None
+
+        first = month.replace(day=1)
+        nxt = (first + datetime.timedelta(days=32)).replace(day=1)
+        row_top = 114
+        row_h = cell
+        d = first
+        while d < nxt:
+            col = d.weekday()
+            week = ((d.day + first.weekday() - 1) // 7)
+            cx = x0 + col * cell + cell // 2
+            cy = row_top + week * row_h + row_h // 2
+            iso = d.isoformat()
+            if iso in active:
+                # A used day is a flame, nothing else — the date would only
+                # compete with it, and the point of the grid is which days burn.
+                if flame is not None:
+                    cv.create_image(cx, cy, image=flame)
+                else:
+                    cv.create_text(cx, cy, text="●", fill=C["accent"],
+                                   font=("Segoe UI", 11, "bold"))
+            else:
+                # Unused days keep their date so the grid still reads as a
+                # calendar: dim for the future, dimmer again for weekends
+                # (which were never required).
+                if d > today:
+                    colour = "#3a3a3a"
+                elif _is_weekend_date(d):
+                    colour = _PANEL_DIM
+                else:
+                    colour = C["subtext"]
+                cv.create_text(cx, cy, text=str(d.day), fill=colour,
+                               font=("Segoe UI", 8))
+            if d == today:
+                r = cell // 2 - 2
+                cv.create_oval(cx - r, cy - r, cx + r, cy + r,
+                               outline=C["accent"], width=1)
+            d += datetime.timedelta(days=1)
+
+        cv.create_text(w // 2, _IMPACT_PANEL_H_STREAK - 18,
+                       text="Weekends bridge a run — missing one never breaks it",
+                       fill=_PANEL_DIM, font=("Segoe UI", 8))
+
+    def _step_streak_month(self, delta: int) -> None:
+        import datetime
+        month = getattr(self, "_streak_month", None) or datetime.date.today().replace(day=1)
+        if delta < 0:
+            month = (month - datetime.timedelta(days=1)).replace(day=1)
+        else:
+            month = (month + datetime.timedelta(days=32)).replace(day=1)
+            if month > datetime.date.today().replace(day=1):
+                month = datetime.date.today().replace(day=1)
+        self._streak_month = month
+        self._layout_impact_detail()
+
     # Impact icons are PIL-rendered (anti-aliased, cached in ui_render); the
     # canvas-primitive bodies below are the no-PIL fallback only.
 
     @staticmethod
-    def _draw_icon_clock(cv, cx, cy):
+    def _draw_icon_clock(cv, cx, cy, bg=None):
+        bg = bg or C["surface"]
         try:
             import ui_render
-            photo = ui_render.icon_clock(cv, 31, C["accent"], bg=C["surface"])
+            photo = ui_render.icon_clock(cv, 31, C["accent"], bg=bg)
         except Exception:
             photo = None
         if photo is not None:
@@ -1630,10 +2395,11 @@ class AppWindow:
                        capstyle="round")
 
     @staticmethod
-    def _draw_icon_bolt(cv, cx, cy):
+    def _draw_icon_bolt(cv, cx, cy, bg=None):
+        bg = bg or C["surface"]
         try:
             import ui_render
-            photo = ui_render.icon_bolt(cv, 31, C["success"], bg=C["surface"])
+            photo = ui_render.icon_bolt(cv, 31, C["success"], bg=bg)
         except Exception:
             photo = None
         if photo is not None:
@@ -1644,13 +2410,14 @@ class AppWindow:
                           fill=C["success"], outline="")
 
     @staticmethod
-    def _draw_icon_flame(cv, cx, cy):
+    def _draw_icon_flame(cv, cx, cy, bg=None):
         """Filled teardrop flame with a lick curling off the left, matching the
         reference. Filled reads far better than a stroke at this size."""
+        bg = bg or C["surface"]
         try:
             import ui_render
             photo = ui_render.icon_flame(cv, 31, C["accent"],
-                                         cutout=C["surface"], bg=C["surface"])
+                                         cutout=bg, bg=bg)
         except Exception:
             photo = None
         if photo is not None:
@@ -1731,6 +2498,10 @@ class AppWindow:
         if hasattr(self, "_impact_today_lbl"):
             self._impact_today_lbl.configure(
                 text=f"·  {tw:,} word{'' if tw == 1 else 's'} dictated")
+
+        # An open breakdown is showing the same numbers — keep it live.
+        if getattr(self, "_impact_open", None):
+            self._layout_impact_detail()
 
     def _schedule_midnight_refresh(self) -> None:
         """Roll the cards over at local midnight so Today resets and the
@@ -3899,13 +4670,8 @@ class AppWindow:
         mic_var = tk.StringVar(
             value=_AUTO_PREFIX if _auto_selected else current_mic)
 
-        mic_menu = tk.OptionMenu(mic_card, mic_var, _AUTO_PREFIX)
-        mic_menu.configure(bg=C["surface_hover"], fg=C["text"], relief="flat",
-                           font=("Segoe UI", 9), anchor="w", highlightthickness=0,
-                           activebackground=C["accent"], activeforeground=C["bg"])
-        mic_menu["menu"].configure(bg=C["surface"], fg=C["text"],
-                                   activebackground=C["accent"], activeforeground=C["bg"],
-                                   font=("Segoe UI", 9))
+        mic_menu = Dropdown(mic_card, mic_var, [_AUTO_PREFIX],
+                            bg=C["surface_hover"], font=("Segoe UI", 9))
         mic_menu.pack(fill="x", pady=(4, 0))
 
         # Caption under the dropdown: the button truncates long device names,
@@ -3960,10 +4726,7 @@ class AppWindow:
                         short = best if len(best) <= 30 else best[:27] + "…"
                         auto_label = f"{_AUTO_PREFIX} ({short})"
                 options = [auto_label] + [d["name"] for d in unique_devs]
-                menu = mic_menu["menu"]
-                menu.delete(0, "end")
-                for opt in options:
-                    menu.add_command(label=opt, command=lambda v=opt: mic_var.set(v))
+                mic_menu.set_values(options)
 
                 if not _auto_selected and current_mic in options:
                     mic_var.set(current_mic)
@@ -4331,13 +5094,9 @@ class AppWindow:
         if _cur_height not in _HEIGHT_LABELS:
             _cur_height = "low"
         _height_var = tk.StringVar(value=_HEIGHT_LABELS[_cur_height])
-        _height_menu = tk.OptionMenu(_height_card, _height_var, *_HEIGHT_LABELS.values())
-        _height_menu.configure(bg=C["surface_hover"], fg=C["text"], relief="flat",
-                               font=("Segoe UI", 9), anchor="w", highlightthickness=0,
-                               activebackground=C["accent"], activeforeground=C["bg"])
-        _height_menu["menu"].configure(bg=C["surface"], fg=C["text"],
-                                       activebackground=C["accent"], activeforeground=C["bg"],
-                                       font=("Segoe UI", 9))
+        _height_menu = Dropdown(_height_card, _height_var,
+                                list(_HEIGHT_LABELS.values()),
+                                bg=C["surface_hover"], font=("Segoe UI", 9))
         _height_menu.pack(fill="x", pady=(6, 0))
 
         def _on_height_change(*_a):
@@ -4599,28 +5358,41 @@ class AppWindow:
             daemon=True, name="session-restore-retry",
         ).start()
 
+    # Retry cadence: short at first so a cold boot recovers in seconds once the
+    # network appears, then stretching out. Trailing value repeats to fill the
+    # attempt budget (~10 min total).
+    _RESTORE_BACKOFF = (2, 3, 5, 8, 12, 20, 30)
+
     def _session_restore_retry_loop(self) -> None:
         import time
         # This loop IS the startup session restore (main() no longer blocks on
         # it — the network token refresh used to delay first paint by seconds).
-        # First attempt fires immediately; retries continue for ~5 min to cover
+        # First attempt fires immediately; retries continue for ~10 min to cover
         # a slow Wi-Fi reconnect after a cold boot, but bounded so we don't spin
         # forever. Stops early if the session becomes valid, gets cleared
         # (definitive auth failure), or the user signs in manually meanwhile.
         for attempt in range(30):
             if attempt:
-                time.sleep(10)
+                gaps = self._RESTORE_BACKOFF
+                time.sleep(gaps[min(attempt - 1, len(gaps) - 1)])
             if self._auth.is_authenticated:
+                # An earlier attempt (or the late-landing worker) already signed
+                # us in. Promote — returning without promoting is what left the
+                # app authenticated with the login form still on screen.
+                self._ui_after(0, self._promote_restored_session)
                 return
             if not self._auth.has_saved_session():
+                self._ui_after(0, self._reveal_login_now)
                 return  # file cleared → invalid session, leave login up
             try:
                 if self._auth.try_restore_session():
-                    if self._root:
-                        self._root.after(0, self._promote_restored_session)
+                    self._ui_after(0, self._promote_restored_session)
                     return
             except Exception:
                 pass
+        # Budget exhausted without a restore — stop pretending and let the user act.
+        if not self._auth.is_authenticated:
+            self._ui_after(0, self._reveal_login_now)
 
     def _promote_restored_session(self) -> None:
         """Main-thread: a background retry restored the session — switch to the
@@ -4658,8 +5430,16 @@ class AppWindow:
 
         def _on_success(auth):
             self._root.deiconify()
+            self._login_visible = False
             self._show_dashboard()
             self._apply_auth_ui()
+            # Same heal the embedded path gets — this route bypasses
+            # _atomic_ui, so nothing else invalidates the resized window.
+            self._repaint_all(erase=True)
+            try:
+                self._root.after(0, lambda: self._repaint_all(erase=True))
+            except tk.TclError:
+                pass
             self._fire_authenticated()
             if after_login:
                 after_login(auth)

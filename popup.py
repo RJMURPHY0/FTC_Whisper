@@ -231,6 +231,13 @@ class FloatingPopup:
         self._current_result: Optional[str] = None
         self._inserted_ok: bool = True
         self._ai_busy: bool = False
+        # Refine measurement — the raw numbers behind the "Time saved" card's
+        # AI-refine line. Elapsed is wall-clock from opening the panel to the
+        # user applying a result, so the saving is computed against what the
+        # refine ACTUALLY cost, never an assumed figure. See stats.refine_saved_seconds.
+        self._refine_started_at: Optional[float] = None
+        self._refine_prompt_words: int = 0
+        self._refine_prompt_spoken: bool = False
         self._popup_hwnd: int = 0
         self._popup_height: str = "low"  # "low" | "medium" | "high" — vertical placement of the fixed popup
         self._upgrading: bool = False
@@ -367,6 +374,9 @@ class FloatingPopup:
         self._current_result = None
         self._upgrading = upgrading
         self._upgrade_result = None
+        self._refine_started_at = None
+        self._refine_prompt_words = 0
+        self._refine_prompt_spoken = False
         # Session token: a slow upgrade thread from a PREVIOUS dictation must
         # not attach its text to this popup (Replace would then undo the new
         # dictation and inject the old one).
@@ -1243,6 +1253,8 @@ class FloatingPopup:
         self._result_frame.pack_forget()
         self._refine_frame.pack()
         self._mode = "refinement"
+        if self._refine_started_at is None:
+            self._refine_started_at = time.monotonic()
         self._last_shown = time.time()
         # Idle auto-dismiss, stamp-guarded like the icon badge so a stale
         # timer from an earlier panel session can never kill a newer one.
@@ -1378,6 +1390,21 @@ class FloatingPopup:
 
     # ── Actions ────────────────────────────────────────────────────────────────
 
+    def refine_stats(self) -> Optional[dict]:
+        """Measurements for the refine that is being applied right now, or None
+        if no refinement ran this session. Read by app.py at the moment the
+        result is actually inserted/replaced — a refine the user looked at and
+        discarded saved them nothing and must not be counted."""
+        if self._refine_started_at is None:
+            return None
+        return {
+            "elapsed_seconds": max(0.0, time.monotonic() - self._refine_started_at),
+            "prompt_words": int(self._refine_prompt_words),
+            "prompt_spoken": bool(self._refine_prompt_spoken),
+            "result_chars": len(self._current_result or ""),
+            "source_words": len((self._original_text or "").split()),
+        }
+
     def _do_insert(self) -> None:
         """Manual insert — re-injects the original transcribed text at cursor."""
         if self._on_insert:
@@ -1478,6 +1505,9 @@ class FloatingPopup:
 
             if text and text.strip():
                 t = text.strip()
+                # The instruction was SPOKEN, not typed — doing this by hand in
+                # a chat window would have meant typing it (see stats).
+                self._refine_prompt_spoken = True
                 self.root.after(0, lambda t=t: self._set_ask_entry(t))
             else:
                 self.root.after(0, lambda: self._ai_status.configure(text="⚠  No speech detected"))
@@ -1566,6 +1596,8 @@ class FloatingPopup:
             return
         if self._ai_busy:
             return
+        if self._refine_started_at is None:
+            self._refine_started_at = time.monotonic()
         self._ai_busy = True
         self._ai_status.configure(text=f"✦  Refining ({mode})…")
         self._ai_status.pack(anchor="w")
@@ -1599,6 +1631,9 @@ class FloatingPopup:
             return
         if self._ai_busy:
             return
+        if self._refine_started_at is None:
+            self._refine_started_at = time.monotonic()
+        self._refine_prompt_words = len(instruction.split())
         self._ai_busy = True
         self._ai_status.configure(text=f"✦  Asking AI…")
         self._ai_status.pack(anchor="w")

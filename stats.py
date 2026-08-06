@@ -24,6 +24,10 @@ DICTATION_WPM = 160
 TYPING_WPM = 40
 
 _STATS_TABLE = "user_daily_stats"
+# Columns added after the table shipped — stripped from the payload when the
+# remote table predates them (see _push_day).
+_REFINE_COLS = ("refines", "refine_seconds", "refine_prompt_words",
+                "refine_voice_prompts")
 # Bounded remote reads: ~13 months of daily rows covers every card.
 _PULL_DAYS_LIMIT = 400
 # One-time backfill from the transcriptions log (rows, not days).
@@ -69,8 +73,111 @@ def _saved_minutes(words: int, audio_seconds: float) -> float:
     return max(0.0, typing_min - dictating_min)
 
 
+# ---------------------------------------------------------------------------
+# AI refine — what the same edit costs by hand
+# ---------------------------------------------------------------------------
+# The comparison is the round trip a person actually does without this app:
+# switch to the browser, paste the text into a chat assistant, type what they
+# want changed, wait, copy the answer back, select the old text and paste over
+# it. Every step below is a separate, defensible number rather than one made-up
+# total, so the breakdown panel can show its working.
+#
+# Deliberately conservative: each figure is what an experienced user does on a
+# good day, and the app's own cost is MEASURED (press to applied), not assumed.
+REFINE_SWITCH_TO_BROWSER_S = 4.0    # alt-tab / find the tab / new tab
+REFINE_COPY_SOURCE_S       = 2.5    # select the text, Ctrl+C
+REFINE_PASTE_INTO_CHAT_S   = 2.0    # click the box, Ctrl+V
+REFINE_MODEL_WAIT_S        = 6.0    # a web chat answering a paragraph
+REFINE_COPY_RESULT_S       = 3.0    # select the reply (no copy button on a partial), Ctrl+C
+REFINE_RETURN_AND_PASTE_S  = 4.5    # switch back, reselect the old text, paste over it
+# Typed instruction length when the user pressed a preset button (Fix All /
+# Email) instead of writing one — by hand they would still have had to say what
+# they wanted. Eight words is a short, realistic instruction.
+REFINE_DEFAULT_PROMPT_WORDS = 8
+
+
+def refine_saved_seconds(elapsed_seconds: float, prompt_words: int = 0,
+                         prompt_spoken: bool = False) -> float:
+    """Seconds saved by one APPLIED refinement (inserted or replaced).
+
+    manual = the full copy-to-a-chat-assistant round trip, including typing the
+    instruction at TYPING_WPM; app = what it actually took, measured. Floored at
+    zero so a refine the user sat on for five minutes never reads as negative."""
+    words = int(prompt_words or 0)
+    if words <= 0:
+        words = REFINE_DEFAULT_PROMPT_WORDS
+    typing_prompt_s = (words / float(TYPING_WPM)) * 60.0
+    manual = (REFINE_SWITCH_TO_BROWSER_S + REFINE_COPY_SOURCE_S
+              + REFINE_PASTE_INTO_CHAT_S + typing_prompt_s
+              + REFINE_MODEL_WAIT_S + REFINE_COPY_RESULT_S
+              + REFINE_RETURN_AND_PASTE_S)
+    return max(0.0, manual - max(0.0, float(elapsed_seconds or 0.0)))
+
+
+def refine_manual_seconds(prompt_words: int = 0) -> float:
+    """The manual round-trip total alone — used by the breakdown panel."""
+    words = int(prompt_words or 0)
+    if words <= 0:
+        words = REFINE_DEFAULT_PROMPT_WORDS
+    return (REFINE_SWITCH_TO_BROWSER_S + REFINE_COPY_SOURCE_S
+            + REFINE_PASTE_INTO_CHAT_S + (words / float(TYPING_WPM)) * 60.0
+            + REFINE_MODEL_WAIT_S + REFINE_COPY_RESULT_S
+            + REFINE_RETURN_AND_PASTE_S)
+
+
+def _refine_saved_minutes(count: int, elapsed_seconds: float,
+                          prompt_words: int) -> float:
+    """Minutes saved by a day's applied refinements, from the day's aggregates.
+
+    refine_saved_seconds is linear in both inputs, so summing per refinement and
+    summing the aggregates give the same answer: n × the fixed round-trip steps,
+    plus the typing time for all the instruction words, minus the measured in-app
+    total. Floored per day."""
+    n = int(count or 0)
+    if n <= 0:
+        return 0.0
+    words = int(prompt_words or 0)
+    if words <= 0:
+        words = n * REFINE_DEFAULT_PROMPT_WORDS
+    fixed = (REFINE_SWITCH_TO_BROWSER_S + REFINE_COPY_SOURCE_S
+             + REFINE_PASTE_INTO_CHAT_S + REFINE_MODEL_WAIT_S
+             + REFINE_COPY_RESULT_S + REFINE_RETURN_AND_PASTE_S)
+    manual = n * fixed + (words / float(TYPING_WPM)) * 60.0
+    return max(0.0, manual - max(0.0, float(elapsed_seconds or 0.0))) / 60.0
+
+
 def _is_weekend(d: datetime.date) -> bool:
     return d.weekday() >= 5  # Mon=0 … Sat=5, Sun=6
+
+
+def _best_streak(active_isos) -> int:
+    """Longest run ever, under the same rule as the live streak: weekdays are
+    required, weekend days bridge a gap without breaking it and count when
+    used. Single forward pass over the recorded days."""
+    dates = []
+    for iso in active_isos or ():
+        try:
+            dates.append(datetime.date.fromisoformat(iso))
+        except Exception:
+            continue
+    if not dates:
+        return 0
+    dates.sort()
+    used = set(dates)
+    one = datetime.timedelta(days=1)
+    best = run = 0
+    d = dates[0]
+    end = dates[-1]
+    guard = 0
+    while d <= end and guard < 3660 * 2:
+        if d in used:
+            run += 1
+            best = max(best, run)
+        elif not _is_weekend(d):
+            run = 0
+        d += one
+        guard += 1
+    return best
 
 
 def _compute_streak(used, today: datetime.date) -> int:
@@ -184,6 +291,33 @@ class StatsStore:
         self._notify()
         self._schedule_push()
 
+    def record_refine(self, elapsed_seconds: float, prompt_words: int = 0,
+                      prompt_spoken: bool = False) -> None:
+        """Add one APPLIED refinement (the user inserted or replaced with the
+        result) to today's bucket. A refinement that was generated and then
+        discarded saved nothing and is never recorded.
+
+        Stores the count, the measured in-app seconds and the instruction word
+        count, so the saving can be recomputed from raw numbers rather than
+        being frozen at whatever the model said on the day."""
+        day = _today().isoformat()
+        words = int(prompt_words or 0)
+        if words <= 0:
+            words = REFINE_DEFAULT_PROMPT_WORDS
+        with self._lock:
+            u = self._user_blob()
+            rec = u["days"].setdefault(day, {"w": 0, "s": 0.0})
+            rec["r"] = int(rec.get("r", 0)) + 1
+            rec["rs"] = round(float(rec.get("rs", 0.0))
+                              + max(0.0, float(elapsed_seconds or 0.0)), 2)
+            rec["rp"] = int(rec.get("rp", 0)) + words
+            if prompt_spoken:
+                rec["rv"] = int(rec.get("rv", 0)) + 1
+            self._trim_locked(u)
+            self._save_locked()
+        self._notify()
+        self._schedule_push()
+
     def snapshot(self) -> dict:
         """Current metrics for the signed-in (or local) account."""
         with self._lock:
@@ -195,13 +329,31 @@ class StatsStore:
         today = _today()
         today_words = int(days.get(today.isoformat(), {}).get("w", 0))
 
-        saved_min = carry_saved
+        dictation_min = carry_saved
         voiced_s = 0.0
         voiced_w = 0
+        total_words = carry_words
+        total_audio_s = 0.0
+        refine_n = 0
+        refine_s = 0.0
+        refine_pw = 0
+        refine_voice_n = 0
+        refine_min = 0.0
         for rec in days.values():
-            saved_min += _saved_minutes(int(rec.get("w", 0)), float(rec.get("s", 0.0)))
+            dictation_min += _saved_minutes(int(rec.get("w", 0)), float(rec.get("s", 0.0)))
             voiced_s += float(rec.get("v", 0.0))
             voiced_w += int(rec.get("vw", 0))
+            total_words += int(rec.get("w", 0))
+            total_audio_s += float(rec.get("s", 0.0))
+            n = int(rec.get("r", 0))
+            if n:
+                refine_n += n
+                refine_s += float(rec.get("rs", 0.0))
+                refine_pw += int(rec.get("rp", 0))
+                refine_voice_n += int(rec.get("rv", 0))
+                refine_min += _refine_saved_minutes(
+                    n, float(rec.get("rs", 0.0)), int(rec.get("rp", 0)))
+        saved_min = dictation_min + refine_min
 
         # Real dictation speed: words per minute of actual speech. Shown only
         # once there's enough data to be a measurement rather than noise;
@@ -223,6 +375,9 @@ class StatsStore:
         # of a warning.
         streak_weekend_grace = (_is_weekend(today) and not active_today and streak > 0)
 
+        active_days = sorted(iso for iso, rec in days.items()
+                             if int(rec.get("w", 0)) > 0)
+
         return {
             "today_words": today_words,
             "streak_days": streak,
@@ -231,6 +386,20 @@ class StatsStore:
             "saved_minutes": saved_min,
             "avg_wpm": avg_wpm,
             "words": _words_by_range(days, carry_words, today),
+            # ── breakdown data (drives the click-through panels) ──────────
+            "dictation_saved_minutes": dictation_min,
+            "refine_saved_minutes": refine_min,
+            "refine_count": refine_n,
+            "refine_seconds": refine_s,
+            "refine_prompt_words": refine_pw,
+            "refine_voice_count": refine_voice_n,
+            "voiced_seconds": voiced_s,
+            "voiced_words": voiced_w,
+            "total_words": total_words,
+            "total_audio_seconds": total_audio_s,
+            "carry_words": carry_words,
+            "active_days": active_days,
+            "best_streak": _best_streak(active_days),
         }
 
     # ── Local persistence ─────────────────────────────────────────────
@@ -349,21 +518,26 @@ class StatsStore:
             "audio_seconds": round(float(rec.get("s", 0.0)), 2),
             "voiced_seconds": round(float(rec.get("v", 0.0)), 2),
             "voiced_words": int(rec.get("vw", 0)),
+            "refines": int(rec.get("r", 0)),
+            "refine_seconds": round(float(rec.get("rs", 0.0)), 2),
+            "refine_prompt_words": int(rec.get("rp", 0)),
+            "refine_voice_prompts": int(rec.get("rv", 0)),
             "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }
-        try:
-            client.table(_STATS_TABLE).upsert(
-                payload, on_conflict="user_id,day").execute()
-        except Exception:
-            # Table predating the voiced columns — retry without them so the
-            # core counters still sync.
-            payload.pop("voiced_seconds", None)
-            payload.pop("voiced_words", None)
+        # Degrade one column group at a time so an older table still syncs
+        # everything it does have (refine columns landed after the voiced ones).
+        for drop in ((),
+                     _REFINE_COLS,
+                     _REFINE_COLS + ("voiced_seconds", "voiced_words")):
+            for k in drop:
+                payload.pop(k, None)
             try:
                 client.table(_STATS_TABLE).upsert(
                     payload, on_conflict="user_id,day").execute()
+                return
             except Exception as e:
-                print(f"[Stats] Push failed (non-fatal): {e}")
+                last = e
+        print(f"[Stats] Push failed (non-fatal): {last}")
 
     def _start_sync(self, uid: str) -> None:
         if uid in self._sync_running:
@@ -386,7 +560,9 @@ class StatsStore:
             remote = {}
             table_ok = False
             rows = None
-            for cols in ("day,words,audio_seconds,voiced_seconds,voiced_words",
+            for cols in ("day,words,audio_seconds,voiced_seconds,voiced_words,"
+                         "refines,refine_seconds,refine_prompt_words,refine_voice_prompts",
+                         "day,words,audio_seconds,voiced_seconds,voiced_words",
                          "day,words,audio_seconds"):
                 rows = self._execute_timeout(
                     client.table(_STATS_TABLE)
@@ -404,7 +580,11 @@ class StatsStore:
                         remote[day] = {"w": int(r.get("words") or 0),
                                        "s": float(r.get("audio_seconds") or 0.0),
                                        "v": float(r.get("voiced_seconds") or 0.0),
-                                       "vw": int(r.get("voiced_words") or 0)}
+                                       "vw": int(r.get("voiced_words") or 0),
+                                       "r": int(r.get("refines") or 0),
+                                       "rs": float(r.get("refine_seconds") or 0.0),
+                                       "rp": int(r.get("refine_prompt_words") or 0),
+                                       "rv": int(r.get("refine_voice_prompts") or 0)}
             else:
                 print("[Stats] Pull unavailable (table missing or offline).")
 
@@ -443,6 +623,11 @@ class StatsStore:
                             if int(rec.get("vw", 0)) > int(cur.get("vw", 0)):
                                 cur["vw"] = int(rec["vw"])
                                 changed = True
+                            for k, cast in (("r", int), ("rs", float),
+                                            ("rp", int), ("rv", int)):
+                                if cast(rec.get(k, 0)) > cast(cur.get(k, 0)):
+                                    cur[k] = cast(rec[k])
+                                    changed = True
                 if seed is not None and not u["seeded"]:
                     u["seeded"] = True
                     changed = True

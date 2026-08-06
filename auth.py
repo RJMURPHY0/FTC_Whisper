@@ -131,12 +131,61 @@ def _write_last_email(email: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+_NETWORK_ERROR_MARKERS = (
+    "getaddrinfo", "name or service not known", "temporary failure in name",
+    "nodename nor servname", "connection", "connect", "timeout", "timed out",
+    "unreachable", "ssl", "certificate", "handshake", "max retries",
+    "network", "proxy", "remote end closed", "eof occurred", "server disconnected",
+)
+
+_AUTH_ERROR_MARKERS = (
+    "invalid", "expired", "not found", "unauthorized",
+    "refresh_token_not_found", "invalid_grant", "invalid_refresh_token",
+)
+
+
+def _is_definitive_auth_error(msg: str) -> bool:
+    """True only for a server verdict that the saved tokens are dead.
+
+    Network markers are tested FIRST and win: a DNS/TLS/connection failure can
+    carry text like "not found" or "invalid", and treating that as an auth
+    failure deletes a perfectly good session — which is exactly what signed the
+    user out after a reboot, when the app starts before the network is up."""
+    m = (msg or "").lower()
+    if any(k in m for k in _NETWORK_ERROR_MARKERS):
+        return False
+    return any(k in m for k in _AUTH_ERROR_MARKERS)
+
+
 class AuthManager:
     def __init__(self, supabase_url: str, supabase_key: str):
         self._url = supabase_url
         self._key = supabase_key
         self._client = None
         self._user = None
+        # Session-restore concurrency. Supabase ROTATES refresh tokens, so two
+        # restores racing on the same on-disk token guarantee one of them gets
+        # "Refresh Token Not Found" — see _load_saved_session.
+        self._restore_state_lock = threading.Lock()
+        self._restore_thread = None
+        self._restore_listener = None
+
+    def set_restore_listener(self, fn) -> None:
+        """Register a callback fired from a background thread when a session
+        restore succeeds AFTER the caller stopped waiting for it. A cold boot
+        routinely overruns the wait (client import + DNS + TLS + token refresh);
+        without this the app ends up authenticated internally while the UI still
+        shows the login form."""
+        self._restore_listener = fn
+
+    def _fire_restore_listener(self) -> None:
+        fn = self._restore_listener
+        if fn is None:
+            return
+        try:
+            fn()
+        except Exception as e:
+            print(f"[Auth] Restore listener failed: {e}")
 
     def _get_client(self):
         if not self._client:
@@ -180,86 +229,145 @@ class AuthManager:
         except Exception as e:
             print(f"[Auth] Could not save session: {e}")
 
-    def _load_saved_session(self) -> bool:
+    def _load_saved_session(self, wait_seconds: float = 15.0) -> bool:
         """Try to restore a previous session from disk.
-        Times out after 15 s so a bad network never freezes startup.
-        On timeout the session file is kept so the next launch can retry."""
+
+        Stops waiting after `wait_seconds` so a bad network never freezes
+        startup — but the worker is NOT abandoned: it keeps going and calls the
+        restore listener if it lands late. A cold boot routinely overruns the
+        wait (lazy supabase import + DNS on a NIC that is still coming up + a
+        rotating-refresh-token round trip), and the old code returned False,
+        started a second restore, and ended with the user signed out.
+
+        Only ONE restore may talk to the server at a time. Supabase rotates
+        refresh tokens, so a second attempt replaying the same on-disk token
+        gets "Refresh Token Not Found" — which the error heuristic below used
+        to read as "these credentials are dead" and delete a session the first
+        attempt had just refreshed successfully."""
         path = _session_path()
         if not os.path.exists(path):
             return False
 
-        result: list = [False]
+        with self._restore_state_lock:
+            running = self._restore_thread
+            if running is not None and not running.is_alive():
+                running = None
+        if running is not None:
+            running.join(timeout=wait_seconds)
+            return self.is_authenticated
+
+        handoff = threading.Lock()
+        state = {"done": False, "ok": False, "abandoned": False}
+
+        def _finish(ok: bool) -> None:
+            with handoff:
+                state["done"] = True
+                state["ok"] = ok
+                late = state["abandoned"]
+            if late and ok:
+                print("[Auth] Session restored after the startup wait — promoting.")
+                self._fire_restore_listener()
 
         def _restore() -> None:
+            ok = False
             try:
-                with open(path, "rb") as f:
-                    raw = f.read()
+                ok = self._restore_once(path)
+            finally:
+                _finish(ok)
 
-                # Support both new (DPAPI-encrypted) and legacy (plain JSON) files
-                try:
-                    data = json.loads(_dpapi_decrypt(raw).decode())
-                except Exception:
-                    # Fall back to plain JSON for sessions saved before the upgrade
-                    try:
-                        data = json.loads(raw.decode())
-                    except Exception:
-                        # Neither decrypts nor parses — corrupt file or a
-                        # transient DPAPI/profile hiccup. Do NOT let this fall
-                        # into the auth-keyword heuristic below (the decode
-                        # error text contains "invalid", which used to delete
-                        # the session and silently sign the user out).
-                        print("[Auth] Session file unreadable (decrypt/parse "
-                              "failed) — keeping it; will retry next launch.")
-                        return
-
-                client = self._get_client()
-                at = data.get("access_token") or ""
-                rt = data.get("refresh_token") or ""
-                if not at or not rt:
-                    raise KeyError("Missing tokens in session file")
-                r = client.auth.set_session(at, rt)
-                if r and r.user:
-                    self._user = r.user
-                    # Re-save with encryption in case it was a legacy file
-                    self._save_session(
-                        r.session
-                        or type(
-                            "S",
-                            (),
-                            {
-                                "access_token": data["access_token"],
-                                "refresh_token": data["refresh_token"],
-                            },
-                        )()
-                    )
-                    print(f"[Auth] Restored session for {self._user.email}")
-                    result[0] = True
-            except Exception as e:
-                msg = str(e).lower()
-                # Only clear the session for definitive auth failures (invalid/expired
-                # tokens). Network errors and timeouts keep the file so the next launch
-                # can retry successfully once the network is available.
-                is_auth_error = any(k in msg for k in (
-                    "invalid", "expired", "not found", "unauthorized",
-                    "refresh_token_not_found", "invalid_grant", "invalid_refresh_token",
-                ))
-                if is_auth_error:
-                    print(f"[Auth] Session restore failed (auth error): {e}")
-                    self._clear_session()
-                else:
-                    print(f"[Auth] Session restore failed (network/other): {e}")
-
-        t = threading.Thread(target=_restore, daemon=True)
+        t = threading.Thread(target=_restore, daemon=True, name="auth-restore")
+        with self._restore_state_lock:
+            self._restore_thread = t
         t.start()
-        t.join(timeout=15.0)
+        t.join(timeout=wait_seconds)
 
-        if t.is_alive():
-            # Network was too slow on startup (common right after a system boot).
-            # Keep the session file so the next launch can restore it successfully.
-            print("[Auth] Session restore timed out (15 s) — proceeding offline (session kept)")
+        with handoff:
+            if state["done"]:
+                return state["ok"]
+            state["abandoned"] = True
+
+        # Still in flight. Keep the session file — the worker owns the outcome
+        # now and will promote the UI itself if it succeeds.
+        print(f"[Auth] Session restore still running after {wait_seconds:.0f}s "
+              f"— continuing in the background (session kept)")
+        return False
+
+    def _restore_once(self, path: str) -> bool:
+        """One restore attempt, run to completion. Returns True when the user
+        is signed in. Never raises."""
+        raw = b""
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+
+            # Support both new (DPAPI-encrypted) and legacy (plain JSON) files
+            try:
+                data = json.loads(_dpapi_decrypt(raw).decode())
+            except Exception:
+                # Fall back to plain JSON for sessions saved before the upgrade
+                try:
+                    data = json.loads(raw.decode())
+                except Exception:
+                    # Neither decrypts nor parses — corrupt file or a
+                    # transient DPAPI/profile hiccup. Do NOT let this fall
+                    # into the auth-keyword heuristic below (the decode
+                    # error text contains "invalid", which used to delete
+                    # the session and silently sign the user out).
+                    print("[Auth] Session file unreadable (decrypt/parse "
+                          "failed) — keeping it; will retry next launch.")
+                    return False
+
+            client = self._get_client()
+            at = data.get("access_token") or ""
+            rt = data.get("refresh_token") or ""
+            if not at or not rt:
+                raise KeyError("Missing tokens in session file")
+            r = client.auth.set_session(at, rt)
+            if r and r.user:
+                self._user = r.user
+                # Re-save with encryption in case it was a legacy file
+                self._save_session(
+                    r.session
+                    or type(
+                        "S",
+                        (),
+                        {
+                            "access_token": data["access_token"],
+                            "refresh_token": data["refresh_token"],
+                        },
+                    )()
+                )
+                print(f"[Auth] Restored session for {self._user.email}")
+                return True
+            return False
+        except Exception as e:
+            if not _is_definitive_auth_error(str(e)):
+                print(f"[Auth] Session restore failed (network/other): {e}")
+                return False
+            # A server verdict of "these tokens are dead" — but only act on it
+            # if nothing else has already succeeded. Deleting a session that a
+            # concurrent (or earlier, late-landing) attempt just refreshed is
+            # what signed the user out for real.
+            if self._user is not None:
+                print(f"[Auth] Ignoring stale auth error (already signed in): {e}")
+                return False
+            if self._session_bytes_changed(path, raw):
+                print(f"[Auth] Ignoring stale auth error (session file was "
+                      f"refreshed meanwhile): {e}")
+                return False
+            print(f"[Auth] Session restore failed (auth error): {e}")
+            self._clear_session()
             return False
 
-        return result[0]
+    @staticmethod
+    def _session_bytes_changed(path: str, previous: bytes) -> bool:
+        """True when the session file no longer holds the bytes this attempt
+        read — i.e. someone wrote a fresher session while we were in flight."""
+        try:
+            with open(path, "rb") as f:
+                return f.read() != previous
+        except Exception:
+            return False
 
     def _clear_session(self) -> None:
         path = _session_path()
@@ -291,9 +399,17 @@ class AuthManager:
         """Last email that successfully signed in (for prefilling the form)."""
         return _read_last_email()
 
-    def try_restore_session(self) -> bool:
+    def try_restore_session(self, wait_seconds: float = 15.0) -> bool:
         """Called at startup — returns True if a valid saved session exists."""
-        return self._load_saved_session()
+        return self._load_saved_session(wait_seconds)
+
+    @property
+    def restore_in_flight(self) -> bool:
+        """True while a restore attempt is still talking to the server. The UI
+        uses this to keep the 'Signing you in…' splash up instead of dropping
+        the user onto the login form mid-attempt."""
+        t = self._restore_thread
+        return bool(t is not None and t.is_alive())
 
     def has_saved_session(self) -> bool:
         """True if an encrypted session file still exists on disk. A failed restore

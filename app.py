@@ -1,4 +1,4 @@
-"""
+﻿"""
 FTC Whisper — main entry point.
 
 Architecture
@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.46"
+APP_VERSION = "1.6.47"
 
 
 class _RECT(ctypes.Structure):
@@ -1635,7 +1635,7 @@ class WhisperFlowApp:
                 transcribed_text,
                 on_insert=lambda t=transcribed_text, h=hwnd: self._insert_text(t, h),
                 on_replace=lambda new_text, t=transcribed_text, h=hwnd, uc=_undo_n, dc=_live_dc: self._replace_text(new_text, h, t, undo_count=uc, del_chars=dc),
-                on_insert_result=lambda new_text, h=hwnd: self._insert_text(new_text, h),
+                on_insert_result=lambda new_text, h=hwnd: self._insert_refined(new_text, h),
                 inserted=result,
                 hwnd=hwnd,
                 cursor_x=0,
@@ -2239,6 +2239,36 @@ class WhisperFlowApp:
         self.injector.inject(text)
         print(f"[App] Manual insert: {len(text)} chars")
 
+    def _insert_refined(self, text: str, hwnd: int) -> None:
+        """Insert the AI result without undoing anything (popup's 'Insert
+        result'). Same injection as _insert_text, but this one is an APPLIED
+        refinement so it counts towards the time-saved breakdown."""
+        self._insert_text(text, hwnd)
+        self._record_refine_applied()
+
+    def _record_refine_applied(self) -> None:
+        """Bank one applied refinement. Reads the popup's own measurements, so
+        the saving is computed from what the refine actually cost. Silent no-op
+        when no refinement ran this popup session (a plain re-insert of the
+        dictated text is not a refine)."""
+        stats = getattr(self, "stats", None)
+        popup = getattr(self, "popup", None)
+        if stats is None or popup is None:
+            return
+        try:
+            m = popup.refine_stats()
+            if not m:
+                return
+            stats.record_refine(
+                m.get("elapsed_seconds", 0.0),
+                prompt_words=m.get("prompt_words", 0),
+                prompt_spoken=m.get("prompt_spoken", False),
+            )
+            print(f"[App] Refine applied — {m.get('elapsed_seconds', 0):.1f}s in-app, "
+                  f"{m.get('prompt_words', 0)} prompt words")
+        except Exception as e:
+            print(f"[App] Refine stat failed (non-fatal): {e}")
+
     def _replace_text(self, new_text: str, hwnd: int, original_text: str = "",
                       undo_count: int = 1, del_chars: int = 0) -> None:
         import keyboard as kb
@@ -2259,6 +2289,7 @@ class WhisperFlowApp:
                 time.sleep(0.05)
         self.injector.inject(new_text)
         print(f"[App] Replaced with refined text: '{new_text}'")
+        self._record_refine_applied()
         if original_text:
             _app = getattr(self, "_recording_app", None) or {}
             self.db.log_refinement(
@@ -2371,6 +2402,7 @@ class WhisperFlowApp:
                 self._focus_window(_hwnd)
                 time.sleep(0.1)
                 self.injector.inject(new_text)
+                self._record_refine_applied()
 
             self.popup.show_cursor_icon(
                 text,
