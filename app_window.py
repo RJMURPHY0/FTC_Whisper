@@ -58,12 +58,10 @@ SUPER_ADMIN_EMAIL = "ryan.murphy@ftc-ss.com"
 # the reference's breathing room; the layout draws against this constant.
 _IMPACT_CARD_H = 148
 
-# Impact breakdown panel — replaces the three cards in place when one is
-# clicked, so the detail still fits inside the same box on a non-scrolling Home.
-_IMPACT_PANEL_H = 252
-# The streak panel carries a full month grid, so it needs more room than the
-# two bar-chart panels. Both are sized from _impact_panel_height().
-_IMPACT_PANEL_H_STREAK = 300
+# The impact breakdown panel has no height constant on purpose: it is measured
+# from the block it replaces (the three cards plus the words bar) at open time,
+# so a breakdown never changes the window's height. Each drawer lays itself out
+# against that measurement — see _panel_h().
 # Panel-only tones. C["border"] (#2d2d2d) is a hairline colour — as TEXT on the
 # card surface it is effectively invisible, and as an empty bar track it reads
 # as a missing element rather than an empty one.
@@ -1270,15 +1268,21 @@ class AppWindow:
         # only under WS_EX_COMPOSITED, which is gone for good — see
         # _apply_dark_titlebar.)
         if name in tab_frames:
-            for n, f in tab_frames.items():
-                if n != name:
-                    f.grid_remove()
-            tab_frames[name].grid()
-            tab_frames[name].tkraise()
-            # One synchronous full-tree repaint lands the switch as a single
-            # clean frame; the delayed second pass mops up anything a late
-            # layout job (scrollregion sync, banner pack) redraws after it.
-            self._repaint_all()
+            def _swap():
+                for n, f in tab_frames.items():
+                    if n != name:
+                        f.grid_remove()
+                tab_frames[name].grid()
+                tab_frames[name].tkraise()
+
+            # Freeze, swap, present — the same single-frame contract the
+            # login/dashboard swap uses. The old code did the map/unmap live and
+            # then chased it with two repaints (one now, one at 50ms); each of
+            # those is a race against Tk's own async painting, and losing one
+            # is what showed as a flicker on every tab click.
+            self._atomic_ui(_swap)
+            # A late layout job (scrollregion sync, banner pack) can still draw
+            # after the present, so keep one mop-up pass.
             try:
                 self._root.after(50, self._repaint_all)
             except tk.TclError:
@@ -1397,6 +1401,7 @@ class AppWindow:
                 except Exception:
                     pass
             geo = getattr(self, "_pending_geometry", None)
+            moved = bool(geo)
             if geo:
                 self._pending_geometry = None
                 try:
@@ -1404,13 +1409,20 @@ class AppWindow:
                     self._root.update_idletasks()
                 except Exception:
                     pass
-            # Heal the move/resize itself. update_idletasks() above drains idle
-            # callbacks, NOT the Expose events the swap and the geometry change
-            # just queued, so without this the old page's bits stay on screen
+            # Heal the swap. update_idletasks() above drains idle callbacks,
+            # NOT the Expose events the swap and any geometry change just
+            # queued, so without this the old content's bits stay on screen
             # until something else happens to invalidate them.
-            self._repaint_all(erase=True)
+            #
+            # Erase ONLY when the window actually moved or resized: that is the
+            # case where pixels end up outside every widget's area and
+            # repaint-over cannot reach them. Erasing a same-size swap would
+            # flash the whole window's background for one frame, which is its
+            # own glitch — and same-size swaps (tab changes, opening an impact
+            # breakdown) are the common case.
+            self._repaint_all(erase=moved)
             try:
-                self._root.after(0, lambda: self._repaint_all(erase=True))
+                self._root.after(0, lambda e=moved: self._repaint_all(erase=e))
             except Exception:
                 pass
 
@@ -1829,11 +1841,16 @@ class AppWindow:
             font=("Segoe UI", 12, "bold"), anchor="w",
         ).pack(fill="x", padx=20, pady=(10, 8))
 
-        # Stack: the three cards and the breakdown panel occupy the same slot.
+        # Stack: the three cards + the words bar, and the breakdown panel that
+        # replaces BOTH of them. The panel is sized to the exact height they
+        # occupied, so opening a breakdown never grows the window — a resize
+        # mid-transition is both jarring and the thing that made the swap
+        # flicker. Children carry their own padx (the today bar is a _card,
+        # which adds its own), so the stack itself has none.
         self._impact_stack = tk.Frame(parent, bg=C["bg"])
-        self._impact_stack.pack(fill="x", padx=20)
+        self._impact_stack.pack(fill="x")
         row = tk.Frame(self._impact_stack, bg=C["bg"])
-        row.pack(fill="x")
+        row.pack(fill="x", padx=20)
         self._impact_row = row
         for i in range(3):
             row.grid_columnconfigure(i, weight=1, uniform="impact")
@@ -1865,10 +1882,10 @@ class AppWindow:
             cv.bind("<Leave>", lambda _e, k=key: self._hover_impact_card(k, False))
             cv.configure(cursor="hand2")
 
-        # Breakdown panel — same slot as the three cards, shown one at a time.
+        # Breakdown panel — same slot as the cards + words bar, one at a time.
         self._impact_detail = tk.Canvas(
             self._impact_stack, bg=C["bg"], highlightthickness=0, bd=0,
-            height=_IMPACT_PANEL_H)
+            height=_IMPACT_CARD_H)
         self._impact_detail.bind(
             "<Configure>", lambda _e: self._layout_impact_detail())
         self._impact_detail.bind("<Button-1>", self._on_impact_detail_click)
@@ -1881,7 +1898,8 @@ class AppWindow:
         self._set_impact_card("speed", "160", "wpm", "4× faster than typing")
 
         # Today bar
-        bar = self._card(parent, inner_pad=(14, 10), margin=(8, 0))
+        bar = self._card(self._impact_stack, inner_pad=(14, 10), margin=(8, 0))
+        self._impact_today_card = bar.master  # the rounded-rect Canvas host
         brow = tk.Frame(bar, bg=C["surface"])
         brow.pack(fill="x")
         icv = tk.Canvas(brow, bg=C["surface"], highlightthickness=0, bd=0,
@@ -1967,17 +1985,11 @@ class AppWindow:
         # it is (it opens the breakdown). Same surface_hover token History uses.
         hovered = bool(card.get("hover"))
         surface = C["surface_hover"] if hovered else C["surface"]
-        bgimg = None
-        try:
-            import ui_render
-            bgimg = ui_render.round_rect(cv, w, h, 12, surface,
-                                         C["accent"] if hovered else C["border"],
-                                         1, C["bg"])
-        except Exception:
-            bgimg = None
+        bgimg = self._impact_card_bg(cv, w, hovered)
         if bgimg is not None:
-            cv.create_image(0, 0, image=bgimg, anchor="nw")
+            card["bg_item"] = cv.create_image(0, 0, image=bgimg, anchor="nw")
         else:
+            card["bg_item"] = None
             _rr(cv, 0, 0, w - 1, h - 1, 12, fill=surface,
                 outline=C["accent"] if hovered else C["border"])
         cx = w // 2
@@ -2019,74 +2031,109 @@ class AppWindow:
     # one page with no scrolling.
 
     def _hover_impact_card(self, key: str, on: bool) -> None:
+        """Hover swaps ONLY the cached background image. Re-running the whole
+        card layout would delete("all") and redraw text and icons on every
+        mouse crossing, which is a visible flicker — the same reason History
+        re-fetches images instead of re-rendering rows (_sync_row_image_bg)."""
         card = self._impact_cards.get(key)
         if not card or card.get("hover") == on:
             return
         card["hover"] = on
-        self._layout_impact_card(key)
+        cv, item = card.get("cv"), card.get("bg_item")
+        if cv is None or item is None:
+            return
+        img = self._impact_card_bg(cv, cv.winfo_width(), on)
+        if img is None:
+            self._layout_impact_card(key)
+            return
+        try:
+            cv.itemconfigure(item, image=img)
+        except tk.TclError:
+            pass
+
+    @staticmethod
+    def _impact_card_bg(cv, w: int, hovered: bool):
+        """Cached rounded-rect background for an impact card, or None when PIL
+        is unavailable (the caller then falls back to canvas primitives)."""
+        if w < 40:
+            return None
+        try:
+            import ui_render
+            return ui_render.round_rect(
+                cv, w, _IMPACT_CARD_H, 12,
+                C["surface_hover"] if hovered else C["surface"],
+                C["accent"] if hovered else C["border"], 1, C["bg"])
+        except Exception:
+            return None
 
     def _open_impact_detail(self, key: str) -> None:
         if getattr(self, "_impact_open", None) == key:
             self._close_impact_detail()
             return
-        first_open = not getattr(self, "_impact_open", None)
+        if getattr(self, "_impact_open", None):
+            # Already showing a panel — just redraw it for the new metric.
+            self._impact_open = key
+            self._layout_impact_detail()
+            return
+        try:
+            block_h = self._impact_stack.winfo_height()
+        except tk.TclError:
+            return
+        # Fall back only before the first layout pass has run.
+        if block_h < 120:
+            block_h = _IMPACT_CARD_H + 56
         self._impact_open = key
-        try:
-            self._impact_row.pack_forget()
-            self._impact_detail.pack(fill="x")
-        except tk.TclError:
-            return
-        if first_open:
-            self._grow_for_impact_detail()
-        self._layout_impact_detail()
+        self._impact_panel_h = block_h
 
-    def _grow_for_impact_detail(self) -> None:
-        """The panel is taller than the row it replaces, so make room for it and
-        remember what to go back to. _resize() records the size it applied, and
-        _on_root_configure skips saving a size it applied itself, so this
-        temporary height never becomes the account's remembered window size."""
-        try:
-            w = self._root.winfo_width()
-            h = self._root.winfo_height()
-        except tk.TclError:
-            return
-        if w < MIN_W or h < MIN_H:
-            return
-        self._impact_size_restore = (w, h)
-        need = h + (_IMPACT_PANEL_H_STREAK - _IMPACT_CARD_H)
-        cap = max(MIN_H, self._root.winfo_screenheight() - 120)
-        self._resize(w, min(need, cap))
+        def _swap():
+            self._impact_row.pack_forget()
+            self._impact_today_card.pack_forget()
+            self._impact_detail.configure(height=block_h)
+            self._impact_detail.pack(fill="x", padx=20)
+            # Realise the canvas width before drawing — a first-open panel has
+            # no width until the layout runs, and drawing at width 1 would show
+            # an empty card for one frame.
+            try:
+                self._root.update_idletasks()
+            except tk.TclError:
+                pass
+            self._layout_impact_detail()
+
+        # One frozen frame: hide, show, draw, present. Without this the swap
+        # paints in stages and reads as a flicker.
+        self._atomic_ui(_swap)
 
     def _close_impact_detail(self) -> None:
-        was_open = getattr(self, "_impact_open", None)
+        if not getattr(self, "_impact_open", None):
+            return
         self._impact_open = None
-        try:
+
+        def _swap():
             self._impact_detail.pack_forget()
-            self._impact_row.pack(fill="x")
-        except tk.TclError:
-            pass
-        prev = getattr(self, "_impact_size_restore", None)
-        if was_open and prev:
-            self._impact_size_restore = None
-            self._resize(*prev)
-        for k in self._impact_cards:
-            self._impact_cards[k]["hover"] = False
-            self._layout_impact_card(k)
+            self._impact_row.pack(fill="x", padx=20)
+            self._impact_today_card.pack(fill="x", padx=20, pady=(8, 0))
+            for k in self._impact_cards:
+                self._impact_cards[k]["hover"] = False
+                self._layout_impact_card(k)
+
+        self._atomic_ui(_swap)
 
     def _on_impact_detail_click(self, event) -> None:
+        """Only declared hit regions do anything. A click on the panel BODY is
+        deliberately inert: dismissing on any click meant a stray or repeated
+        click closed the panel the instant it opened, which read as the panel
+        flickering rather than opening. Closing is the ✕ (or the header strip
+        it sits in), and those are hit regions like everything else."""
         for x0, y0, x1, y1, action in getattr(self, "_impact_detail_hits", ()):
             if x0 <= event.x <= x1 and y0 <= event.y <= y1:
                 action()
                 return
-        # Anywhere else in the panel closes it — the whole card is the control,
-        # same as clicking it open.
-        self._close_impact_detail()
 
     # ── panel chrome ──────────────────────────────────────────────────────────
 
-    def _panel_head(self, cv, w: int, key: str, title: str) -> None:
+    def _panel_head(self, cv, w: int, key: str, title: str, right: str = "") -> None:
         """Card background, icon, tracked-out title and the close control."""
-        h = self._impact_panel_height(key)
+        h = self._panel_h()
         bgimg = None
         try:
             import ui_render
@@ -2102,13 +2149,17 @@ class AppWindow:
         card = self._impact_cards.get(key) or {}
         icon = card.get("icon")
         if icon:
-            icon(cv, 32, 30)
-        cv.create_text(56, 24, text=" ".join(title), anchor="w",
+            icon(cv, 30, 26)
+        cv.create_text(52, 20, text=" ".join(title), anchor="w",
                        fill=C["subtext"], font=("Segoe UI", 7, "bold"))
-        cv.create_text(w - 20, 26, text="✕", anchor="e",
+        cv.create_text(w - 18, 22, text="✕", anchor="e",
                        fill=C["subtext"], font=("Segoe UI", 11))
-        self._impact_detail_hits.append(
-            (w - 36, 12, w - 8, 40, self._close_impact_detail))
+        # The whole header strip closes, not just the glyph — a 12px target is
+        # a miss waiting to happen, and the strip is where "go back" belongs.
+        self._impact_detail_hits.append((0, 0, w, 36, self._close_impact_detail))
+        if right:
+            cv.create_text(w - 40, 22, text=right, anchor="e",
+                           fill=C["subtext"], font=("Segoe UI", 9))
 
     @staticmethod
     def _panel_bar(cv, x: int, y: int, w: int, frac: float, colour: str) -> None:
@@ -2136,21 +2187,16 @@ class AppWindow:
         hrs = m / 60.0
         return f"{hrs:.1f} hrs" if hrs < 10 else f"{int(round(hrs))} hrs"
 
-    @staticmethod
-    def _impact_panel_height(key: str) -> int:
-        return _IMPACT_PANEL_H_STREAK if key == "streak" else _IMPACT_PANEL_H
+    def _panel_h(self) -> int:
+        """Height of the open panel — the exact height the cards + words bar
+        occupied, captured at open time so the page never changes size."""
+        return int(getattr(self, "_impact_panel_h", _IMPACT_CARD_H))
 
     def _layout_impact_detail(self) -> None:
         key = getattr(self, "_impact_open", None)
         cv = getattr(self, "_impact_detail", None)
         if not key or cv is None:
             return
-        h = self._impact_panel_height(key)
-        try:
-            if int(cv["height"]) != h:
-                cv.configure(height=h)
-        except (tk.TclError, ValueError):
-            pass
         w = cv.winfo_width()
         if w < 60:
             return
@@ -2168,6 +2214,7 @@ class AppWindow:
 
     def _draw_detail_time(self, cv, w: int, snap: dict) -> None:
         import stats as stats_mod
+        h = self._panel_h()
         self._panel_head(cv, w, "time", "TIME SAVED")
         pad = 20
         inner = w - pad * 2
@@ -2176,57 +2223,56 @@ class AppWindow:
         total = dict_min + ref_min
         biggest = max(dict_min, ref_min, 0.0001)
 
-        cv.create_text(pad, 52, text=self._fmt_span(total), anchor="w",
-                       fill=C["text"], font=("Segoe UI", 17, "bold"))
-        cv.create_text(pad + self._impact_font_value.measure(
-            self._fmt_span(total)) + 10, 55, text="saved so far", anchor="w",
-            fill=C["subtext"], font=("Segoe UI", 9))
+        total_txt = self._fmt_span(total)
+        cv.create_text(pad, 46, text=total_txt, anchor="w",
+                       fill=C["text"], font=("Segoe UI", 16, "bold"))
+        cv.create_text(pad + self._impact_font_value.measure(total_txt) + 8, 49,
+                       text="saved so far", anchor="w",
+                       fill=C["subtext"], font=("Segoe UI", 9))
 
-        # Dictation
+        # Dictation gets a one-line summary so AI refine has room for the two
+        # lines it needs to spell out what the manual round trip actually is.
+        top = 72
         words = int(snap.get("total_words", 0))
         spoke_min = float(snap.get("total_audio_seconds", 0.0)) / 60.0
         typing_min = words / float(stats_mod.TYPING_WPM) if words else 0.0
-        cv.create_text(pad, 86, text="Dictation", anchor="w",
+        cv.create_text(pad, top, text="Dictation", anchor="w",
                        fill=C["text"], font=("Segoe UI", 10, "bold"))
-        cv.create_text(w - pad, 86, text=self._fmt_span(dict_min), anchor="e",
+        cv.create_text(w - pad, top, text=self._fmt_span(dict_min), anchor="e",
                        fill=C["accent"], font=("Segoe UI", 10, "bold"))
-        self._panel_bar(cv, pad, 100, inner, dict_min / biggest, C["accent"])
+        self._panel_bar(cv, pad, top + 12, inner, dict_min / biggest, C["accent"])
         cv.create_text(
-            pad, 114, anchor="nw", width=inner,
-            text=(f"{words:,} words. Typing them takes "
-                  f"{self._fmt_span(typing_min)}; speaking them took "
-                  f"{self._fmt_span(spoke_min)}."),
+            pad, top + 24, anchor="nw", width=inner,
+            text=(f"{words:,} words · {self._fmt_span(typing_min)} to type at "
+                  f"{stats_mod.TYPING_WPM} wpm, {self._fmt_span(spoke_min)} to say"),
             fill=C["subtext"], font=("Segoe UI", 8))
 
-        # AI refine
         n = int(snap.get("refine_count", 0))
-        cv.create_text(pad, 158, text="AI refine", anchor="w",
+        y = max(top + 46, h - 74)
+        cv.create_text(pad, y, text="AI refine", anchor="w",
                        fill=C["text"], font=("Segoe UI", 10, "bold"))
-        cv.create_text(w - pad, 158, text=self._fmt_span(ref_min), anchor="e",
+        cv.create_text(w - pad, y, text=self._fmt_span(ref_min), anchor="e",
                        fill=C["success"], font=("Segoe UI", 10, "bold"))
-        self._panel_bar(cv, pad, 172, inner, ref_min / biggest, C["success"])
+        self._panel_bar(cv, pad, y + 12, inner, ref_min / biggest, C["success"])
         if n:
             in_app = float(snap.get("refine_seconds", 0.0)) / n
             manual = stats_mod.refine_manual_seconds(
                 int(snap.get("refine_prompt_words", 0)) // max(1, n))
-            body = (f"{n:,} applied. By hand — switch to a chat assistant, "
-                    f"paste, type the instruction, wait, copy back, paste over "
-                    f"— that is about {manual:.0f}s each. Here it took "
-                    f"{in_app:.0f}s.")
+            body = (f"{n:,} applied · by hand (switch to a chat assistant, paste, "
+                    f"type the instruction, wait, copy back, paste over) that is "
+                    f"~{manual:.0f}s each. Here it took {in_app:.0f}s.")
         else:
-            body = ("Nothing refined yet. Each applied result saves about "
-                    f"{stats_mod.refine_manual_seconds(0) - 9:.0f}s over "
-                    "pasting the text into a chat window and back.")
-        cv.create_text(pad, 186, anchor="nw", width=inner, text=body,
+            body = ("Nothing refined yet · each applied result saves about "
+                    f"{stats_mod.refine_manual_seconds(0) - 9:.0f}s over pasting "
+                    "the text into a chat window and back.")
+        cv.create_text(pad, y + 24, anchor="nw", width=inner, text=body,
                        fill=C["subtext"], font=("Segoe UI", 8))
-        cv.create_text(pad, _IMPACT_PANEL_H - 16, anchor="w",
-                       text=f"Typing compared at {stats_mod.TYPING_WPM} wpm",
-                       fill=_PANEL_DIM, font=("Segoe UI", 8))
 
     # ── Dictation speed ───────────────────────────────────────────────────────
 
     def _draw_detail_speed(self, cv, w: int, snap: dict) -> None:
         import stats as stats_mod
+        h = self._panel_h()
         self._panel_head(cv, w, "speed", "DICTATION SPEED")
         pad = 20
         inner = w - pad * 2
@@ -2235,9 +2281,10 @@ class AppWindow:
         shown = wpm or stats_mod.DICTATION_WPM
         ratio = shown / float(stats_mod.TYPING_WPM)
 
-        cv.create_text(pad, 52, text=f"{shown} wpm", anchor="w",
-                       fill=C["text"], font=("Segoe UI", 17, "bold"))
-        cv.create_text(w - pad, 55, text=f"{ratio:.1f}× faster than typing".replace(".0×", "×"),
+        cv.create_text(pad, 46, text=f"{shown} wpm", anchor="w",
+                       fill=C["text"], font=("Segoe UI", 16, "bold"))
+        cv.create_text(w - pad, 49,
+                       text=f"{ratio:.1f}× faster than typing".replace(".0×", "×"),
                        anchor="e", fill=C["subtext"], font=("Segoe UI", 9))
 
         rows = [
@@ -2245,15 +2292,18 @@ class AppWindow:
             ("Typing", stats_mod.TYPING_WPM, C["subtext"]),
             ("Handwriting", 20, _PANEL_DIM),
         ]
-        top = max(r[1] for r in rows)
-        y = 88
+        fastest = max(r[1] for r in rows)
+        top = 74
+        # Three bars and a two-line note share whatever height is left.
+        step = max(26, (h - top - 34) // 3)
+        y = top
         for label, value, colour in rows:
             cv.create_text(pad, y, text=label, anchor="w", fill=C["text"],
                            font=("Segoe UI", 9))
             cv.create_text(w - pad, y, text=f"{value} wpm", anchor="e",
                            fill=C["subtext"], font=("Segoe UI", 9))
-            self._panel_bar(cv, pad, y + 12, inner, value / float(top), colour)
-            y += 40
+            self._panel_bar(cv, pad, y + 11, inner, value / float(fastest), colour)
+            y += step
 
         voiced_w = int(snap.get("voiced_words", 0))
         voiced_m = float(snap.get("voiced_seconds", 0.0)) / 60.0
@@ -2265,111 +2315,126 @@ class AppWindow:
             body = (f"Showing the nominal {stats_mod.DICTATION_WPM} wpm. "
                     f"Dictate 50 words ({voiced_w:,} so far) and this becomes "
                     f"your own measured speed.")
-        cv.create_text(pad, 212, anchor="nw", width=inner, text=body,
-                       fill=C["subtext"], font=("Segoe UI", 8))
+        cv.create_text(pad, min(y + 2, h - 30), anchor="nw", width=inner,
+                       text=body, fill=C["subtext"], font=("Segoe UI", 8))
 
     # ── Day streak ────────────────────────────────────────────────────────────
 
     def _draw_detail_streak(self, cv, w: int, snap: dict) -> None:
+        """A real month calendar: fixed 6x7 grid, leading/trailing days from the
+        neighbouring months greyed out, Monday first, today ringed — and a flame
+        on every day dictated. The streak figure rides in the header rather than
+        on its own line, because the grid needs the height."""
         import datetime
-        self._panel_head(cv, w, "streak", "DAY STREAK")
-        pad = 20
+        h = self._panel_h()
         days = int(snap.get("streak_days", 0))
         best = int(snap.get("best_streak", 0))
         active = set(snap.get("active_days", ()))
+        self._panel_head(
+            cv, w, "streak", "DAY STREAK",
+            right=f"{days} day{'' if days == 1 else 's'} · best {best}")
 
-        cv.create_text(pad, 52, text=f"{days} day{'' if days == 1 else 's'}",
-                       anchor="w", fill=C["text"], font=("Segoe UI", 17, "bold"))
-        cv.create_text(w - pad, 55, text=f"best {best}", anchor="e",
-                       fill=C["subtext"], font=("Segoe UI", 9))
-
+        pad = 18
         today = datetime.date.today()
-        month = getattr(self, "_streak_month", None) or today.replace(day=1)
+        this_month = today.replace(day=1)
+        month = getattr(self, "_streak_month", None) or this_month
         self._streak_month = month
 
-        # Month header with prev/next — the calendar is only useful if you can
-        # look back at the run you built.
-        cv.create_text(w // 2, 80, text=month.strftime("%B %Y"),
+        # Month picker: arrows step either way, and the month name jumps back to
+        # today when you have wandered off (the reference calendar's Today link).
+        nav_y = 46
+        cv.create_text(w // 2, nav_y, text=month.strftime("%B %Y"),
                        fill=C["text"], font=("Segoe UI", 10, "bold"))
-        cv.create_text(pad + 6, 80, text="‹", fill=C["subtext"],
-                       font=("Segoe UI", 14, "bold"))
-        self._impact_detail_hits.append(
-            (pad - 4, 68, pad + 20, 94, lambda: self._step_streak_month(-1)))
-        if month < today.replace(day=1):
-            cv.create_text(w - pad - 6, 80, text="›", fill=C["subtext"],
+        for label, dx, delta in (("‹", pad + 4, -1), ("›", w - pad - 4, 1)):
+            cv.create_text(dx, nav_y, text=label, fill=C["subtext"],
                            font=("Segoe UI", 14, "bold"))
+            # Kept clear of the header close-strip above (hits are checked
+            # in order, so an overlap would close instead of navigate).
             self._impact_detail_hits.append(
-                (w - pad - 20, 68, w - pad + 4, 94,
-                 lambda: self._step_streak_month(1)))
+                (dx - 14, nav_y - 8, dx + 14, nav_y + 14,
+                 lambda d=delta: self._step_streak_month(d)))
+        if month != this_month:
+            cv.create_text(w - pad - 24, nav_y, text="Today", anchor="e",
+                           fill=C["accent"], font=("Segoe UI", 8, "bold"))
+            self._impact_detail_hits.append(
+                (w - pad - 66, nav_y - 8, w - pad - 20, nav_y + 12,
+                 self._jump_streak_to_today))
 
-        # 26px rows keep all six possible week rows clear of the footnote (a
-        # month starting on a Sunday spills to six rows — August 2026 does).
-        cell = min(26, (w - pad * 2) // 7)
-        grid_w = cell * 7
-        x0 = (w - grid_w) // 2
-        for i, name in enumerate(("M", "T", "W", "T", "F", "S", "S")):
-            cv.create_text(x0 + i * cell + cell // 2, 102, text=name,
+        # 6 rows x 7 columns, always — a fixed grid keeps the panel the same
+        # height whichever month you land on.
+        head_y = nav_y + 22
+        grid_top = head_y + 10
+        avail = max(60, h - grid_top - 6)
+        row_h = max(14, min(30, avail // 6))
+        cell_w = min(36, (w - pad * 2) // 7)
+        x0 = (w - cell_w * 7) // 2
+        for i, name in enumerate(("Mo", "Tu", "We", "Th", "Fr", "Sa", "Su")):
+            cv.create_text(x0 + i * cell_w + cell_w // 2, head_y, text=name,
                            fill=_PANEL_DIM, font=("Segoe UI", 7, "bold"))
 
-        flame = None
+        # Two flames: full accent for this month, muted for the neighbouring
+        # months. Those days were still used — hiding them would break a run
+        # that spans a month boundary — but they must not read as this month's.
+        flame = flame_dim = None
         try:
             import ui_render
-            flame = ui_render.icon_flame(cv, cell - 8, C["accent"],
+            size = min(row_h, cell_w) - 8
+            flame = ui_render.icon_flame(cv, size, C["accent"],
                                          cutout=C["surface"], bg=C["surface"])
+            flame_dim = ui_render.icon_flame(cv, size, "#6b4a12",
+                                             cutout=C["surface"], bg=C["surface"])
         except Exception:
-            flame = None
+            flame = flame_dim = None
 
         first = month.replace(day=1)
-        nxt = (first + datetime.timedelta(days=32)).replace(day=1)
-        row_top = 114
-        row_h = cell
-        d = first
-        while d < nxt:
-            col = d.weekday()
-            week = ((d.day + first.weekday() - 1) // 7)
-            cx = x0 + col * cell + cell // 2
-            cy = row_top + week * row_h + row_h // 2
-            iso = d.isoformat()
-            if iso in active:
-                # A used day is a flame, nothing else — the date would only
-                # compete with it, and the point of the grid is which days burn.
-                if flame is not None:
-                    cv.create_image(cx, cy, image=flame)
-                else:
-                    cv.create_text(cx, cy, text="●", fill=C["accent"],
-                                   font=("Segoe UI", 11, "bold"))
-            else:
-                # Unused days keep their date so the grid still reads as a
-                # calendar: dim for the future, dimmer again for weekends
-                # (which were never required).
-                if d > today:
-                    colour = "#3a3a3a"
-                elif _is_weekend_date(d):
-                    colour = _PANEL_DIM
-                else:
-                    colour = C["subtext"]
-                cv.create_text(cx, cy, text=str(d.day), fill=colour,
-                               font=("Segoe UI", 8))
+        start = first - datetime.timedelta(days=first.weekday())  # back to Monday
+        for i in range(42):
+            d = start + datetime.timedelta(days=i)
+            cx = x0 + (i % 7) * cell_w + cell_w // 2
+            cy = grid_top + (i // 7) * row_h + row_h // 2
+            in_month = (d.month == month.month and d.year == month.year)
             if d == today:
-                r = cell // 2 - 2
-                cv.create_oval(cx - r, cy - r, cx + r, cy + r,
-                               outline=C["accent"], width=1)
-            d += datetime.timedelta(days=1)
-
-        cv.create_text(w // 2, _IMPACT_PANEL_H_STREAK - 18,
-                       text="Weekends bridge a run — missing one never breaks it",
-                       fill=_PANEL_DIM, font=("Segoe UI", 8))
+                r = min(row_h, cell_w) // 2 - 1
+                _rr(cv, cx - r, cy - r, cx + r, cy + r, 5,
+                    fill="", outline=C["accent"], width=1)
+            if d.isoformat() in active:
+                # A used day is the flame alone — the date would only compete
+                # with it, and which days burn is the whole point of the grid.
+                img = flame if in_month else flame_dim
+                if img is not None:
+                    cv.create_image(cx, cy, image=img)
+                else:
+                    cv.create_text(cx, cy, text="●",
+                                   fill=C["accent"] if in_month else "#6b4a12",
+                                   font=("Segoe UI", 10, "bold"))
+                continue
+            if not in_month:
+                colour = "#383838"          # neighbouring month, context only
+            elif d > today:
+                colour = "#3f3f3f"          # not a missed day yet
+            elif d == today:
+                colour = C["accent"]
+            elif _is_weekend_date(d):
+                colour = _PANEL_DIM         # never required, so never a failure
+            else:
+                colour = C["subtext"]
+            cv.create_text(cx, cy, text=str(d.day), fill=colour,
+                           font=("Segoe UI", 8))
 
     def _step_streak_month(self, delta: int) -> None:
         import datetime
-        month = getattr(self, "_streak_month", None) or datetime.date.today().replace(day=1)
+        month = (getattr(self, "_streak_month", None)
+                 or datetime.date.today().replace(day=1))
         if delta < 0:
             month = (month - datetime.timedelta(days=1)).replace(day=1)
         else:
             month = (month + datetime.timedelta(days=32)).replace(day=1)
-            if month > datetime.date.today().replace(day=1):
-                month = datetime.date.today().replace(day=1)
         self._streak_month = month
+        self._layout_impact_detail()
+
+    def _jump_streak_to_today(self) -> None:
+        import datetime
+        self._streak_month = datetime.date.today().replace(day=1)
         self._layout_impact_detail()
 
     # Impact icons are PIL-rendered (anti-aliased, cached in ui_render); the

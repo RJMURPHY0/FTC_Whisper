@@ -216,9 +216,18 @@ class PageSwapHealTests(unittest.TestCase):
         from app_window import AppWindow
         src = inspect.getsource(AppWindow._atomic_ui)
         geo_at = src.index("self._root.geometry(geo)")
-        heal_at = src.index("self._repaint_all(erase=True)")
+        heal_at = src.index("self._repaint_all(erase=moved)")
         self.assertLess(geo_at, heal_at,
                         "the heal must come after the geometry change")
+
+    def test_erase_is_reserved_for_swaps_that_moved_the_window(self):
+        """Erasing a same-size swap flashes the whole window background for a
+        frame. Only a move/resize exposes pixels no widget repaints over."""
+        import inspect
+        from app_window import AppWindow
+        src = inspect.getsource(AppWindow._atomic_ui)
+        self.assertIn("moved = bool(geo)", src)
+        self.assertNotIn("self._repaint_all(erase=True)", src)
 
     def test_configure_heal_is_gated_on_geometry_not_size(self):
         import inspect
