@@ -56,7 +56,9 @@ def _warm_recorder(name="Mic A", rate=16000):
 
 
 def _seed_ring(rec, samples=1600):
-    rec._preroll.append(np.zeros(samples, dtype=np.float32))
+    # Ring entries are (callback_ts, chunk) — start() seeds from the press
+    # instant, so every chunk carries the time it was captured.
+    rec._preroll.append((time.monotonic(), np.zeros(samples, dtype=np.float32)))
     rec._preroll_samples = samples
 
 

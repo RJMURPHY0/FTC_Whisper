@@ -18,6 +18,7 @@ session can ask for ranges (get_audio_range) and release committed audio
 (drop_audio_before) without re-copying the whole buffer every tick.
 """
 
+import math
 import threading
 import time
 import numpy as np
@@ -26,13 +27,24 @@ from collections import deque
 from typing import Optional
 
 _PREROLL_KEEP_SECONDS = 1.5   # ring buffer length while idle
-_PREROLL_SEED_SECONDS = 0.8   # pre-hotkey audio prepended to a recording: covers
-                              # hotkey-dispatch latency plus speech that starts
-                              # on (or a beat before) the press. 0.35 clipped
-                              # first words when the press and the first
-                              # syllable landed together under load; 0.6 still
-                              # occasionally clipped the first word or two, so
-                              # the margin is 0.8 (the ring keeps 1.5s).
+_PREROLL_SEED_SECONDS = 0.8   # HARD CEILING on seeded pre-start audio. The seed
+                              # is normally bounded by the press instant itself
+                              # (below), so this only bites when hotkey dispatch
+                              # was slow enough that more than this much audio
+                              # arrived between the press and start() — i.e. it
+                              # bounds dispatch lag, never the user's room.
+# The seed is anchored to the PHYSICAL KEY PRESS, not to a fixed window. A flat
+# 0.8s window prepended whatever the room contained before the hotkey — users
+# got the tail of a sentence they had spoken to someone else, or the start of a
+# thought they abandoned, transcribed into their dictation. Recording must
+# begin at the press and nowhere earlier.
+#
+# The only slack is this tolerance, which covers the two places the two clocks
+# disagree: the keyboard hook stamps the press a few ms LATE, and an audio
+# callback stamps its buffer a device-latency's worth late (so a chunk's
+# samples were captured slightly before its timestamp). 50ms swallows both and
+# cannot hold a word — a syllable is ~150ms.
+_PRESS_LEAD_SECONDS = 0.05
 
 # A healthy input stream delivers a callback every blocksize/rate seconds
 # (~21-64ms). If none arrived for this long the stream is considered dead —
@@ -96,7 +108,9 @@ class Recorder:
         self._chunks: list[np.ndarray] = []
         self._chunks_samples: int = 0     # samples currently held in _chunks
         self._chunks_offset: int = 0      # samples dropped from the front (absolute base)
-        self._preroll: deque = deque()    # ring buffer of idle-time chunks (warm mode)
+        # Ring buffer of idle-time chunks (warm mode) as (callback_ts, chunk)
+        # pairs — start() seeds from the press instant, so it needs the stamps.
+        self._preroll: deque = deque()
         self._preroll_samples: int = 0
         self._stream: Optional[sd.InputStream] = None
         self._warm_enabled = False
@@ -223,12 +237,15 @@ class Recorder:
                 if rms > max(0.0025, self._noise_floor * 2.5):
                     self._voiced_samples += n
             elif self._warm_enabled:
-                self._preroll.append(data)
+                # Stamped with the callback time: start() needs to know WHEN
+                # each chunk was captured so it can seed from the press instant
+                # and not a moment earlier.
+                self._preroll.append((self._last_callback_ts, data))
                 self._preroll_samples += n
                 max_keep = int(self.active_sample_rate * _PREROLL_KEEP_SECONDS)
                 while self._preroll_samples > max_keep and len(self._preroll) > 1:
                     dropped = self._preroll.popleft()
-                    self._preroll_samples -= dropped.shape[0]
+                    self._preroll_samples -= dropped[1].shape[0]
 
     def _monitor_callback(
         self, indata: np.ndarray, _frames: int, _time_info, status
@@ -442,8 +459,74 @@ class Recorder:
     # Recording
     # ------------------------------------------------------------------
 
-    def start(self) -> None:
-        """Start recording. Instant when the warm stream is running."""
+    def _seed_chunks_since(self, press_ts: float) -> list:
+        """Pre-roll audio captured at or after `press_ts`, oldest first.
+
+        Chunks are stamped at callback time, so a chunk of n samples covers
+        [stamp - n/rate, stamp]. The one chunk straddling the press is SLICED at
+        the press instant rather than taken whole — a whole 21-64ms chunk is
+        fine, but the ring holds 1.5s and taking whole chunks from a coarse
+        blocksize would smuggle real speech in. Caller holds _lock.
+
+        The result is then capped by the WALL CLOCK since the press. Stamps
+        jitter: PortAudio can deliver two blocks back to back, so their claimed
+        [stamp - n/rate, stamp] spans overlap and the per-chunk arithmetic
+        alone can hand back more audio than actually elapsed (measured on a
+        real device: ~100ms seeded for a 50ms window). The cap is derived from
+        the ring's own newest stamp rather than time.monotonic() so it stays on
+        the same clock as the chunks.
+        """
+        rate = float(self.active_sample_rate or 1)
+        cutoff = press_ts - _PRESS_LEAD_SECONDS
+        cap = int(rate * _PREROLL_SEED_SECONDS)
+        if self._preroll:
+            cap = min(cap, int((self._preroll[-1][0] - cutoff) * rate))
+        if cap <= 0:
+            return []
+        picked: list = []
+        taken = 0
+        for stamp, chunk in reversed(self._preroll):
+            n = chunk.shape[0]
+            if stamp <= cutoff:
+                break            # entirely pre-press — and so is everything older
+            begin = stamp - (n / rate)
+            if begin < cutoff:   # straddles the press: keep only the tail
+                # Round the split UP: a partial sample either side of the press
+                # belongs to the room, not the dictation.
+                drop = min(n, max(0, math.ceil((cutoff - begin) * rate)))
+                chunk = chunk[drop:]
+                n = chunk.shape[0]
+                if n:
+                    picked.append(chunk)
+                    taken += n
+                break            # older chunks are all pre-press
+            picked.append(chunk)
+            taken += n
+            if taken >= cap:
+                break
+        picked.reverse()
+        # Trim the OLDEST end to the cap — the overshoot sits closest to the
+        # press, which is exactly the audio that must not survive.
+        excess = taken - cap
+        while excess > 0 and picked:
+            n = picked[0].shape[0]
+            if n <= excess:
+                picked.pop(0)
+                excess -= n
+            else:
+                picked[0] = picked[0][excess:]
+                excess = 0
+        return picked
+
+    def start(self, press_ts: Optional[float] = None) -> None:
+        """Start recording. Instant when the warm stream is running.
+
+        press_ts is the time.monotonic() stamp of the physical hotkey press,
+        captured on the hotkey thread before this call was dispatched. Pre-roll
+        audio is seeded only from that instant onwards, so hotkey-dispatch lag
+        costs the user nothing and the room before the press is never recorded.
+        Omitted (programmatic starts), the press is taken to be now.
+        """
         with self._lock:
             if self._recording:
                 # Defensive: a previous session that was never stopped must not
@@ -467,7 +550,11 @@ class Recorder:
         # had to be (re)opened, i.e. whenever first words were at risk.
         self.last_start_recovery = None
         self._last_warm_reopened = False
-        press_ts = time.monotonic()
+        start_ts = time.monotonic()
+        # A press stamp from the future (clock oddity, bad caller) must never
+        # widen the window — clamp it to now, which seeds nothing pre-press.
+        press_ts = min(float(press_ts), start_ts) if press_ts else start_ts
+        press_lag_ms = int((start_ts - press_ts) * 1000)
 
         # skip_refresh: if the warm stream died, reopen it directly instead of
         # burning ~0.3-0.7s in a PortAudio re-init while the user is speaking —
@@ -481,21 +568,14 @@ class Recorder:
                 self._chunks = []
                 self._chunks_samples = 0
                 self._chunks_offset = 0
-                # Seed with the last ~0.6s of pre-roll so speech that started
-                # slightly before the hotkey (or during it) is captured — but
-                # ONLY if the stream is demonstrably live. A stale pre-roll is
-                # old room noise: transcribing it alone is how a dead mic used
-                # to inject hallucinated fillers ("Mm-hmm.") instead of speech.
+                # Seed with pre-roll captured SINCE THE PRESS, so whatever the
+                # user said between pressing and this call running is kept and
+                # nothing they said before it is — but ONLY if the stream is
+                # demonstrably live. A stale pre-roll is old room noise:
+                # transcribing it alone is how a dead mic used to inject
+                # hallucinated fillers ("Mm-hmm.") instead of speech.
                 if preroll_fresh:
-                    seed_max = int(self.active_sample_rate * _PREROLL_SEED_SECONDS)
-                    seeded = 0
-                    seed_chunks: list[np.ndarray] = []
-                    for chunk in reversed(self._preroll):
-                        seed_chunks.append(chunk)
-                        seeded += chunk.shape[0]
-                        if seeded >= seed_max:
-                            break
-                    for chunk in reversed(seed_chunks):
+                    for chunk in self._seed_chunks_since(press_ts):
                         self._chunks.append(chunk)
                         self._chunks_samples += chunk.shape[0]
                 seed_samples = self._chunks_samples
@@ -525,7 +605,8 @@ class Recorder:
                     # often first words were at risk.
                     self.last_start_recovery = {
                         "mode": "warm_reopen",
-                        "elapsed_ms": int((time.monotonic() - press_ts) * 1000),
+                        "elapsed_ms": int((time.monotonic() - start_ts) * 1000),
+                        "press_lag_ms": press_lag_ms,
                         "device": self._active_device_name,
                         "seed_ms": int(seed_samples * 1000
                                        / max(1, self.active_sample_rate)),
@@ -548,7 +629,8 @@ class Recorder:
                     self._warm_stream_is_open = True
                     self.last_start_recovery = {
                         "mode": "cold_recovered",
-                        "elapsed_ms": int((time.monotonic() - press_ts) * 1000),
+                        "elapsed_ms": int((time.monotonic() - start_ts) * 1000),
+                        "press_lag_ms": press_lag_ms,
                         "device": self._active_device_name,
                     }
                     print(f"[Recorder] Recording started (recovered, "
@@ -583,7 +665,8 @@ class Recorder:
                 # full cold open with no pre-roll. Worth a fleet-log entry.
                 self.last_start_recovery = {
                     "mode": "cold_open",
-                    "elapsed_ms": int((time.monotonic() - press_ts) * 1000),
+                    "elapsed_ms": int((time.monotonic() - start_ts) * 1000),
+                    "press_lag_ms": press_lag_ms,
                     "device": self._active_device_name,
                 }
             where = self._active_device_name or "default input"

@@ -430,16 +430,23 @@ class HotkeyManager:
             self._ptt_suppress_hook = None
 
     def _on_key_down(self, _event=None, source: str = "main") -> None:
+        # Stamp the press BEFORE taking the lock: this is the instant recording
+        # is meant to begin, and everything downstream (thread dispatch, the
+        # pre-roll seed window in Recorder.start) is measured from it. Audio
+        # from before this moment is never part of the dictation.
+        press_mono = time.monotonic()
         with self._lock:
             hold = (source == "ptt") or self.mode == "hold"
             if hold:
                 if self._state == AppState.IDLE:
                     self._press_time = time.time()
+                    self._press_monotonic = press_mono
                     self._rec_source = source
                     self._set_state(AppState.RECORDING)
                     if self.on_start_recording:
                         threading.Thread(
-                            target=self.on_start_recording, daemon=True
+                            target=self.on_start_recording,
+                            args=(press_mono,), daemon=True
                         ).start()
                 # else: the other bind owns an active recording — ignore.
             else:  # toggle semantics (main bind only)
@@ -452,10 +459,12 @@ class HotkeyManager:
                 self._last_toggle_ts = now
                 if self._state == AppState.IDLE:
                     self._rec_source = "main"
+                    self._press_monotonic = press_mono
                     self._set_state(AppState.RECORDING)
                     if self.on_start_recording:
                         threading.Thread(
-                            target=self.on_start_recording, daemon=True
+                            target=self.on_start_recording,
+                            args=(press_mono,), daemon=True
                         ).start()
                 elif (self._state == AppState.RECORDING
                       and self._rec_source == "main"):

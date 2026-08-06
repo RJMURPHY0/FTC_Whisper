@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.48"
+APP_VERSION = "1.6.49"
 
 
 class _RECT(ctypes.Structure):
@@ -1063,7 +1063,11 @@ class WhisperFlowApp:
         ok = self.injector.inject_stream(add)
         return ok, len(streamed) + len(add)
 
-    def _on_start_recording(self) -> None:
+    def _on_start_recording(self, press_ts: "float | None" = None) -> None:
+        """press_ts: time.monotonic() of the physical hotkey press, stamped on
+        the hotkey thread. This callback runs on a daemon thread, so by now the
+        press is already tens of milliseconds old — the recorder needs the
+        original instant to know where the recording starts."""
         self._last_dictation_ts = time.time()
         try:
             # _on_state_change captures the target synchronously on the hotkey
@@ -1101,9 +1105,10 @@ class WhisperFlowApp:
             from audio_store import DictationAudioWriter
             self._audio_writer = DictationAudioWriter()
             # Start capture FIRST, beep second — the beep is the user's cue to
-            # speak, so audio must already be flowing when they hear it. (With
-            # the warm mic this also captures ~0.8s of pre-roll.)
-            self.recorder.start()
+            # speak, so audio must already be flowing when they hear it. The
+            # press stamp bounds the warm mic's pre-roll seed: everything the
+            # user said since pressing is kept, nothing from before it is.
+            self.recorder.start(press_ts)
             # Instant press = warm stream was live + pre-roll seeded: nothing
             # lost. Any other start had a window where speech was dropped —
             # log it so those events are countable in the fleet log instead of
