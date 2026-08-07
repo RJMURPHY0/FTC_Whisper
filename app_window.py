@@ -14,8 +14,6 @@ from datetime import datetime, timedelta
 from typing import Callable, Optional
 import ctypes
 
-import ui_atomic
-
 try:
     from app_icons import (get_app_icon, get_brand_icon,
                            get_monogram_icon, get_fallback_icon)
@@ -1002,11 +1000,17 @@ class AppWindow:
         window, the newly exposed strip has no widget above it, so the previous
         page's bits survive there. That strip is the login ghost. Erase costs a
         background flash, which is invisible when the whole page is changing
-        anyway, so every page swap heals with erase=True.
-
-        (RedrawWindow(NULL) means the DESKTOP, so ui_atomic.repaint does
-        nothing rather than repaint the whole screen when there is no HWND.)"""
-        ui_atomic.repaint(self._top_hwnd(), erase=erase)
+        anyway, so every page swap heals with erase=True."""
+        try:
+            hwnd = self._top_hwnd()
+            if not hwnd:
+                # RedrawWindow(NULL) means the DESKTOP — repainting the whole
+                # screen instead of this app. Do nothing rather than that.
+                return
+            ctypes.windll.user32.RedrawWindow(
+                hwnd, None, None, 0x585 if erase else 0x181)
+        except Exception:
+            pass
 
     def _enforce_live_exclusive(self, key: str, value: bool) -> None:
         """Live Typing and Live Captions are mutually exclusive: both consume
@@ -1323,12 +1327,7 @@ class AppWindow:
             if self._on_sign_in:
                 threading.Thread(target=self._on_sign_in, args=(auth,), daemon=True).start()
 
-        # atomic=: the embedded login packs rows into THIS window, so its
-        # reflows must present through the same one-frame contract as every
-        # other page here (see _atomic_ui).
-        self._login_ui = LoginWindow(self._auth, on_success=_on_success,
-                                     on_cancel=self._do_quit,
-                                     atomic=self._atomic_ui)
+        self._login_ui = LoginWindow(self._auth, on_success=_on_success, on_cancel=self._do_quit)
         self._login_ui.embed(self._login_frame)
 
     def _top_hwnd(self) -> int:
@@ -1345,7 +1344,7 @@ class AppWindow:
         except Exception:
             return 0
 
-    def _atomic_ui(self, fn, erase: bool = True) -> None:
+    def _atomic_ui(self, fn) -> None:
         """Run a multi-step layout change as ONE visual frame. WM_SETREDRAW
         freezes painting, fn() does its pack work, update_idletasks settles the
         layout, then a full-tree RedrawWindow presents the result atomically.
@@ -1368,47 +1367,64 @@ class AppWindow:
         WM_SETREDRAW clears WS_VISIBLE, and doing that across an in-progress
         map leaves the on-screen bits and Tk's idea of what it has drawn out of
         sync — the intermittent ghost on the returning-user path, where a fast
-        restore promotes the dashboard microseconds after deiconify()).
-
-        The mechanics live in ui_atomic so the embedded login page (a separate
-        class packing rows into THIS window) presents through exactly the same
-        contract — it used to reflow live, which is why signing in still
-        glitched after every page swap here had been fixed.
-
-        erase=False for changes INSIDE a page (a row appearing, a canvas
-        re-render): the freeze still makes them one frame, but presenting them
-        with a full background erase would flash the whole window for a change
-        the user expects to be local."""
-        if getattr(self, "_in_atomic", False):
-            # Nested (the login page's reset() runs _switch(), which presents
-            # too): the OUTER frame owns the present and the deferred geometry.
-            # Re-entering here would clear _in_atomic on the inner exit and let
-            # the rest of the outer change resize under a frozen window.
-            fn()
-            return
+        restore promotes the dashboard microseconds after deiconify()."""
+        u32 = None
+        hwnd = 0
+        froze = False
         self._pending_geometry = None
-
-        def _mutate():
-            # _in_atomic must stay set across the settle: an idle callback that
-            # fires inside update_idletasks() may call _resize(), and that must
-            # defer too rather than resize under the freeze.
-            self._in_atomic = True
+        try:
+            mapped = bool(self._root.winfo_ismapped())
+        except Exception:
+            mapped = True
+        try:
+            u32 = ctypes.windll.user32
+            hwnd = self._top_hwnd()
+            if hwnd and mapped:
+                u32.SendMessageW(hwnd, 0x000B, 0, 0)  # WM_SETREDRAW off
+                froze = True
+        except Exception:
+            froze = False
+        self._in_atomic = True
+        try:
+            fn()
             try:
-                fn()
+                self._root.update_idletasks()
+            except Exception:
+                pass
+        finally:
+            self._in_atomic = False
+            if froze:
                 try:
+                    u32.SendMessageW(hwnd, 0x000B, 1, 0)  # WM_SETREDRAW on
+                    # RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN|RDW_UPDATENOW|RDW_FRAME
+                    u32.RedrawWindow(hwnd, None, None, 0x585)
+                except Exception:
+                    pass
+            geo = getattr(self, "_pending_geometry", None)
+            moved = bool(geo)
+            if geo:
+                self._pending_geometry = None
+                try:
+                    self._root.geometry(geo)
                     self._root.update_idletasks()
                 except Exception:
                     pass
-            finally:
-                self._in_atomic = False
-
-        def _geometry():
-            geo = getattr(self, "_pending_geometry", None)
-            self._pending_geometry = None
-            return geo
-
-        ui_atomic.atomic(self._root, _mutate, hwnd=self._top_hwnd(),
-                         geometry=_geometry, settle=False, erase=erase)
+            # Heal the swap. update_idletasks() above drains idle callbacks,
+            # NOT the Expose events the swap and any geometry change just
+            # queued, so without this the old content's bits stay on screen
+            # until something else happens to invalidate them.
+            #
+            # Erase ONLY when the window actually moved or resized: that is the
+            # case where pixels end up outside every widget's area and
+            # repaint-over cannot reach them. Erasing a same-size swap would
+            # flash the whole window's background for one frame, which is its
+            # own glitch — and same-size swaps (tab changes, opening an impact
+            # breakdown) are the common case.
+            self._repaint_all(erase=moved)
+            try:
+                self._root.after(0, lambda e=moved: self._repaint_all(erase=e))
+            except Exception:
+                pass
 
     def _switch_to_login(self) -> None:
         self._cancel_signing_in()
@@ -1556,9 +1572,7 @@ class AppWindow:
         if lbl is None:
             return
         try:
-            # Appears under a centred, place()d block — one frame, or the
-            # splash jumps as the link maps.
-            self._atomic_ui(lambda: lbl.pack(pady=(18, 0)), erase=False)
+            lbl.pack(pady=(18, 0))
         except tk.TclError:
             pass
 
@@ -2748,8 +2762,7 @@ class AppWindow:
         row = getattr(self, "_home_ptt_row", None)
         if row is None:
             return
-
-        def _apply():
+        try:
             if self._ptt_hotkey:
                 self._home_ptt_lbl.configure(text=self._ptt_hotkey)
                 if not row.winfo_ismapped():
@@ -2757,11 +2770,6 @@ class AppWindow:
                              before=self._refine_hint_row)
             else:
                 row.pack_forget()
-
-        # Packing a row reflows everything below it on the Home page; done live
-        # that reflow paints across several frames.
-        try:
-            self._atomic_ui(_apply, erase=False)
         except tk.TclError:
             pass
 
@@ -3546,16 +3554,6 @@ class AppWindow:
         return label
 
     def _render_history(self) -> None:
-        """Re-draw the whole history list as ONE frame.
-
-        The renderer clears the canvas, redraws every row, then re-syncs the
-        scrollregion and offset. Each of those can present separately — the
-        clear, the rows, then a scroll blit of half-drawn content — which is
-        the flicker on search keystrokes and on expanding a row.
-        """
-        self._atomic_ui(self._render_history_body, erase=False)
-
-    def _render_history_body(self) -> None:
         self._hist_search_job = None
         self._hist_clear_confirm = False
         cv = self._hist_cv
@@ -4892,14 +4890,10 @@ class AppWindow:
                 threading.Thread(
                     target=self._recorder.stop_monitor, daemon=True,
                     name="mic-monitor-stop").start()
-            # The meter appearing/vanishing resizes the mic card and reflows
-            # every card below it — one frame, or it tears.
-            def _hide_meter():
-                meter_cv.pack_forget()
-                meter_cv.coords(meter_fill_id, 0, 0, 0, 6)
-                test_btn.configure(text="Test Mic")
-                test_status.configure(text="")
-            self._atomic_ui(_hide_meter, erase=False)
+            meter_cv.pack_forget()
+            meter_cv.coords(meter_fill_id, 0, 0, 0, 6)
+            test_btn.configure(text="Test Mic")
+            test_status.configure(text="")
 
         def _start_test():
             if not self._recorder:
@@ -4930,12 +4924,9 @@ class AppWindow:
                     test_status.configure(text="Could not open mic", fg=C["error"])
                     return
                 mic_test_active[0] = True
-
-                def _show_meter():
-                    meter_cv.pack(fill="x", pady=(6, 0))
-                    test_btn.configure(text="Stop")
-                    test_status.configure(text="Say something…", fg=C["subtext"])
-                self._atomic_ui(_show_meter, erase=False)
+                meter_cv.pack(fill="x", pady=(6, 0))
+                test_btn.configure(text="Stop")
+                test_status.configure(text="Say something…", fg=C["subtext"])
                 self._root.after(
                     5000,
                     lambda: _stop_test()
@@ -5505,14 +5496,15 @@ class AppWindow:
         def _on_success(auth):
             self._root.deiconify()
             self._login_visible = False
-
-            # One frame, same as the embedded path: this builds the whole
-            # dashboard and resizes the window, which painted in pieces when
-            # it ran bare and was healed afterwards.
-            def _swap():
-                self._show_dashboard()
-                self._apply_auth_ui()
-            self._atomic_ui(_swap)
+            self._show_dashboard()
+            self._apply_auth_ui()
+            # Same heal the embedded path gets — this route bypasses
+            # _atomic_ui, so nothing else invalidates the resized window.
+            self._repaint_all(erase=True)
+            try:
+                self._root.after(0, lambda: self._repaint_all(erase=True))
+            except tk.TclError:
+                pass
             self._fire_authenticated()
             if after_login:
                 after_login(auth)

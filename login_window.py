@@ -100,7 +100,6 @@ class LoginWindow:
         auth_manager,
         on_success: Callable,
         on_cancel: Optional[Callable] = None,
-        atomic: Optional[Callable] = None,
     ):
         self._auth = auth_manager
         self._on_success = on_success
@@ -109,41 +108,6 @@ class LoginWindow:
         self._pending_confirm_email: Optional[str] = None
         self._embedded = False
         self._submitting = False
-        # Presenting layout changes as one frame. Embedded, AppWindow passes
-        # its own _atomic_ui so this page freezes the SAME top-level everything
-        # else does; standalone, _atomic falls back to our own Toplevel.
-        self._atomic_hook = atomic
-
-    def _atomic(self, fn: Callable) -> None:
-        """Run a layout change as one visual frame.
-
-        Every row this page shows or hides — the status banner, the confirm-
-        password section, the forgot/resend links — reflows the card and pushes
-        the buttons below it down. Done live, Tk paints that reflow across
-        several frames and the user sees the card tear or double up: the glitch
-        people still hit while signing in, after every page swap in the
-        dashboard had already been fixed.
-        """
-        # erase=False throughout: these are rows appearing inside a page that
-        # stays put, so presenting them with a background erase would flash the
-        # whole window — a worse glitch than the one being fixed.
-        if self._atomic_hook is not None:
-            try:
-                self._atomic_hook(fn, erase=False)
-            except TypeError:
-                # A host that only takes the callable still gets its one frame;
-                # never let a signature mismatch swallow a sign-in status.
-                self._atomic_hook(fn)
-            return
-        root = getattr(self, "_root", None)
-        if root is None:
-            fn()
-            return
-        try:
-            import ui_atomic
-            ui_atomic.atomic(root, fn, erase=False)
-        except Exception:
-            fn()
 
     def embed(self, frame: tk.Frame) -> None:
         """Build login UI into an existing frame (in-window, no Toplevel)."""
@@ -163,15 +127,12 @@ class LoginWindow:
         if hasattr(self, "_confirm_var"):
             self._confirm_var.set("")
         self._pending_confirm_email = None
-
-        def _apply():
-            if hasattr(self, "_status_var"):
-                self._status_var.set("")
-                if hasattr(self, "_status_frame"):
-                    self._status_frame.pack_forget()
-            if hasattr(self, "_mode"):
-                self._switch("login")
-        self._atomic(_apply)
+        if hasattr(self, "_status_var"):
+            self._status_var.set("")
+            if hasattr(self, "_status_frame"):
+                self._status_frame.pack_forget()
+        if hasattr(self, "_mode"):
+            self._switch("login")
 
     def run(self, parent=None) -> None:
         """Build and run the window on the current thread (blocking).
@@ -517,32 +478,26 @@ class LoginWindow:
 
     def _switch(self, mode: str, clear_status: bool = True) -> None:
         self._mode = mode
-
-        def _apply():
-            self._forgot_link.pack_forget()
-            self._resend_link.pack_forget()
-            if mode == "login":
-                self._confirm_section.pack_forget()
-                self._submit_btn.set(text="Sign In")
-                # before=divider so the link sits under Sign In, not below
-                # Google (packing it last pushed it off the window bottom).
-                self._forgot_link.pack(anchor="center", pady=(10, 0),
+        self._forgot_link.pack_forget()
+        self._resend_link.pack_forget()
+        if mode == "login":
+            self._confirm_section.pack_forget()
+            self._submit_btn.set(text="Sign In")
+            # before=divider so the link sits under Sign In, not below Google
+            # (packing it last was pushing it off the bottom of the window).
+            self._forgot_link.pack(anchor="center", pady=(10, 0),
+                                   before=self._divider_frame)
+            if self._pending_confirm_email:
+                self._resend_link.pack(anchor="center", pady=(4, 0),
                                        before=self._divider_frame)
-                if self._pending_confirm_email:
-                    self._resend_link.pack(anchor="center", pady=(4, 0),
-                                           before=self._divider_frame)
-            else:
-                self._confirm_section.pack(fill="x", before=self._submit_btn)
-                self._submit_btn.set(text="Create Account")
-            if hasattr(self, "_seg"):
-                self._draw_segment()
-            if clear_status:
-                self._status_var.set("")
-                self._status_frame.pack_forget()
-
-        # Login↔Sign-up adds or removes a whole field plus two links: the
-        # single largest reflow on this page.
-        self._atomic(_apply)
+        else:
+            self._confirm_section.pack(fill="x", before=self._submit_btn)
+            self._submit_btn.set(text="Create Account")
+        if hasattr(self, "_seg"):
+            self._draw_segment()
+        if clear_status:
+            self._status_var.set("")
+            self._status_frame.pack_forget()
 
     # ------------------------------------------------------------------
     # Form submission
@@ -611,11 +566,8 @@ class LoginWindow:
 
         if not ok and ("email not confirmed" in msg.lower() or "email_not_confirmed" in msg.lower()):
             self._pending_confirm_email = self._email_entry.get().strip()
-
-            def _show_resend():
-                self._resend_link.pack_forget()
-                self._resend_link.pack(anchor="center", pady=(4, 0))
-            self._atomic(_show_resend)
+            self._resend_link.pack_forget()
+            self._resend_link.pack(anchor="center", pady=(4, 0))
 
         self._submit_btn.set(
             text=f"✕  {msg}",
@@ -760,13 +712,10 @@ class LoginWindow:
             self._on_cancel()
 
     def _set_status(self, msg: str, error: bool = True) -> None:
-        def _apply():
-            self._status_var.set(msg)
-            color = C["error"] if error else C["success"]
-            self._status_lbl.configure(fg=color)
-            self._status_frame.configure(bg=C["surface"])
-            self._status_lbl.configure(bg=C["surface"])
-            # Show the frame (may already be visible — pack is idempotent)
-            self._status_frame.pack(fill="x", pady=(0, 10),
-                                    before=self._submit_btn)
-        self._atomic(_apply)
+        self._status_var.set(msg)
+        color = C["error"] if error else C["success"]
+        self._status_lbl.configure(fg=color)
+        self._status_frame.configure(bg=C["surface"])
+        self._status_lbl.configure(bg=C["surface"])
+        # Show the frame (may already be visible — pack is idempotent)
+        self._status_frame.pack(fill="x", pady=(0, 10), before=self._submit_btn)

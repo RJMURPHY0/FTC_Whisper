@@ -207,48 +207,27 @@ class _FakeRoot:
 
 
 class PageSwapHealTests(unittest.TestCase):
-    """The one-frame present must repaint AFTER it applies the deferred
-    geometry, and the Configure heal must fire on a MOVE as well as a resize (a
-    page swap recentres the window, so two same-height pages only ever move).
-
-    The mechanics live in ui_atomic (shared with the embedded login page), so
-    these assert against it plus AppWindow's delegation to it."""
+    """_atomic_ui must repaint AFTER it applies the deferred geometry, and the
+    Configure heal must fire on a MOVE as well as a resize (a page swap
+    recentres the window, so two same-height pages only ever move)."""
 
     def test_atomic_ui_repaints_after_the_deferred_geometry(self):
         import inspect
-        import ui_atomic
-        src = inspect.getsource(ui_atomic.atomic)
-        geo_at = src.index("root.geometry(geo)")
-        heal_at = src.index("repaint(hwnd, erase=moved)")
-        self.assertLess(geo_at, heal_at,
-                        "the heal must come after the geometry change")
-
-    def test_atomic_ui_defers_the_resize_out_of_the_freeze(self):
-        """AppWindow still owns _in_atomic/_pending_geometry: _resize() checks
-        the flag, and geometry() must run after painting is back on."""
-        import inspect
         from app_window import AppWindow
         src = inspect.getsource(AppWindow._atomic_ui)
-        self.assertIn("self._in_atomic = True", src)
-        self.assertIn("geometry=_geometry", src)
-        self.assertIn("_pending_geometry", src)
+        geo_at = src.index("self._root.geometry(geo)")
+        heal_at = src.index("self._repaint_all(erase=moved)")
+        self.assertLess(geo_at, heal_at,
+                        "the heal must come after the geometry change")
 
     def test_erase_is_reserved_for_swaps_that_moved_the_window(self):
         """Erasing a same-size swap flashes the whole window background for a
         frame. Only a move/resize exposes pixels no widget repaints over."""
         import inspect
-        import ui_atomic
-        src = inspect.getsource(ui_atomic.atomic)
-        self.assertIn("moved = True", src)
-        self.assertNotIn("repaint(hwnd, erase=True)", src)
-
-    def test_nested_atomic_never_presents_early(self):
-        """WM_SETREDRAW is a flag, not a counter: an inner unfreeze would
-        present the outer change half-done."""
-        import inspect
-        import ui_atomic
-        src = inspect.getsource(ui_atomic.atomic)
-        self.assertIn("hwnd in _frozen", src)
+        from app_window import AppWindow
+        src = inspect.getsource(AppWindow._atomic_ui)
+        self.assertIn("moved = bool(geo)", src)
+        self.assertNotIn("self._repaint_all(erase=True)", src)
 
     def test_configure_heal_is_gated_on_geometry_not_size(self):
         import inspect
@@ -259,9 +238,9 @@ class PageSwapHealTests(unittest.TestCase):
 
     def test_repaint_all_never_targets_the_desktop(self):
         import inspect
-        import ui_atomic
-        src = inspect.getsource(ui_atomic.repaint)
-        # RedrawWindow(NULL) repaints the whole screen; top_hwnd returns 0 on
+        from app_window import AppWindow
+        src = inspect.getsource(AppWindow._repaint_all)
+        # RedrawWindow(NULL) repaints the whole screen; _top_hwnd returns 0 on
         # failure, so the guard has to be there.
         self.assertIn("if not hwnd:", src)
 
