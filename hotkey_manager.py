@@ -394,6 +394,50 @@ class HotkeyManager:
         except Exception as e:
             print(f"[HotkeyManager] Could not install base key suppressor: {e}")
 
+    def _install_fallback_combo_hooks(self) -> bool:
+        """Keyboard-library registration for a combo whose Win32 RegisterHotKey
+        failed (another app already owns it globally).
+
+        ONE blocking press hook does both jobs — detect the combo AND swallow
+        the base key. It cannot be two hooks: the keyboard library runs its
+        blocking hooks first and returns the moment one of them suppresses,
+        BEFORE queueing the event for the non-blocking handlers, so a separate
+        non-blocking detector would never fire on a press we suppressed.
+
+        That is also why the old code leaked: it called
+        _install_base_key_suppressor() here, and that helper bails unless
+        `_win32_ok` — which is False by definition on this path. So the
+        suppressor was never installed at all, and every dictation sent Alt+V
+        straight on to the focused app (a menu accelerator in most of them),
+        with auto-repeat while held in hold mode.
+
+        Ordinary typing is untouched: with our modifiers not physically down
+        the hook returns True immediately and the key passes through."""
+        def _press(event=None):
+            try:
+                if not self._combo_modifiers_held():
+                    return True        # just the letter — never touch it
+                # Off the input thread: a blocking hook runs inline in the
+                # global keyboard path, and anything slow in here stalls
+                # typing system-wide.
+                threading.Thread(target=self._kb_combo_down, args=(event,),
+                                 daemon=True,
+                                 name="hotkey-fallback-down").start()
+                return None            # our combo — swallow it
+            except Exception as e:
+                print(f"[HotkeyManager] fallback press hook failed: {e}")
+                return True            # never block the key on an error
+
+        self._kb_hooks.append(
+            kb.on_press_key(self._base_key, _press, suppress=True))
+        # Release stays non-blocking: on_press_key hooks never see key-up, so
+        # nothing can swallow this one, and hold mode needs it to stop.
+        self._kb_hooks.append(
+            kb.on_release_key(self._base_key, self._kb_combo_up))
+        print("[HotkeyManager] Win32 combo unavailable — using keyboard-hook "
+              "fallback (base key suppressed while the combo is held).")
+        return True
+
     def _install_ptt_suppressor(self) -> None:
         """Suppress the PTT base key while a PTT recording is live — hold mode
         auto-repeats the base key into the focused app otherwise."""
@@ -657,26 +701,11 @@ class HotkeyManager:
                 if registered:
                     self._install_base_key_suppressor()
                 else:
-                    # RegisterHotKey failed (another app owns the combo). Fall
-                    # back to the keyboard library so the app is never left with
-                    # NO dictation hotkey at all — combo detection still works,
-                    # just without OS-level suppression.
+                    # RegisterHotKey failed (another app owns the combo).
+                    # Fall back to the keyboard library so the app is never
+                    # left with NO dictation hotkey at all.
                     try:
-                        self._kb_hooks.append(
-                            kb.on_press_key(self._base_key, self._kb_combo_down)
-                        )
-                        self._kb_hooks.append(
-                            kb.on_release_key(self._base_key, self._kb_combo_up)
-                        )
-                        # Without this, every dictation leaks the literal base
-                        # key ("v" — with auto-repeat in hold mode) into the
-                        # focused document while recording.
-                        self._install_base_key_suppressor()
-                        registered = True
-                        print(
-                            "[HotkeyManager] Win32 combo unavailable — using "
-                            "keyboard-hook fallback (base key suppressed)."
-                        )
+                        registered = self._install_fallback_combo_hooks()
                     except Exception as e:
                         print(f"[HotkeyManager] Fallback registration failed: {e}")
 

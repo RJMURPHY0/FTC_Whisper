@@ -18,6 +18,7 @@ import ctypes.wintypes as wt
 import os
 import re
 import sys
+import time
 
 _ICON_SIZE = 36  # rendered size in the history row (fills the row height; the
                  # header's reduced pady keeps the row the same 44px tall)
@@ -436,14 +437,33 @@ def _extract_exe_icon(exe_path: str):
         return _extract_via_extracticon(exe_path)
 
 
+# Memo of the per-exe signature, so the cache lookup below is not gated behind a
+# disk hit. The key includes mtime/size (an in-place app update must yield a
+# fresh icon), but statting on EVERY call meant a history render — which redraws
+# every visible row on each search keystroke, resize and tab switch — did one
+# os.stat per row even when the icon was already cached. Re-stat at most once
+# per _STAT_TTL per exe: an app that updates itself gets its new icon within
+# seconds, and typing in the search box touches the disk not at all.
+_STAT_TTL = 10.0
+_stat_memo: dict = {}
+
+
 def _exe_icon_cache_key(exe_path: str) -> tuple:
     """Path plus file signature, so an in-place app update gets a fresh icon."""
     path = os.path.normcase(os.path.normpath(exe_path or ""))
+    now = time.monotonic()
+    hit = _stat_memo.get(path)
+    if hit is not None and now - hit[0] < _STAT_TTL:
+        return hit[1]
     try:
         stat = os.stat(exe_path)
-        return path, stat.st_mtime_ns, stat.st_size
+        key = (path, stat.st_mtime_ns, stat.st_size)
     except Exception:
-        return path, None, None
+        key = (path, None, None)
+    if len(_stat_memo) > 256:
+        _stat_memo.clear()
+    _stat_memo[path] = (now, key)
+    return key
 
 
 def _get_raw_exe_icon(exe_path: str):

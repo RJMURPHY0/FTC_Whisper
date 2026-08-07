@@ -17,6 +17,34 @@ class AppIconTests(unittest.TestCase):
     def tearDown(self):
         app_icons._raw_icon_cache.clear()
         app_icons._icon_cache.clear()
+        app_icons._stat_memo.clear()
+
+    def test_the_cache_key_does_not_stat_the_exe_on_every_lookup(self):
+        # A history render redraws every visible row — on each search keystroke,
+        # each resize and each tab switch. Statting per row per render put the
+        # disk in the middle of typing.
+        path = r"C:\Program Files\Example\Example.exe"
+        with mock.patch.object(app_icons.os, "stat") as st:
+            st.return_value = mock.Mock(st_mtime_ns=1234, st_size=99)
+            first = app_icons._exe_icon_cache_key(path)
+            for _ in range(50):
+                app_icons._exe_icon_cache_key(path)
+        self.assertEqual(1, st.call_count)
+        self.assertEqual(first, app_icons._exe_icon_cache_key(path))
+
+    def test_a_replaced_exe_still_gets_a_fresh_icon_after_the_ttl(self):
+        # The signature is in the key so an in-place app update re-extracts.
+        path = r"C:\Program Files\Example\Example.exe"
+        with mock.patch.object(app_icons.os, "stat") as st:
+            st.return_value = mock.Mock(st_mtime_ns=1, st_size=10)
+            before = app_icons._exe_icon_cache_key(path)
+            st.return_value = mock.Mock(st_mtime_ns=2, st_size=20)
+            # Age the memo past its TTL rather than sleeping through it.
+            stamp, key = app_icons._stat_memo[list(app_icons._stat_memo)[0]]
+            app_icons._stat_memo[list(app_icons._stat_memo)[0]] = (
+                stamp - app_icons._STAT_TTL - 1, key)
+            after = app_icons._exe_icon_cache_key(path)
+        self.assertNotEqual(before, after)
 
     def test_browser_titles_resolve_known_services_across_separators(self):
         cases = {

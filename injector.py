@@ -619,6 +619,13 @@ def _release_modifiers() -> None:
 
 
 class Injector:
+    # Mirror of config.copy_to_clipboard, kept on the class because the
+    # clipboard helpers are static. False (the default) means the clipboard is
+    # left as we found it: a clipboard-paste injection with nothing to restore
+    # empties it again instead of leaving the dictation behind. app.py sets it
+    # at startup and on every settings change.
+    keep_clipboard = False
+
     def __init__(self, method: str = "clipboard"):
         m = (method or "").strip().lower()
         self.method = m if m in {"clipboard", "keystrokes", "auto"} else "clipboard"
@@ -1016,12 +1023,44 @@ class Injector:
         return False, previous
 
     @staticmethod
+    def _clipboard_clear() -> bool:
+        """Empty the clipboard. Used when there was nothing to restore and the
+        user has NOT asked for dictations to be kept there."""
+        if not _u32.OpenClipboard(None):
+            return False
+        try:
+            _u32.EmptyClipboard()
+            return True
+        except Exception:
+            return False
+        finally:
+            _u32.CloseClipboard()
+
+    @staticmethod
     def _clipboard_restore(original: str, gen: int) -> None:
         """Restore the clipboard to *original* after a short delay, but only if
-        no newer paste has happened in the meantime (otherwise we'd clobber it)."""
+        no newer paste has happened in the meantime (otherwise we'd clobber it).
+
+        With nothing to restore (empty clipboard, or non-text content we could
+        not back up) the clipboard is EMPTIED instead — leaving the dictation
+        sitting there is exactly what the Copy to Clipboard setting turns on,
+        so doing it with the setting off ignored the user's choice. When the
+        setting IS on, app.py rewrites the text after injection anyway."""
         if not original:
-            # Nothing to restore. Writing "" would EmptyClipboard for no benefit
-            # (and the dictated text staying on the clipboard is often useful).
+            if Injector.keep_clipboard:
+                return
+
+            def _clear():
+                time.sleep(1.5)      # same paste-settling delay as a restore
+                with _clip_lock:
+                    if _clip_gen != gen:
+                        return       # a newer paste owns the clipboard now
+                    try:
+                        Injector._clipboard_clear()
+                    except Exception:
+                        pass
+
+            threading.Thread(target=_clear, daemon=True).start()
             return
 
         def _do():

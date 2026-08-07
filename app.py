@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.50"
+APP_VERSION = "1.6.51"
 
 
 class _RECT(ctypes.Structure):
@@ -326,6 +326,10 @@ class WhisperFlowApp:
                 input_device=getattr(config, "input_device", ""),
             )
             self.injector = Injector(method=config.inject_method)
+            # With the setting off, a clipboard-paste injection must not leave
+            # the dictation sitting on the clipboard (see _clipboard_restore).
+            Injector.keep_clipboard = bool(
+                getattr(config, "copy_to_clipboard", False))
 
             self.tray = TrayApp(
                 on_quit=self._shutdown_and_destroy,
@@ -933,6 +937,9 @@ class WhisperFlowApp:
             # Live update, no restart. Captions reuse the already-loaded fast
             # model, so there's nothing to build — the next recording picks it up.
             self.config.live_captions = bool(value)
+        elif key == "copy_to_clipboard":
+            from injector import Injector
+            Injector.keep_clipboard = bool(value)
         elif key == "inject_method":
             # Injector is built once; update its strategy in place (whitelist-guarded).
             self.injector.method = value if value in {"clipboard", "keystrokes", "auto"} else "clipboard"
@@ -1022,8 +1029,18 @@ class WhisperFlowApp:
             # transport as the streamed text (WM_CHAR queue for native apps) or
             # trailing backspaces can interleave AFTER the tail and eat it.
             ok_del = self.injector.delete_stream(n_del) if n_del > 0 else True
+            if not ok_del:
+                # The deletion did not land (target window busy or hung). Typing
+                # the corrected tail now would append it AFTER the characters we
+                # failed to remove — a visible mash of both versions. Leave what
+                # is on screen: it is still what the user said, just less
+                # polished, which beats garbled text every time. Same rule the
+                # direct-inject paths follow after a partial send.
+                print(f"[App] Live reconcile: delete of {n_del} chars failed — "
+                      "leaving the streamed text as-is, no retype")
+                return False, len(streamed)
             ok_type = self.injector.inject_stream(tail) if tail else True
-            return (ok_del and ok_type), len(target)
+            return ok_type, len(target)
 
         # Append-only fallback: never delete. Align by CONTENT, not word count:
         # find where the tail of what we actually typed appears in the target
@@ -1744,13 +1761,26 @@ class WhisperFlowApp:
             self._recording_timer = None
 
     def _auto_stop_recording(self) -> None:
-        """Fired by the auto-stop timer — behaves like the user releasing the hotkey."""
-        if self.hotkey_manager.state == AppState.RECORDING:
-            print("[App] Auto-stopping recording (timeout reached)")
-            if self.hotkey_manager.mode == "toggle":
-                self.hotkey_manager._on_key_down()
-            else:
-                self.hotkey_manager._on_key_up()
+        """Fired by the auto-stop timer — behaves like the user releasing the
+        hotkey that STARTED this recording.
+
+        The owning bind matters: both handlers ignore a source that doesn't own
+        the recording, so the old source-less calls silently no-opped whenever
+        the push-to-talk bind had started it — and this timer is the only thing
+        that recovers a recording whose key-up was never seen (stuck key, driver
+        hiccup). Without it the app sits on "Recording" and ignores the hotkey
+        until it is restarted, which is the exact failure the cap exists for."""
+        hm = self.hotkey_manager
+        if hm.state != AppState.RECORDING:
+            return
+        source = getattr(hm, "_rec_source", "main") or "main"
+        print(f"[App] Auto-stopping recording (timeout reached, source={source})")
+        # PTT is hold semantics whatever the global mode says; only the main
+        # bind in toggle mode stops on a second press.
+        if source == "main" and hm.mode == "toggle":
+            hm._on_key_down(source="main")
+        else:
+            hm._on_key_up(source=source)
 
     def _get_context_words(self) -> str:
         with self._context_lock:

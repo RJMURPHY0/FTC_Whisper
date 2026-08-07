@@ -52,25 +52,58 @@ class NoResizeContractTests(unittest.TestCase):
         self.assertIn("_atomic_ui", src)
 
 
+_SHARED_ROOT = None
+
+
+def tearDownModule():
+    """Hand the process back with no root and no images bound to it — a later
+    module creating its own tk.Tk() otherwise trips over ImageTk objects still
+    pointing at the dead interpreter."""
+    global _SHARED_ROOT
+    try:
+        import ui_render
+        ui_render.clear_cache()
+    except Exception:
+        pass
+    try:
+        import app_icons
+        app_icons._icon_cache.clear()
+        app_icons._raw_icon_cache.clear()
+    except Exception:
+        pass
+    if _SHARED_ROOT is not None:
+        try:
+            _SHARED_ROOT.destroy()
+        except Exception:
+            pass
+        _SHARED_ROOT = None
+
+
+def _shared_root():
+    """One Tk root for the whole module, kept alive to the end of the process.
+
+    Destroying it and making another breaks the next one: ui_render's photo
+    cache holds ImageTk objects bound to the dead interpreter, and their
+    teardown wrecks the fresh one ("invalid command name tcl_findLibrary")."""
+    global _SHARED_ROOT
+    import tkinter as tk
+    if _SHARED_ROOT is not None and _SHARED_ROOT.winfo_exists():
+        return _SHARED_ROOT
+    try:
+        _SHARED_ROOT = tk.Tk()
+    except Exception as e:                          # no window station (CI)
+        raise unittest.SkipTest(f"Tk unavailable: {e}")
+    _SHARED_ROOT.geometry("420x700")
+    return _SHARED_ROOT
+
+
 class PanelClickTests(unittest.TestCase):
-    """Live Tk: the panel must not dismiss itself on a stray click, and the
-    block it lives in must keep exactly the same height throughout."""
+    """Live Tk: the panel must not dismiss itself on the click that opened it,
+    and the block it lives in must keep exactly the same height throughout."""
 
     @classmethod
     def setUpClass(cls):
-        import tkinter as tk
-        try:
-            cls.root = tk.Tk()
-        except Exception as e:                      # no window station (CI)
-            raise unittest.SkipTest(f"Tk unavailable: {e}")
-        cls.root.geometry("420x700")
-
-    @classmethod
-    def tearDownClass(cls):
-        try:
-            cls.root.destroy()
-        except Exception:
-            pass
+        cls.root = _shared_root()
 
     def setUp(self):
         import tkinter as tk
@@ -93,9 +126,13 @@ class PanelClickTests(unittest.TestCase):
         import types
         return types.SimpleNamespace(x=x, y=y)
 
-    def _open(self, key="streak"):
+    def _open(self, key="streak", settled=True):
         self.w._open_impact_detail(key)
         self.root.update()
+        if settled:
+            # Age the panel past the anti-bounce guard: these tests are about
+            # a deliberate click, not the second half of a double-click.
+            self.w._impact_opened_at = 0.0
 
     def test_the_block_height_is_identical_open_and_closed(self):
         before = self.w._impact_stack.winfo_height()
@@ -105,9 +142,24 @@ class PanelClickTests(unittest.TestCase):
         self.root.update()
         self.assertEqual(before, self.w._impact_stack.winfo_height())
 
-    def test_a_click_in_the_body_does_not_dismiss(self):
+    def test_a_click_in_the_body_dismisses(self):
+        # The panel is a detail view, not a mode: any click that isn't a
+        # control puts the cards back, so it never needs a hunt for the way out.
         self._open()
         self.w._on_impact_detail_click(self._click(200, 120))
+        self.assertIsNone(self.w._impact_open)
+
+    def test_a_click_elsewhere_on_the_page_dismisses(self):
+        self._open()
+        self.w._on_click_outside_impact()
+        self.assertIsNone(self.w._impact_open)
+
+    def test_the_opening_click_cannot_immediately_close_it(self):
+        # A bounced or double click lands on the panel the first click just
+        # opened; closing on it reads as a flicker, not as a toggle.
+        self._open(settled=False)
+        self.w._on_impact_detail_click(self._click(200, 120))
+        self.w._on_click_outside_impact()
         self.assertEqual("streak", self.w._impact_open)
 
     def test_the_header_strip_closes(self):
@@ -116,11 +168,32 @@ class PanelClickTests(unittest.TestCase):
         self.assertIsNone(self.w._impact_open)
 
     def test_month_arrows_navigate_without_closing(self):
+        # The calendar's month picker is the one control that has to survive
+        # dismiss-on-any-click, guard elapsed or not.
         self._open()
         before = self.w._streak_month
-        self.w._on_impact_detail_click(self._click(22, 46))
+        self.w._on_impact_detail_click(self._click(22, 50))
         self.assertEqual("streak", self.w._impact_open)
         self.assertLess(self.w._streak_month, before)
+
+    def test_hovering_a_card_re_renders_its_icon_against_the_hover_surface(self):
+        # ui_render bakes the card colour INTO the icon image (that is how it
+        # anti-aliases). Swapping only the card background left every icon
+        # carrying the base colour — a darker box around the glyph on hover.
+        from app_window import C
+        cv = self.w._impact_cards["time"]["cv"]
+        base = self.w._impact_icon_photo(cv, "time", C["surface"])
+        hover = self.w._impact_icon_photo(cv, "time", C["surface_hover"])
+        if base is None:
+            self.skipTest("PIL unavailable — icons fall back to primitives")
+        self.assertIsNot(base, hover,
+                         "the hover icon must be its own image, not the base one")
+        item = self.w._impact_cards["time"].get("icon_item")
+        self.assertIsNotNone(item, "the icon must be addressable for the swap")
+        self.w._hover_impact_card("time", True)
+        self.assertEqual(str(hover), cv.itemcget(item, "image"))
+        self.w._hover_impact_card("time", False)
+        self.assertEqual(str(base), cv.itemcget(item, "image"))
 
     def test_every_panel_draws_without_error(self):
         for key in ("time", "speed", "streak"):
@@ -129,6 +202,43 @@ class PanelClickTests(unittest.TestCase):
             self.assertGreater(len(self.w._impact_detail.find_all()), 10, key)
             self.w._close_impact_detail()
             self.root.update()
+
+
+class HotkeyLinkTests(unittest.TestCase):
+    """The Home hint rows (ALT+V / ALT+C / ALT+R) open the Hotkey tab. A
+    shortcut you can't change from where you read it is a dead end."""
+
+    def test_every_widget_in_a_hint_row_is_wired_and_shows_a_hand(self):
+        import tkinter as tk
+        root = tk.Toplevel(_shared_root())
+        self.addCleanup(root.destroy)
+
+        window = AppWindow.__new__(AppWindow)
+        window._switch_dash_tab = lambda name: switched.append(name)
+        switched = []
+        frame = tk.Frame(root)
+        label = tk.Label(frame, text="ALT+V")
+        window._link_to_hotkeys(frame, label)
+
+        for wdg in (frame, label):
+            self.assertEqual("hand2", str(wdg.cget("cursor")))
+            self.assertTrue(wdg.bind("<Button-1>"),
+                            "the row must carry a click binding")
+
+    def test_the_click_switches_to_the_hotkey_tab_and_stops_there(self):
+        import tkinter as tk
+        root = tk.Toplevel(_shared_root())
+        self.addCleanup(root.destroy)
+        switched = []
+        window = AppWindow.__new__(AppWindow)
+        window._switch_dash_tab = lambda name: switched.append(name)
+        label = tk.Label(root, text="ALT+R")
+        label.pack()
+        window._link_to_hotkeys(label)
+        root.update()
+        # Through Tk, so the real binding runs rather than a Python reference.
+        label.event_generate("<Button-1>", x=2, y=2, when="now")
+        self.assertEqual(["hotkey"], switched)
 
 
 class CalendarGridTests(unittest.TestCase):

@@ -67,6 +67,10 @@ _IMPACT_CARD_H = 148
 # as a missing element rather than an empty one.
 _PANEL_TRACK = "#333333"
 _PANEL_DIM = "#5a5a5a"
+# Baseline of the panel's headline figure (and of the calendar's month picker,
+# which occupies the same row). Far enough below the icon/caption line that the
+# number is not crowded by the glyph above it.
+_PANEL_VALUE_Y = 50
 
 # How long the "Signing you in…" splash waits before falling back to the login
 # form. A cold boot (app launched by the logon task before DHCP/DNS are up)
@@ -77,6 +81,53 @@ _PANEL_DIM = "#5a5a5a"
 # nobody is ever trapped watching dots.
 _SIGNIN_GRACE_MS = 20000
 _SIGNIN_ESCAPE_MS = 7000
+
+
+# ── Multi-monitor geometry ────────────────────────────────────────────────────
+# winfo_screenwidth()/winfo_screenheight() report the PRIMARY display only, so
+# every popup clamp and every window recentre built on them dragged the thing
+# back onto the main monitor whenever the app was sitting on a second screen
+# (the "Today" dropdown opening on another display). Ask Windows which monitor
+# the widget is actually on instead.
+
+class _RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", _RECT),
+                ("rcWork", _RECT), ("dwFlags", ctypes.c_ulong)]
+
+
+_MONITOR_DEFAULTTONEAREST = 2
+
+
+def _monitor_work_area(widget) -> tuple:
+    """(left, top, right, bottom) of the work area of the monitor *widget* is
+    on — taskbar excluded, and in virtual-screen coordinates, so `left`/`top`
+    are negative on a monitor placed left of or above the primary."""
+    try:
+        u32 = ctypes.windll.user32
+        u32.MonitorFromWindow.restype = ctypes.c_void_p
+        u32.MonitorFromWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        u32.GetMonitorInfoW.argtypes = [ctypes.c_void_p,
+                                        ctypes.POINTER(_MONITORINFO)]
+        mon = u32.MonitorFromWindow(ctypes.c_void_p(widget.winfo_id()),
+                                    _MONITOR_DEFAULTTONEAREST)
+        if mon:
+            info = _MONITORINFO()
+            info.cbSize = ctypes.sizeof(_MONITORINFO)
+            if u32.GetMonitorInfoW(ctypes.c_void_p(mon), ctypes.byref(info)):
+                r = info.rcWork
+                if r.right > r.left and r.bottom > r.top:
+                    return (r.left, r.top, r.right, r.bottom)
+    except Exception:
+        pass
+    try:
+        return (0, 0, widget.winfo_screenwidth(), widget.winfo_screenheight())
+    except Exception:
+        return (0, 0, 1920, 1080)
 
 
 def show_toast(root: tk.Misc, message: str, duration_ms: int = 5000) -> None:
@@ -98,9 +149,12 @@ def show_toast(root: tk.Misc, message: str, duration_ms: int = 5000) -> None:
 
     toast.update_idletasks()
     w, h = toast.winfo_reqwidth(), toast.winfo_reqheight()
-    # Bottom-right, above the taskbar
-    x = toast.winfo_screenwidth() - w - 16
-    y = toast.winfo_screenheight() - h - 60
+    # Bottom-right of the monitor the APP is on, above the taskbar — anchoring
+    # to the primary display put the toast on another screen entirely whenever
+    # the window had been dragged to a second monitor.
+    _l, _t, _r, _b = _monitor_work_area(root)
+    x = _r - w - 16
+    y = _b - h - 16
     toast.geometry(f"{w}x{h}+{x}+{y}")
 
     # Borderless Toplevels get square corners by default, so the toast needs the
@@ -446,12 +500,34 @@ class Dropdown(tk.Canvas):
         w = width or self._natural_width()
         super().__init__(parent, bg=self._bg, highlightthickness=0, bd=0,
                          width=w, height=28, cursor="hand2")
-        self.bind("<Button-1>", lambda _e: self.toggle())
+        # "break" so the click that OPENS the list is not also seen by the
+        # dismiss handler on the toplevel, which would shut it again instantly.
+        self.bind("<Button-1>", lambda _e: (self.toggle(), "break")[1])
         self.bind("<Enter>", lambda _e: self._set_hover(True))
         self.bind("<Leave>", lambda _e: self._set_hover(False))
         self.bind("<Configure>", lambda _e: self._paint())
+        # Bound ONCE, for the life of the control, and a no-op while the list
+        # is closed. The old code bound on open and unbound on close, but
+        # Tkinter's unbind(sequence, funcid) drops EVERY binding for that
+        # sequence on Python < 3.12 — so closing a dropdown silently deleted
+        # unrelated toplevel click handlers (the dismiss-anywhere on the impact
+        # breakdown), and CI builds on 3.11.
+        try:
+            self.winfo_toplevel().bind("<Button-1>", self._on_toplevel_click,
+                                       add="+")
+        except tk.TclError:
+            pass
         self._trace = variable.trace_add("write", lambda *_a: self._paint())
         self._paint()
+
+    def _on_toplevel_click(self, _e=None) -> None:
+        """Any click elsewhere in the window dismisses an open list."""
+        if self._menu is None:
+            return
+        try:
+            self.close()
+        except tk.TclError:
+            pass
 
     def _natural_width(self) -> int:
         widest = max((self._font.measure(v) for v in self._values), default=60)
@@ -502,8 +578,12 @@ class Dropdown(tk.Canvas):
         row_h = 28
         pad = 6
         w = max(self.winfo_width(), self._natural_width())
-        screen_w = self.winfo_screenwidth()
-        screen_h = self.winfo_screenheight()
+        # Clamp against the monitor THIS control is on, not the primary display
+        # — winfo_screenwidth/height are primary-only, so on a second screen the
+        # old clamp posted the list back over on the main monitor.
+        mon_l, mon_t, mon_r, mon_b = _monitor_work_area(self)
+        screen_w = mon_r - mon_l
+        screen_h = mon_b - mon_t
         w = min(w, screen_w - 24)
         full_h = row_h * len(self._values) + pad * 2
         # The mic list can run to twenty devices. Cap the popup at what the
@@ -521,10 +601,10 @@ class Dropdown(tk.Canvas):
         y = self.winfo_rooty() + self.winfo_height() + 4
         # Flip above the control when the list would fall off the screen, then
         # clamp — a flipped tall list can overshoot the top edge just as easily.
-        if y + h > screen_h - 8:
+        if y + h > mon_b - 8:
             y = self.winfo_rooty() - h - 4
-        y = max(8, min(y, screen_h - h - 8))
-        x = max(8, min(x, screen_w - w - 8))
+        y = max(mon_t + 8, min(y, mon_b - h - 8))
+        x = max(mon_l + 8, min(x, mon_r - w - 8))
         top.geometry(f"{w}x{h}+{x}+{y}")
         cv = tk.Canvas(top, bg=C["surface"], highlightthickness=0, bd=0,
                        width=w, height=h)
@@ -542,9 +622,8 @@ class Dropdown(tk.Canvas):
         cv.bind("<Button-1>", self._on_menu_click)
         cv.bind("<MouseWheel>", self._on_menu_wheel)
         top.bind("<Escape>", lambda _e: self.close())
-        # Any click elsewhere in the app dismisses it, same as a real menu.
-        self._dismiss_bind = self.winfo_toplevel().bind(
-            "<Button-1>", lambda _e: self.close(), add="+")
+        # (Dismiss-on-click-elsewhere is the permanent toplevel binding set up
+        # in __init__ — see _on_toplevel_click.)
         # Same DWM rounding as the floating popup and the toast — must run
         # after update_idletasks()/geometry() or GetAncestor resolves the wrong
         # handle and the call silently does nothing.
@@ -635,13 +714,6 @@ class Dropdown(tk.Canvas):
                 top.destroy()
             except tk.TclError:
                 pass
-        bind_id = getattr(self, "_dismiss_bind", None)
-        if bind_id:
-            try:
-                self.winfo_toplevel().unbind("<Button-1>", bind_id)
-            except tk.TclError:
-                pass
-            self._dismiss_bind = None
         self._paint()
 
     def set_values(self, values) -> None:
@@ -1251,6 +1323,11 @@ class AppWindow:
         previous = getattr(self, "_current_tab", None)
         self._current_tab = name
 
+        # Leaving Home with a breakdown open would strand it there: come back
+        # later and the cards are still replaced by a panel you have forgotten
+        # opening. Closing is a no-op when none is open.
+        self._close_impact_detail()
+
         tab_frames = {
             "home": self._home_frame,
             "hotkey": self._hotkey_frame,
@@ -1618,10 +1695,12 @@ class AppWindow:
                     or self._parse_size(sizes.get("_default")))
         w, h = size or (WINDOW_W, DASH_H)
         try:
-            sw = self._root.winfo_screenwidth()
-            sh = self._root.winfo_screenheight()
-            w = min(w, sw)
-            h = min(h, sh - 40)
+            # Clamp to the monitor the window is on, not the primary: a size
+            # saved on a big screen must not survive onto a smaller second one
+            # (_resize then centres it there, hanging it off both edges).
+            mon_l, mon_t, mon_r, mon_b = _monitor_work_area(self._root)
+            w = min(w, mon_r - mon_l)
+            h = min(h, mon_b - mon_t - 40)
         except tk.TclError:
             pass
         return max(w, MIN_W), max(h, MIN_H)
@@ -1787,6 +1866,11 @@ class AppWindow:
             font=("Segoe UI", 10),
         )
         self._home_mode_hint_lbl.pack(side="left")
+        # A shortcut you can't change from where you read it is a dead end:
+        # every hint row is a link to the Hotkey tab. Visuals are untouched
+        # (the pill is the design) — only the cursor says it is clickable.
+        self._link_to_hotkeys(hint_row, pill_bg, self._home_hotkey_lbl,
+                              self._home_mode_hint_lbl)
 
         # Refine hotkey pill
         refine_hint_row = tk.Frame(sc, bg=C["surface"])
@@ -1802,11 +1886,14 @@ class AppWindow:
         )
         self._home_refine_hotkey_lbl.pack()
 
-        tk.Label(
+        _refine_hint_lbl = tk.Label(
             refine_hint_row, text=" select text, AI improves it",
             fg=C["subtext"], bg=C["surface"],
             font=("Segoe UI", 10),
-        ).pack(side="left")
+        )
+        _refine_hint_lbl.pack(side="left")
+        self._link_to_hotkeys(refine_hint_row, refine_pill_bg,
+                              self._home_refine_hotkey_lbl, _refine_hint_lbl)
 
         # Push-to-talk pill — packed between the two rows above only while a
         # PTT shortcut is set (see _update_home_ptt_row).
@@ -1821,16 +1908,36 @@ class AppWindow:
             font=("Segoe UI", 10, "bold"),
         )
         self._home_ptt_lbl.pack()
-        tk.Label(
+        _ptt_hint_lbl = tk.Label(
             self._home_ptt_row, text=" hold to talk, let go to type",
             fg=C["subtext"], bg=C["surface"],
             font=("Segoe UI", 10),
-        ).pack(side="left")
+        )
+        _ptt_hint_lbl.pack(side="left")
+        self._link_to_hotkeys(self._home_ptt_row, _ptt_pill_bg,
+                              self._home_ptt_lbl, _ptt_hint_lbl)
         self._update_home_ptt_row()
 
         # Your impact — live per-account stats (replaces the old instructions
         # card so Home still fits on one page without scrolling)
         self._build_impact_section(parent)
+
+    def _link_to_hotkeys(self, *widgets) -> None:
+        """Make the Home hint rows open the Hotkey tab.
+
+        No hover fill and no colour change: these rows are meant to look exactly
+        as they do now, and a background swap on a tk.Label would paint a hard
+        rectangle behind the pill. The pointer is the only affordance."""
+        def _go(_e=None):
+            self._switch_dash_tab("hotkey")
+            return "break"
+
+        for wdg in widgets:
+            try:
+                wdg.configure(cursor="hand2")
+                wdg.bind("<Button-1>", _go)
+            except tk.TclError:
+                pass
 
     # ── Your impact section ───────────────────────────────────────────────────
 
@@ -1877,7 +1984,10 @@ class AppWindow:
             # Every card opens its own breakdown. The panel takes the row's
             # place rather than pushing content down, so Home still fits on one
             # page with no scrolling.
-            cv.bind("<Button-1>", lambda _e, k=key: self._open_impact_detail(k))
+            # "break" so the click that OPENS a panel never reaches the
+            # dismiss-anywhere handler bound on the toplevel below.
+            cv.bind("<Button-1>",
+                    lambda _e, k=key: (self._open_impact_detail(k), "break")[1])
             cv.bind("<Enter>", lambda _e, k=key: self._hover_impact_card(k, True))
             cv.bind("<Leave>", lambda _e, k=key: self._hover_impact_card(k, False))
             cv.configure(cursor="hand2")
@@ -1891,6 +2001,16 @@ class AppWindow:
         self._impact_detail.bind("<Button-1>", self._on_impact_detail_click)
         self._impact_open = None
         self._impact_detail_hits = []
+        self._impact_opened_at = 0.0
+        # Clicking anywhere at all puts the cards back — the panel is a detail
+        # view, not a mode, so it must never need a hunt for the right target.
+        # Bound once for the life of the window (Tkinter's unbind(seq, funcid)
+        # drops EVERY binding for that sequence, and the Dropdown owns one too),
+        # and the handler is a single attribute test when no panel is open.
+        try:
+            self._root.bind("<Button-1>", self._on_click_outside_impact, add="+")
+        except (AttributeError, tk.TclError):
+            pass
 
         # Speed starts at the product's nominal 160 wpm; once the account has
         # enough voiced-speech data, _refresh_impact replaces it with the
@@ -1993,7 +2113,16 @@ class AppWindow:
             _rr(cv, 0, 0, w - 1, h - 1, 12, fill=surface,
                 outline=C["accent"] if hovered else C["border"])
         cx = w // 2
-        card["icon"](cv, cx, 32, surface)
+        # The icon is an OPAQUE image with the card colour baked in (that is how
+        # ui_render anti-aliases it), so it has to be re-rendered against the
+        # hover surface too — leaving it on the base colour is what drew a
+        # darker box around every icon the moment you hovered a card.
+        photo = self._impact_icon_photo(cv, key, surface)
+        if photo is not None:
+            card["icon_item"] = cv.create_image(cx, 32, image=photo)
+        else:
+            card["icon_item"] = None
+            card["icon"](cv, cx, 32, surface)
         # tkinter has no letter-spacing — hair spaces between characters give
         # the reference's tracked-out caption look.
         cv.create_text(cx, 66, text=" ".join(card["label"]),
@@ -2046,10 +2175,31 @@ class AppWindow:
         if img is None:
             self._layout_impact_card(key)
             return
+        surface = C["surface_hover"] if on else C["surface"]
+        icon_item = card.get("icon_item")
+        icon_img = (self._impact_icon_photo(cv, key, surface)
+                    if icon_item is not None else None)
         try:
             cv.itemconfigure(item, image=img)
+            if icon_img is not None:
+                cv.itemconfigure(icon_item, image=icon_img)
         except tk.TclError:
             pass
+
+    @staticmethod
+    def _impact_icon_photo(cv, key: str, bg: str):
+        """The card glyph rendered against *bg*, or None without PIL. Cached in
+        ui_render per (glyph, colour, bg), so a hover swap costs one dict hit
+        after the first crossing."""
+        try:
+            import ui_render
+            if key == "time":
+                return ui_render.icon_clock(cv, 31, C["accent"], bg=bg)
+            if key == "speed":
+                return ui_render.icon_bolt(cv, 31, C["success"], bg=bg)
+            return ui_render.icon_flame(cv, 31, C["accent"], cutout=bg, bg=bg)
+        except Exception:
+            return None
 
     @staticmethod
     def _impact_card_bg(cv, w: int, hovered: bool):
@@ -2084,6 +2234,7 @@ class AppWindow:
             block_h = _IMPACT_CARD_H + 56
         self._impact_open = key
         self._impact_panel_h = block_h
+        self._impact_opened_at = time.monotonic()
 
         def _swap():
             self._impact_row.pack_forget()
@@ -2118,16 +2269,35 @@ class AppWindow:
 
         self._atomic_ui(_swap)
 
-    def _on_impact_detail_click(self, event) -> None:
-        """Only declared hit regions do anything. A click on the panel BODY is
-        deliberately inert: dismissing on any click meant a stray or repeated
-        click closed the panel the instant it opened, which read as the panel
-        flickering rather than opening. Closing is the ✕ (or the header strip
-        it sits in), and those are hit regions like everything else."""
+    # A click lands as "close" unless it hits a declared control. Guarded by a
+    # short window after opening, because the second click of a double-click (or
+    # a bounced one) lands on the panel that the first click just opened, and
+    # closing on it reads as the panel flickering rather than as a toggle.
+    _IMPACT_CLICK_GUARD = 0.25   # seconds
+
+    def _impact_guard_open(self) -> bool:
+        """True while the panel is too freshly opened to dismiss."""
+        return (time.monotonic() - getattr(self, "_impact_opened_at", 0.0)
+                < self._IMPACT_CLICK_GUARD)
+
+    def _on_impact_detail_click(self, event) -> str:
+        """Declared hit regions first (the calendar's month arrows and its
+        Today link — the one thing that must stay clickable inside an open
+        panel), and anything else closes."""
         for x0, y0, x1, y1, action in getattr(self, "_impact_detail_hits", ()):
             if x0 <= event.x <= x1 and y0 <= event.y <= y1:
                 action()
-                return
+                return "break"
+        if not self._impact_guard_open():
+            self._close_impact_detail()
+        return "break"
+
+    def _on_click_outside_impact(self, _event=None):
+        """Any click elsewhere in the window closes an open breakdown. Clicks
+        inside the panel never reach here — _on_impact_detail_click breaks the
+        chain — so this is only the rest of the page."""
+        if getattr(self, "_impact_open", None) and not self._impact_guard_open():
+            self._close_impact_detail()
 
     # ── panel chrome ──────────────────────────────────────────────────────────
 
@@ -2148,17 +2318,20 @@ class AppWindow:
                 fill=C["surface"], outline=C["border"])
         card = self._impact_cards.get(key) or {}
         icon = card.get("icon")
+        # Icon and caption share ONE line at the top, clear of the headline
+        # figure below (_PANEL_VALUE_Y). At 31px on its own row the glyph ran
+        # down into the "6.6 hrs" underneath it and the two read as one blob.
         if icon:
-            icon(cv, 30, 26)
-        cv.create_text(52, 20, text=" ".join(title), anchor="w",
+            icon(cv, 26, 20, None, 24)
+        cv.create_text(46, 20, text=" ".join(title), anchor="w",
                        fill=C["subtext"], font=("Segoe UI", 7, "bold"))
-        cv.create_text(w - 18, 22, text="✕", anchor="e",
+        cv.create_text(w - 18, 20, text="✕", anchor="e",
                        fill=C["subtext"], font=("Segoe UI", 11))
-        # The whole header strip closes, not just the glyph — a 12px target is
-        # a miss waiting to happen, and the strip is where "go back" belongs.
-        self._impact_detail_hits.append((0, 0, w, 36, self._close_impact_detail))
+        # No hit region for the ✕: every click that misses a control closes the
+        # panel anyway (see _on_impact_detail_click), so the glyph is a signpost
+        # rather than the only way out.
         if right:
-            cv.create_text(w - 40, 22, text=right, anchor="e",
+            cv.create_text(w - 40, 20, text=right, anchor="e",
                            fill=C["subtext"], font=("Segoe UI", 9))
 
     @staticmethod
@@ -2224,9 +2397,10 @@ class AppWindow:
         biggest = max(dict_min, ref_min, 0.0001)
 
         total_txt = self._fmt_span(total)
-        cv.create_text(pad, 46, text=total_txt, anchor="w",
+        cv.create_text(pad, _PANEL_VALUE_Y, text=total_txt, anchor="w",
                        fill=C["text"], font=("Segoe UI", 16, "bold"))
-        cv.create_text(pad + self._impact_font_value.measure(total_txt) + 8, 49,
+        cv.create_text(pad + self._impact_font_value.measure(total_txt) + 8,
+                       _PANEL_VALUE_Y + 3,
                        text="saved so far", anchor="w",
                        fill=C["subtext"], font=("Segoe UI", 9))
 
@@ -2281,9 +2455,9 @@ class AppWindow:
         shown = wpm or stats_mod.DICTATION_WPM
         ratio = shown / float(stats_mod.TYPING_WPM)
 
-        cv.create_text(pad, 46, text=f"{shown} wpm", anchor="w",
+        cv.create_text(pad, _PANEL_VALUE_Y, text=f"{shown} wpm", anchor="w",
                        fill=C["text"], font=("Segoe UI", 16, "bold"))
-        cv.create_text(w - pad, 49,
+        cv.create_text(w - pad, _PANEL_VALUE_Y + 3,
                        text=f"{ratio:.1f}× faster than typing".replace(".0×", "×"),
                        anchor="e", fill=C["subtext"], font=("Segoe UI", 9))
 
@@ -2342,14 +2516,14 @@ class AppWindow:
 
         # Month picker: arrows step either way, and the month name jumps back to
         # today when you have wandered off (the reference calendar's Today link).
-        nav_y = 46
+        nav_y = _PANEL_VALUE_Y
         cv.create_text(w // 2, nav_y, text=month.strftime("%B %Y"),
                        fill=C["text"], font=("Segoe UI", 10, "bold"))
         for label, dx, delta in (("‹", pad + 4, -1), ("›", w - pad - 4, 1)):
             cv.create_text(dx, nav_y, text=label, fill=C["subtext"],
                            font=("Segoe UI", 14, "bold"))
-            # Kept clear of the header close-strip above (hits are checked
-            # in order, so an overlap would close instead of navigate).
+            # Registered hit regions are the ONLY clicks inside a panel that
+            # don't dismiss it, so the month picker has to be one.
             self._impact_detail_hits.append(
                 (dx - 14, nav_y - 8, dx + 14, nav_y + 14,
                  lambda d=delta: self._step_streak_month(d)))
@@ -2441,11 +2615,11 @@ class AppWindow:
     # canvas-primitive bodies below are the no-PIL fallback only.
 
     @staticmethod
-    def _draw_icon_clock(cv, cx, cy, bg=None):
+    def _draw_icon_clock(cv, cx, cy, bg=None, size=31):
         bg = bg or C["surface"]
         try:
             import ui_render
-            photo = ui_render.icon_clock(cv, 31, C["accent"], bg=bg)
+            photo = ui_render.icon_clock(cv, size, C["accent"], bg=bg)
         except Exception:
             photo = None
         if photo is not None:
@@ -2460,11 +2634,11 @@ class AppWindow:
                        capstyle="round")
 
     @staticmethod
-    def _draw_icon_bolt(cv, cx, cy, bg=None):
+    def _draw_icon_bolt(cv, cx, cy, bg=None, size=31):
         bg = bg or C["surface"]
         try:
             import ui_render
-            photo = ui_render.icon_bolt(cv, 31, C["success"], bg=bg)
+            photo = ui_render.icon_bolt(cv, size, C["success"], bg=bg)
         except Exception:
             photo = None
         if photo is not None:
@@ -2475,13 +2649,13 @@ class AppWindow:
                           fill=C["success"], outline="")
 
     @staticmethod
-    def _draw_icon_flame(cv, cx, cy, bg=None):
+    def _draw_icon_flame(cv, cx, cy, bg=None, size=31):
         """Filled teardrop flame with a lick curling off the left, matching the
         reference. Filled reads far better than a stroke at this size."""
         bg = bg or C["surface"]
         try:
             import ui_render
-            photo = ui_render.icon_flame(cv, 31, C["accent"],
+            photo = ui_render.icon_flame(cv, size, C["accent"],
                                          cutout=bg, bg=bg)
         except Exception:
             photo = None
@@ -5486,11 +5660,13 @@ class AppWindow:
     def _show_login_screen(self, after_login=None, after_cancel=None) -> None:
         """Hide main window, show login as the primary screen, restore on success."""
         from login_window import LoginWindow, WINDOW_W as LW, WINDOW_H as LH
-        sw = self._root.winfo_screenwidth()
-        sh = self._root.winfo_screenheight()
-        # Set root geometry to login size at screen center before withdrawing so
-        # LoginWindow can position its Toplevel correctly relative to the parent.
-        self._root.geometry(f"{LW}x{LH}+{(sw - LW) // 2}+{(sh - LH) // 2}")
+        mon_l, mon_t, mon_r, mon_b = _monitor_work_area(self._root)
+        # Set root geometry to login size, centred on the monitor the app is on,
+        # before withdrawing — LoginWindow positions its Toplevel relative to
+        # the parent, so a primary-screen centre would drag it across displays.
+        self._root.geometry(f"{LW}x{LH}"
+                            f"+{mon_l + (mon_r - mon_l - LW) // 2}"
+                            f"+{mon_t + (mon_b - mon_t - LH) // 2}")
         self._root.withdraw()
 
         def _on_success(auth):
@@ -5562,10 +5738,12 @@ class AppWindow:
         # <Configure> synchronously and _on_root_configure must not read it
         # as a user drag.
         self._applied_size = (w, h)
-        sw = self._root.winfo_screenwidth()
-        sh = self._root.winfo_screenheight()
-        x  = (sw - w) // 2
-        y  = (sh - h) // 2
+        # Centre on the monitor the window is ALREADY on. Centring against
+        # winfo_screenwidth/height (primary-only) teleported the window back to
+        # the main display on every resize when it lived on a second screen.
+        mon_l, mon_t, mon_r, mon_b = _monitor_work_area(self._root)
+        x  = mon_l + (mon_r - mon_l - w) // 2
+        y  = mon_t + (mon_b - mon_t - h) // 2
         geo = f"{w}x{h}+{x}+{y}"
         if getattr(self, "_in_atomic", False):
             # Inside an _atomic_ui freeze — defer the actual geometry change

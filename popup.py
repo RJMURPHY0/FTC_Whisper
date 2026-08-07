@@ -704,6 +704,7 @@ class FloatingPopup:
     def _draw_bars_initial(self) -> None:
         self._wave_canvas.delete("all")
         self._bar_ids = []
+        self._bars_active = False
         mid = CANVAS_H // 2
         for i in range(NUM_BARS):
             cx, half = _bar_geom(i, BAR_MIN_H)
@@ -731,6 +732,13 @@ class FloatingPopup:
             return
 
         try:
+            # Colour is a one-off, not a per-frame job: the bars are orange for
+            # the whole recording. Re-sending the same fill for every bar at
+            # 25fps was ~500 no-op Tcl round-trips a second on the UI thread.
+            if not getattr(self, "_bars_active", False):
+                for bid in self._bar_ids:
+                    self._wave_canvas.itemconfigure(bid, fill=CP["bar_active"])
+                self._bars_active = True
             level = self._mic_level
             t     = time.time()
             self._last_activity = t
@@ -754,9 +762,7 @@ class FloatingPopup:
                 h = max(BAR_MIN_H, min(BAR_MAX_H, h_idle + h_voice))
 
                 cx, half = _bar_geom(i, h)
-                # Always orange while recording so the waveform is always visible
                 self._wave_canvas.coords(bid, cx, mid - half, cx, mid + half)
-                self._wave_canvas.itemconfigure(bid, fill=CP["bar_active"])
 
             # Update timer
             if self._rec_start is not None:
@@ -1120,9 +1126,11 @@ class FloatingPopup:
             self._caption_text.delete("1.0", "end")
             self._caption_text.insert("1.0", text)
 
-            # Fixed paragraph width from the first word — the bar never widens or
-            # slides sideways as text arrives; it just wraps and grows downward.
-            self._caption_text.configure(width=CAPTION_MAX_CHARS)
+            # Width is fixed for the whole recording (set in
+            # _reset_caption_widget) — the bar never widens or slides sideways
+            # as text arrives, it wraps and grows downward. Re-applying the same
+            # width here forced a Tk rewrap on every tick, right before the
+            # displaylines measurement below had to wait for it.
 
             # Height: measure wrapped display lines at this width.
             self._caption_text.update_idletasks()
@@ -1181,6 +1189,7 @@ class FloatingPopup:
     def _stop_waveform(self) -> None:
         self._waveform_running = False
         self._mic_level = 0.0
+        self._bars_active = False   # next run re-applies the active colour once
         # Reset bars to idle height
         if self._bar_ids:
             mid = CANVAS_H // 2

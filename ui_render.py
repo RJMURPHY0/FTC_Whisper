@@ -34,6 +34,14 @@ def _photo(key, master, draw_fn, w: int, h: int):
     """Cache wrapper: render draw_fn onto a (w*_SS, h*_SS) canvas, downscale,
     return an ImageTk.PhotoImage. Never raises — returns None on failure so
     callers can fall back to plain canvas drawing."""
+    # A PhotoImage belongs to the interpreter it was created in, so the cache is
+    # per-interpreter too. One root is the norm, but a second one (a test
+    # harness, a rebuilt root) would otherwise be handed a foreign image and
+    # every draw using it would fail.
+    try:
+        key = (id(master.tk),) + tuple(key)
+    except Exception:
+        pass
     cached = _cache.get(key)
     if cached is not None:
         return cached
