@@ -3,8 +3,12 @@
 -- Each row is one client-side failure: a transcription that never landed in
 -- the target app (inject_failed), a success claim the read-back disproved
 -- (inject_false_success), a mic that heard nothing (mic_silent), an automatic
--- evidence-based mic switch (mic_switched), or an empty transcription of real
--- audio (transcribe_empty). The `detail` jsonb carries the per-cause facts
+-- evidence-based mic switch (mic_switched), an empty transcription of real
+-- audio (transcribe_empty), a press that had to reopen the stream and so may
+-- have lost first words (mic_press_recovered), a dictation that captured no
+-- audio at all from a stream that looked alive (capture_dead), or the watchdog
+-- reopening a stream still callbacking with pure silence (mic_stream_silent).
+-- The `detail` jsonb carries the per-cause facts
 -- (foreground exe/class, injection method, elevated-target flag, mic names and
 -- RMS levels), so every event answers "what was the issue" on its own.
 --

@@ -59,6 +59,20 @@ _DEVICE_REFRESH_QUIET_SECONDS = 20.0  # never run the periodic default-follow wi
                               # PortAudio re-init gap must never coincide with a press,
                               # which is what dropped the first word or two.
 
+# A live mic ALWAYS carries a noise floor, so bit-exact digital silence means
+# the stream has stopped carrying its device. WASAPI leaves a stream callbacking
+# with zero-filled buffers when the Windows Audio service dies and is restarted
+# under it (observed 2026-08-07: Audiosrv hung, was killed, restarted 60s later,
+# and the app sat on the dead stream for hours). The heartbeat stays fresh and
+# stream.active stays True through all of that, so _stream_looks_alive() — which
+# only knows about those two — calls it healthy forever and the watchdog never
+# fires. This is the second, content-based liveness signal.
+_SILENT_STREAM_SECONDS = 25.0
+# Backoff between silence-triggered reopens. A hardware-muted mic also delivers
+# exact zeros, and must settle into an occasional retry rather than a reopen
+# every _SILENT_STREAM_SECONDS. Reset as soon as any real signal arrives.
+_SILENCE_RETRY_BACKOFF = (60.0, 120.0, 300.0, 600.0)
+
 # Evidence probe: when the chosen mic has been alive but voice-free for this
 # long into a recording, briefly sample the other real mics to learn whether a
 # different one is actually hearing the user (the not-worn-headset case).
@@ -160,6 +174,17 @@ class Recorder:
         # the fleet log so those events are visible instead of anecdotal.
         self._last_warm_reopened = False
         self.last_start_recovery: Optional[dict] = None
+        # Start of the current unbroken run of bit-exact-silent callbacks, or
+        # 0.0 when the last buffer carried signal. See _SILENT_STREAM_SECONDS.
+        self._silent_run_started_ts: float = 0.0
+        self._silence_recovery_count: int = 0
+        self._silence_retry_after: float = 0.0
+        # Set when the watchdog reopened a silently-dead stream. Polled and
+        # cleared by the app for the fleet log, same contract as
+        # last_start_recovery above.
+        self.last_silence_recovery: Optional[dict] = None
+        # Wall-clock seconds of the most recent recording, set by stop().
+        self.last_recording_seconds: float = 0.0
 
     @property
     def is_recording(self) -> bool:
@@ -204,10 +229,26 @@ class Recorder:
         peak = float(np.max(np.abs(mono))) if mono.size else 0.0
         data = indata.copy()
         n = data.shape[0]
+        now = time.monotonic()
         with self._lock:
-            self._last_callback_ts = time.monotonic()
+            self._last_callback_ts = now
             self._last_rms = rms
             self._last_peak = peak
+            # Bit-exact silence run (see _SILENT_STREAM_SECONDS). A real device
+            # always carries a noise floor, so an unbroken run of exact zeros
+            # means this stream is no longer carrying one — even though it is
+            # still calling back. An empty buffer carries no information either
+            # way and must not count as silence.
+            if mono.size:
+                if peak > 0.0:
+                    self._silent_run_started_ts = 0.0
+                    if self._silence_recovery_count:
+                        # Real audio is flowing again — a later failure deserves
+                        # a prompt recovery, not the tail of an old backoff.
+                        self._silence_recovery_count = 0
+                        self._silence_retry_after = 0.0
+                elif self._silent_run_started_ts == 0.0:
+                    self._silent_run_started_ts = now
             if self._aux_active:
                 self._aux_chunks.append(data)
             if self._recording:
@@ -284,7 +325,13 @@ class Recorder:
     def _stream_looks_alive(self) -> bool:
         """True when the current stream both claims to be active AND has
         delivered a callback recently. A stream whose device vanished (or died
-        across sleep/resume) keeps active=True but never calls back again."""
+        across sleep/resume) keeps active=True but never calls back again.
+
+        Deliberately says nothing about stream CONTENT — see
+        _stream_is_silently_dead(), which is checked only by the idle watchdog.
+        This method is on the hotkey press path (start() → _ensure_warm_stream),
+        where returning False forces a reopen and risks the first words, so a
+        merely-silent mic must never fail it."""
         stream = self._stream
         if stream is None:
             return False
@@ -294,6 +341,57 @@ class Recorder:
         except Exception:
             return False
         return self._heartbeat_age() < _HEARTBEAT_STALE_SECONDS
+
+    def _silent_run_seconds(self) -> float:
+        """Seconds of unbroken bit-exact-silent callbacks (0.0 when the stream
+        is currently carrying signal)."""
+        with self._lock:
+            started = self._silent_run_started_ts
+        return (time.monotonic() - started) if started > 0.0 else 0.0
+
+    def _stream_is_silently_dead(self) -> bool:
+        """True when the stream keeps calling back but has carried nothing but
+        bit-exact silence long enough that it is clearly no longer attached to
+        a device (the audio-engine-restart case _SILENT_STREAM_SECONDS covers).
+
+        Kept out of _stream_looks_alive() on purpose: that is consulted on the
+        press path, and a hardware-muted mic also reads as exact zeros. Failing
+        liveness there would cold-open the stream under a user who is already
+        speaking and cost them their first words — a worse outcome than the
+        silence itself. Only the idle watchdog acts on this."""
+        if self._silent_run_seconds() < _SILENT_STREAM_SECONDS:
+            return False
+        return time.monotonic() >= self._silence_retry_after
+
+    def _recover_silent_stream(self) -> None:
+        """Reopen a stream that is callbacking but carrying only silence.
+
+        Held off within _DEVICE_REFRESH_QUIET_SECONDS of a dictation for the
+        same reason as the periodic default-follow: the PortAudio re-init gap
+        must never coincide with a press. The pre-roll is never carried across
+        (it is all silence, and seeding a recording from it is exactly how a
+        dead mic used to feed hallucinated fillers into the transcript)."""
+        if (time.monotonic() - self._last_record_activity_ts
+                <= _DEVICE_REFRESH_QUIET_SECONDS):
+            return
+        silent_for = self._silent_run_seconds()
+        device = self._active_device_name
+        print(f"[Recorder] Watchdog: stream silent for {silent_for:.0f}s "
+              f"while still callbacking — reopening.")
+        # Arm the backoff BEFORE reopening: a genuinely muted mic starts a new
+        # silent run the moment the fresh stream opens.
+        idx = min(self._silence_recovery_count, len(_SILENCE_RETRY_BACKOFF) - 1)
+        self._silence_recovery_count += 1
+        self._silence_retry_after = (
+            time.monotonic() + _SILENCE_RETRY_BACKOFF[idx])
+        with self._lock:
+            self._silent_run_started_ts = 0.0
+        self._ensure_warm_stream(force_fresh=True)
+        self.last_silence_recovery = {
+            "device": device,
+            "silent_seconds": round(silent_for, 1),
+            "attempt": self._silence_recovery_count,
+        }
 
     def _refresh_portaudio(self) -> None:
         """Re-initialise PortAudio so the device list reflects reality.
@@ -407,6 +505,10 @@ class Recorder:
                 if not self._stream_looks_alive():
                     print("[Recorder] Watchdog: warm stream dead — recovering.")
                     self._ensure_warm_stream(force_fresh=True)
+                elif self._stream_is_silently_dead():
+                    # Callbacks still arriving, but carrying nothing at all —
+                    # the stream outlived its device (audio-engine restart).
+                    self._recover_silent_stream()
                 elif tick % _DEVICE_REFRESH_TICKS == 0:
                     # Periodic refresh: PortAudio can't see default-device
                     # changes without a re-init, so bounce the idle stream to
@@ -665,6 +767,12 @@ class Recorder:
             # Defer the next periodic default-follow so the reopen can't land on
             # a fast follow-up dictation and clip its first words.
             self._last_record_activity_ts = time.monotonic()
+            # Wall-clock length of this recording. The app compares it against
+            # the audio actually captured: a hotkey held for seconds that
+            # yielded no samples is a dead stream, not an accidental tap.
+            self.last_recording_seconds = (
+                self._last_record_activity_ts - self._recording_started_ts
+                if self._recording_started_ts > 0.0 else 0.0)
 
         # Keep the stream open only when warm mode is (still) on and no device
         # change is pending. Closing here also covers warm mode being disabled

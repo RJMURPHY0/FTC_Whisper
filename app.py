@@ -864,6 +864,45 @@ class WhisperFlowApp:
             detail)
         return False
 
+    # A hotkey held at least this long should have produced far more audio than
+    # the 0.3s floor. Below it, a near-empty clip is an accidental tap and there
+    # is nothing wrong with the mic.
+    _DEAD_CAPTURE_HELD_SECONDS = 1.0
+
+    def _handle_dead_capture(self, captured_seconds: float) -> bool:
+        """A dictation ended with essentially no audio. Tell an accidental tap
+        (hotkey held about as briefly as the audio it produced) apart from a
+        stream that was open, callbacking and carrying nothing — the state a
+        Windows audio-engine restart leaves a live warm stream in.
+
+        Only the second is recoverable, and it is the one that used to cost the
+        rest of the session: every later press hit the same corpse and got a
+        buzz, with nothing ever trying to reopen the stream (observed
+        2026-08-07 — five dead presses over three minutes after Audiosrv was
+        killed under the app). Returns True when a reconnect was started, in
+        which case the caller skips the generic 'Recording too short' feedback.
+        """
+        try:
+            held = float(getattr(self.recorder, "last_recording_seconds", 0.0))
+        except Exception:
+            held = 0.0
+        if held < self._DEAD_CAPTURE_HELD_SECONDS:
+            return False
+        print(f"[App] Held {held:.1f}s but captured {captured_seconds:.2f}s — "
+              f"mic stream is dead; reconnecting.")
+        self._log_error_event("capture_dead", {
+            "held_seconds": round(held, 2),
+            "captured_seconds": round(captured_seconds, 2),
+            "device": getattr(self.recorder, "_active_device_name", ""),
+        })
+        # Background thread like every other restart_warm call site — a
+        # PortAudio re-init can take seconds and must not hold the stop path.
+        threading.Thread(target=self.recorder.restart_warm, daemon=True,
+                         name="warm-restart-dead-capture").start()
+        self.feedback.error_occurred(
+            "Microphone stopped responding — reconnected. Please dictate again.")
+        return True
+
     def _on_hotkey_change(self, new_hotkey: str) -> None:
         """Called when the user saves a new hotkey in the dashboard."""
         print(f"[App] Updating hotkey to: {new_hotkey}")
@@ -1128,6 +1167,13 @@ class WhisperFlowApp:
             _recovery = getattr(self.recorder, "last_start_recovery", None)
             if _recovery:
                 self._log_error_event("mic_press_recovered", dict(_recovery))
+            # Watchdog reopened a stream that was callbacking but carrying only
+            # silence. Cleared here because nothing else does — unlike
+            # last_start_recovery, which start() resets on every press.
+            _silent = getattr(self.recorder, "last_silence_recovery", None)
+            if _silent:
+                self.recorder.last_silence_recovery = None
+                self._log_error_event("mic_stream_silent", dict(_silent))
             self.feedback.recording_started()
             # The status pill went up as "Starting…" on the hotkey thread;
             # audio is now proven flowing, so flip it to "Recording".
@@ -1253,8 +1299,10 @@ class WhisperFlowApp:
                         print(f"[App] Empty final pass; keeping streamed text '{_streamed}'.")
                     else:
                         if total_samples < capture_rate * 0.3:
-                            print("[App] Recording too short, ignoring.")
-                            self.feedback.error_occurred("Recording too short")
+                            if not self._handle_dead_capture(
+                                    total_samples / float(capture_rate)):
+                                print("[App] Recording too short, ignoring.")
+                                self.feedback.error_occurred("Recording too short")
                         else:
                             print("[App] Empty transcription result.")
                             import numpy as _np
@@ -1280,11 +1328,14 @@ class WhisperFlowApp:
                 audio = self.recorder.stop()
 
                 if audio is None or len(audio) < capture_rate * 0.3:
-                    print("[App] Recording too short, ignoring.")
+                    _got = (len(audio) / float(capture_rate)
+                            if audio is not None else 0.0)
                     if audio_writer is not None:
                         audio_writer.abort()
                     self.hotkey_manager.set_idle()
-                    self.feedback.error_occurred("Recording too short")
+                    if not self._handle_dead_capture(_got):
+                        print("[App] Recording too short, ignoring.")
+                        self.feedback.error_occurred("Recording too short")
                     return
 
                 final_audio = audio
