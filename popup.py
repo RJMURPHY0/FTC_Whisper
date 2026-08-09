@@ -104,6 +104,20 @@ ASK_PLACEHOLDER = "Ask AI — e.g. 'change language to French' or 'make this sho
 # never lingers on screen indefinitely.
 ICON_AUTO_DISMISS_SECS = 30.0
 
+# Z-order upkeep. SetWindowPos flags for "raise to the front of the topmost band
+# without touching position, size or focus".
+_HWND_TOP          = 0
+_HWND_TOPMOST      = -1
+_GWL_EXSTYLE       = -20
+_WS_EX_TOPMOST     = 0x0008
+_SWP_NOSIZE        = 0x0001
+_SWP_NOMOVE        = 0x0002
+_SWP_NOACTIVATE    = 0x0010
+_SWP_NOOWNERZORDER = 0x0200
+# How often to re-assert while the popup is on screen. Fast enough that being
+# covered is never something the user sees for long, slow enough to be free.
+_ONTOP_INTERVAL_MS = 500
+
 # The expanded refinement panel dismisses itself after this long with no
 # interaction. Typing in the Ask box, a running AI call, a voice prompt, an
 # in-flight upgrade, or the pointer resting over the panel all count as
@@ -260,6 +274,11 @@ class FloatingPopup:
         self._icon_entered: float = 0.0
         self._last_shown: float = 0.0  # when any mode last became visible (grace window)
         self._watchdog_started: bool = False
+        # Z-order upkeep: -topmost only puts the window in the topmost band, it
+        # does not keep it at the front of it (see _assert_topmost).
+        self._popup_top_hwnd: int = 0
+        self._ontop_tick = None
+        self._last_geometry: str = ""
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -545,6 +564,96 @@ class FloatingPopup:
         if self.root:
             self.root.after(2000, self._watchdog)
 
+    def _top_hwnd(self) -> int:
+        """The REAL top-level window handle.
+
+        On Windows tkinter's winfo_id() hands back a CHILD window whose parent is
+        the wrapper Tk actually manages (verified: the child carries exstyle
+        0x04, the parent carries TOPMOST|TOOLWINDOW). Z-order, topmost and
+        repaint all belong to the parent, so calling them on winfo_id() silently
+        does nothing at all."""
+        if not self._popup_top_hwnd:
+            try:
+                GA_ROOT = 2
+                self._popup_top_hwnd = (
+                    ctypes.windll.user32.GetAncestor(self._popup_hwnd, GA_ROOT)
+                    or self._popup_hwnd)
+            except Exception:
+                self._popup_top_hwnd = self._popup_hwnd
+        return self._popup_top_hwnd
+
+    def _assert_topmost(self) -> None:
+        """Push the popup back to the FRONT of the topmost band.
+
+        `-topmost` only puts a window in that band; it does not keep it at the
+        front of it. The taskbar is topmost too, and so is every other app's
+        always-on-top window — whichever was raised last wins, which is how the
+        recording pill ended up behind the taskbar after an app switch. Cheap
+        (one SetWindowPos), and SWP_NOACTIVATE means re-asserting never takes
+        focus off whatever the user is typing into.
+
+        The raise MUST be HWND_TOP, not HWND_TOPMOST: SetWindowPos with
+        HWND_TOPMOST on a window that is ALREADY topmost fails outright — it
+        returns 0 and the Z-order does not move (measured, both ways round).
+        HWND_TOP raises within whichever band the window is in, so it is
+        HWND_TOPMOST that establishes the band and HWND_TOP that wins it."""
+        h = self._top_hwnd()
+        if not h:
+            return
+        try:
+            u32 = ctypes.windll.user32
+            flags = (_SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE
+                     | _SWP_NOOWNERZORDER)
+            if not (u32.GetWindowLongW(h, _GWL_EXSTYLE) & _WS_EX_TOPMOST):
+                u32.SetWindowPos(h, _HWND_TOPMOST, 0, 0, 0, 0, flags)
+            u32.SetWindowPos(h, _HWND_TOP, 0, 0, 0, 0, flags)
+        except Exception:
+            pass
+
+    def _keep_on_top(self) -> None:
+        """Re-assert Z-order for as long as anything is on screen. One pass at
+        show time is not enough: the pill is up for the whole dictation and the
+        user switches apps, clicks the taskbar and opens other always-on-top
+        windows while it is."""
+        self._ontop_tick = None
+        if not self.root or self._mode is None:
+            return
+        self._assert_topmost()
+        try:
+            self._ontop_tick = self.root.after(_ONTOP_INTERVAL_MS, self._keep_on_top)
+        except tk.TclError:
+            self._ontop_tick = None
+
+    def _start_keep_on_top(self) -> None:
+        if self._ontop_tick is None:
+            self._keep_on_top()
+
+    def _stop_keep_on_top(self) -> None:
+        if self._ontop_tick is not None:
+            try:
+                self.root.after_cancel(self._ontop_tick)
+            except Exception:
+                pass
+            self._ontop_tick = None
+
+    def _repaint_popup(self) -> None:
+        """Force the whole frame to redraw where it now is.
+
+        Moving or resizing a mapped overrideredirect window lets Windows blit the
+        old pixels into the new position — the half-drawn, wrong-content pill.
+        Refuses hwnd 0: RedrawWindow(NULL, …) repaints the DESKTOP."""
+        h = self._top_hwnd()
+        if not h:
+            return
+        try:
+            RDW_INVALIDATE, RDW_ERASE = 0x0001, 0x0004
+            RDW_ALLCHILDREN, RDW_UPDATENOW = 0x0080, 0x0100
+            ctypes.windll.user32.RedrawWindow(
+                h, None, None,
+                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW)
+        except Exception:
+            pass
+
     def _set_no_activate(self, enabled: bool) -> None:
         """Enable or disable WS_EX_NOACTIVATE on the popup window."""
         try:
@@ -591,6 +700,11 @@ class FloatingPopup:
                 u32.SetForegroundWindow(prev_fg)
             except Exception:
                 pass
+        # AFTER handing focus back, not before: activating another window raises
+        # it, and the taskbar shares our band.
+        self._assert_topmost()
+        self._repaint_popup()
+        self._start_keep_on_top()
 
     def _on_popup_configure(self, event) -> None:
         pass  # corners handled once at initialize via DWM
@@ -1095,6 +1209,12 @@ class FloatingPopup:
             self._status_label.configure(text=text)
 
         self._status_frame.pack()
+        # Space/Enter dismiss belongs to the post-insert badge ALONE. Starting a
+        # new dictation while the previous badge is still up left its hook live,
+        # so a space typed mid-recording hid the pill (and the badge's own
+        # auto-dismiss timer bails on a mode change, so nothing ever took it
+        # down). Every entry into status mode clears it.
+        self._unregister_space_dismiss()
         self._mode = "status"
         self.root.update_idletasks()  # force canvas render before animation
         # Always position on the monitor where the cursor is
@@ -1223,8 +1343,15 @@ class FloatingPopup:
         )
 
     def _auto_dismiss_icon(self, stamp: float) -> None:
-        if self._mode == "icon" and self._icon_entered == stamp:
-            self._do_hide()
+        if self._mode == "icon":
+            if self._icon_entered == stamp:
+                self._do_hide()
+            return          # a NEWER badge owns the hook — never unhook that one
+        # The badge this timer belonged to is gone (a new dictation started, or
+        # the panel opened). Its keyboard hook must go with it: returning here
+        # without unhooking is what let a space-dismiss outlive its badge and
+        # then hide a live recording.
+        self._unregister_space_dismiss()
 
     def _touch_panel_activity(self) -> None:
         self._panel_activity = time.time()
@@ -1291,6 +1418,11 @@ class FloatingPopup:
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
+        # The panel has to stay on top for the same reason the pill does; the
+        # re-assert never touches focus (SWP_NOACTIVATE), so the Ask box keeps it.
+        self._assert_topmost()
+        self._repaint_popup()
+        self._start_keep_on_top()
 
     def _refresh_insert_status(self) -> None:
         if self._inserted_ok:
@@ -1341,6 +1473,7 @@ class FloatingPopup:
         self._set_no_activate(True)
         self._stop_waveform()
         self._unregister_space_dismiss()
+        self._stop_keep_on_top()
         self._mode = None
         self._ai_busy = False
         # Stop an in-flight voice-prompt recording — closing the panel must not
@@ -1812,6 +1945,10 @@ class FloatingPopup:
         x = max(left, min(x, right - w))
         y = max(top, min(y, bottom - h))
 
+        # Size counts as a move: the caption bar grows downward while the pill is
+        # bottom-anchored, so a taller pill at the same y is still a blit.
+        moved = f"{w}x{h}+{x}+{y}" != self._last_geometry
+        self._last_geometry = f"{w}x{h}+{x}+{y}"
         self.root.geometry(f"+{x}+{y}")
         # Flush the position to the window BEFORE the caller deiconifies it, so it
         # never maps at the old/0,0 spot for a frame (top-left black-box flash).
@@ -1842,8 +1979,27 @@ class FloatingPopup:
                     self._log_pos_anomaly(near_cursor, w, h, x, y,
                                           (left_p, top_p, right_p, bottom_p),
                                           (pr.left, pr.top), (ddx, ddy))
+                    moved = True
+                    self._last_geometry = ""
         except Exception:
             pass
+
+        # Moving or resizing a MAPPED overrideredirect window lets Windows blit
+        # the old pixels into the new spot, which is the ghosted/half-drawn pill.
+        # RDW_UPDATENOW only validates Tk's update region — Tk turns WM_PAINT into
+        # a queued Expose and paints on a later mainloop spin — so the after(0)
+        # twin is the one that actually drains the queue.
+        if moved:
+            try:
+                mapped = bool(self.root.winfo_ismapped())
+            except Exception:
+                mapped = False
+            if mapped:
+                self._repaint_popup()
+                try:
+                    self.root.after(0, self._repaint_popup)
+                except tk.TclError:
+                    pass
 
     def _log_pos_anomaly(self, near_cursor, w, h, x, y, wa_phys, landed, delta):
         """Record only the anomalous placements — the ones the physical guard had

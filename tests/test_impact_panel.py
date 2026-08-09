@@ -204,6 +204,86 @@ class PanelClickTests(unittest.TestCase):
             self.root.update()
 
 
+class TimePanelTests(unittest.TestCase):
+    """Time saved shows what the app COST as well as what it saved, and it does
+    it in the height it already had — the block never grows (see _panel_h)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = _shared_root()
+
+    def _panel(self, **snap):
+        import tkinter as tk
+        import types
+        from app_window import C
+        import stats as stats_mod
+        base = dict(stats_mod.StatsStore().snapshot())    # every key the cards read
+        base.update({"dictation_saved_minutes": 462.0, "refine_saved_minutes": 0.35,
+                     "saved_minutes": 462.35, "refine_count": 1,
+                     "refine_seconds": 6.0, "refine_prompt_words": 8,
+                     "total_words": 27326, "total_audio_seconds": 11880.0})
+        base.update(snap)
+        w = AppWindow.__new__(AppWindow)
+        w._root = self.root
+        w._config = types.SimpleNamespace(impact_range="today",
+                                          save_async=lambda: None)
+        w._stats = types.SimpleNamespace(snapshot=lambda _s=base: dict(_s))
+        frame = tk.Frame(self.root, bg=C["bg"])
+        frame.pack(fill="both", expand=True)
+        self.addCleanup(frame.destroy)
+        w._build_impact_section(frame)
+        self.root.update()
+        w._open_impact_detail("time")
+        self.root.update()
+        return w, w._impact_detail
+
+    @staticmethod
+    def _texts(cv):
+        return [cv.itemcget(i, "text") for i in cv.find_all()
+                if cv.type(i) == "text"]
+
+    def test_it_reports_the_time_actually_spent_using_the_app(self):
+        w, cv = self._panel()
+        texts = self._texts(cv)
+        self.assertIn("Time using it", texts)
+        # 11880s of recording + 6s in the refine panel = 3.3 hrs, measured.
+        self.assertIn(w._fmt_span(11886.0 / 60.0), texts)
+
+    def test_the_spent_row_is_not_added_into_the_headline(self):
+        # The saving already has the speaking and refining time netted off, so
+        # a panel that summed all three rows would be double counting.
+        w, cv = self._panel()
+        self.assertIn(w._fmt_span(462.0 + 0.35), self._texts(cv))
+
+    def test_all_three_rows_fit_without_the_panel_growing(self):
+        w, cv = self._panel()
+        h = w._panel_h()
+        for item in cv.find_all():
+            bbox = cv.bbox(item)
+            self.assertLessEqual(bbox[3], h,
+                                 f"{cv.type(item)} {cv.bbox(item)} overflows {h}")
+
+    def test_every_row_note_stays_on_one_line(self):
+        # Three rows only fit because each explanation is a single short line;
+        # a wrapped note pushes the row below it out of the panel.
+        w, cv = self._panel()
+        for item in cv.find_all():
+            if cv.type(item) != "text" or int(cv.itemcget(item, "width") or 0) == 0:
+                continue
+            x0, y0, x1, y1 = cv.bbox(item)
+            self.assertLess(y1 - y0, 18,
+                            f"wrapped to two lines: {cv.itemcget(item, 'text')!r}")
+
+    def test_a_fresh_account_still_draws_three_rows(self):
+        w, cv = self._panel(dictation_saved_minutes=0.0, refine_saved_minutes=0.0,
+                            refine_count=0, refine_seconds=0.0,
+                            refine_prompt_words=0, total_words=0,
+                            total_audio_seconds=0.0)
+        texts = self._texts(cv)
+        for label in ("Dictation", "AI refine", "Time using it"):
+            self.assertIn(label, texts)
+
+
 class HotkeyLinkTests(unittest.TestCase):
     """The Home hint rows (ALT+V / ALT+C / ALT+R) open the Hotkey tab. A
     shortcut you can't change from where you read it is a dead end."""

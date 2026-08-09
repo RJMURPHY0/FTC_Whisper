@@ -2393,8 +2393,13 @@ class AppWindow:
         inner = w - pad * 2
         dict_min = float(snap.get("dictation_saved_minutes", 0.0))
         ref_min = float(snap.get("refine_saved_minutes", 0.0))
+        # What using the app actually cost: every second of recording plus the
+        # measured time spent in the refine panel. Both are measured, never
+        # assumed, and both are already netted off the savings above.
+        spoke_min = float(snap.get("total_audio_seconds", 0.0)) / 60.0
+        used_min = spoke_min + float(snap.get("refine_seconds", 0.0)) / 60.0
         total = dict_min + ref_min
-        biggest = max(dict_min, ref_min, 0.0001)
+        biggest = max(dict_min, ref_min, used_min, 0.0001)
 
         total_txt = self._fmt_span(total)
         cv.create_text(pad, _PANEL_VALUE_Y, text=total_txt, anchor="w",
@@ -2404,43 +2409,54 @@ class AppWindow:
                        text="saved so far", anchor="w",
                        fill=C["subtext"], font=("Segoe UI", 9))
 
-        # Dictation gets a one-line summary so AI refine has room for the two
-        # lines it needs to spell out what the manual round trip actually is.
-        top = 72
         words = int(snap.get("total_words", 0))
-        spoke_min = float(snap.get("total_audio_seconds", 0.0)) / 60.0
         typing_min = words / float(stats_mod.TYPING_WPM) if words else 0.0
-        cv.create_text(pad, top, text="Dictation", anchor="w",
-                       fill=C["text"], font=("Segoe UI", 10, "bold"))
-        cv.create_text(w - pad, top, text=self._fmt_span(dict_min), anchor="e",
-                       fill=C["accent"], font=("Segoe UI", 10, "bold"))
-        self._panel_bar(cv, pad, top + 12, inner, dict_min / biggest, C["accent"])
-        cv.create_text(
-            pad, top + 24, anchor="nw", width=inner,
-            text=(f"{words:,} words · {self._fmt_span(typing_min)} to type at "
-                  f"{stats_mod.TYPING_WPM} wpm, {self._fmt_span(spoke_min)} to say"),
-            fill=C["subtext"], font=("Segoe UI", 8))
-
         n = int(snap.get("refine_count", 0))
-        y = max(top + 46, h - 74)
-        cv.create_text(pad, y, text="AI refine", anchor="w",
-                       fill=C["text"], font=("Segoe UI", 10, "bold"))
-        cv.create_text(w - pad, y, text=self._fmt_span(ref_min), anchor="e",
-                       fill=C["success"], font=("Segoe UI", 10, "bold"))
-        self._panel_bar(cv, pad, y + 12, inner, ref_min / biggest, C["success"])
         if n:
             in_app = float(snap.get("refine_seconds", 0.0)) / n
             manual = stats_mod.refine_manual_seconds(
                 int(snap.get("refine_prompt_words", 0)) // max(1, n))
-            body = (f"{n:,} applied · by hand (switch to a chat assistant, paste, "
-                    f"type the instruction, wait, copy back, paste over) that is "
-                    f"~{manual:.0f}s each. Here it took {in_app:.0f}s.")
+            ref_note = (f"{n:,} applied · ~{manual:.0f}s each by hand, "
+                        f"{in_app:.0f}s here")
         else:
-            body = ("Nothing refined yet · each applied result saves about "
-                    f"{stats_mod.refine_manual_seconds(0) - 9:.0f}s over pasting "
-                    "the text into a chat window and back.")
-        cv.create_text(pad, y + 24, anchor="nw", width=inner, text=body,
-                       fill=C["subtext"], font=("Segoe UI", 8))
+            ref_note = ("Nothing refined yet · about "
+                        f"{stats_mod.refine_manual_seconds(0) - 9:.0f}s saved "
+                        "each time")
+
+        spent_note = f"{self._fmt_span(spoke_min)} speaking"
+        if used_min - spoke_min >= 1 / 60.0:
+            spent_note += f" + {self._fmt_span(used_min - spoke_min)} refining"
+        spent_note += " · already deducted above"
+
+        # Three rows, one short line of working each — the panel has to show
+        # what was spent as well as what was saved, and it may not grow to do
+        # it (the block is a fixed height, see _panel_h).
+        rows = (
+            ("Dictation", dict_min, C["accent"], C["text"],
+             f"{words:,} words · {self._fmt_span(typing_min)} to type at "
+             f"{stats_mod.TYPING_WPM} wpm"),
+            ("AI refine", ref_min, C["success"], C["text"], ref_note),
+            ("Time using it", used_min, _PANEL_DIM, C["subtext"], spent_note),
+        )
+        # A row is label/value, bar, one line of working — 40px tall, so three
+        # of them plus the rule only fit in the block's fixed height at this
+        # spacing. Nothing here may grow: see _panel_h.
+        top, gap = 72, 7
+        step = max(42, (h - top - gap - 34) // 3)
+        ys = (top, top + step, top + 2 * step + gap)
+        # A hairline separates what was spent from what was saved, so the third
+        # figure never reads as part of the total above it.
+        cv.create_line(pad, (ys[1] + 33 + ys[2] - 7) // 2, w - pad,
+                       (ys[1] + 33 + ys[2] - 7) // 2, fill=C["border"])
+        for y, (label, value, bar_col, label_col, note) in zip(ys, rows):
+            cv.create_text(pad, y, text=label, anchor="w",
+                           fill=label_col, font=("Segoe UI", 9, "bold"))
+            cv.create_text(w - pad, y, text=self._fmt_span(value), anchor="e",
+                           fill=label_col if label_col == C["subtext"] else bar_col,
+                           font=("Segoe UI", 9, "bold"))
+            self._panel_bar(cv, pad, y + 11, inner, value / biggest, bar_col)
+            cv.create_text(pad, y + 20, anchor="nw", width=inner, text=note,
+                           fill=C["subtext"], font=("Segoe UI", 8))
 
     # ── Dictation speed ───────────────────────────────────────────────────────
 
