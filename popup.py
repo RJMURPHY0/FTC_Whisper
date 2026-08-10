@@ -131,6 +131,15 @@ _OFFSET_MAX           = 400
 # order; each end is a hard stop. "centre" is the shipped default.
 _ALIGN_ORDER = ("left", "centre", "right")
 
+# Status-pill padding = the gutter the position arrows live in. It is generous
+# so the arrows sit hard against the box border, well clear of the content. NB
+# tk place() coordinates on a PADDED frame are measured from the INNER (padded)
+# corner, so the arrows are placed at NEGATIVE offsets (-_STATUS_PAD_*) to reach
+# the real box edge; placing them at 0 would pin them to the content edge, which
+# is the whole overlap bug.
+_STATUS_PAD_X = 30
+_STATUS_PAD_Y = 24
+
 # The expanded refinement panel dismisses itself after this long with no
 # interaction. Typing in the Ask box, a running AI call, a voice prompt, an
 # in-flight upgrade, or the pointer resting over the panel all count as
@@ -753,11 +762,11 @@ class FloatingPopup:
     # ── Status frame (recording / transcribing pill) ───────────────────────────
 
     def _build_status_frame(self) -> None:
-        # Gutters give the position-nudge arrows their own band, clear of the
-        # content (timer, waveform, label). Wider left/right (22) than top/bottom
-        # (16) because the side arrows sit level with the timer and label and
-        # must never crowd them; the arrows themselves hug the very edges below.
-        f = tk.Frame(self.root, bg=CP["bg"], padx=22, pady=16)
+        # The padding is the gutter the position arrows live in: it holds the
+        # content (timer, waveform, label) well inside the box so the arrows can
+        # sit hard against the border, clear of everything. See _STATUS_PAD_*.
+        f = tk.Frame(self.root, bg=CP["bg"],
+                     padx=_STATUS_PAD_X, pady=_STATUS_PAD_Y)
         self._status_frame = f
 
         # Top row: timer | waveform | status label — packed left-to-right.
@@ -879,10 +888,12 @@ class FloatingPopup:
         self._pos_down  = _tri(18, 9, (3, 1, 15, 1, 9, 8))
         self._pos_left  = _tri(9, 18, (8, 3, 8, 15, 1, 9))
         self._pos_right = _tri(9, 18, (1, 3, 1, 15, 8, 9))
-        self._pos_up.place(relx=0.5, y=0, anchor="n")
-        self._pos_down.place(relx=0.5, rely=1.0, anchor="s")
-        self._pos_left.place(x=0, rely=0.5, anchor="w")
-        self._pos_right.place(relx=1.0, rely=0.5, anchor="e")
+        # Negative offsets cancel the frame padding so each arrow lands on the
+        # real box border (tip ~1px off the edge), NOT the padded content edge.
+        self._pos_up.place(relx=0.5, y=-_STATUS_PAD_Y, anchor="n")
+        self._pos_down.place(relx=0.5, rely=1.0, y=_STATUS_PAD_Y, anchor="s")
+        self._pos_left.place(x=-_STATUS_PAD_X, rely=0.5, anchor="w")
+        self._pos_right.place(relx=1.0, x=_STATUS_PAD_X, rely=0.5, anchor="e")
         for _c, _fn in ((self._pos_up,    lambda: self._nudge_position(+1)),
                         (self._pos_down,  lambda: self._nudge_position(-1)),
                         (self._pos_left,  lambda: self._nudge_h_position(-1)),
