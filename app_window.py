@@ -489,6 +489,7 @@ class Dropdown(tk.Canvas):
         self._on_change = on_change
         self._menu = None
         self._menu_cv = None
+        self._fg_watch = None
         self._menu_h = 0
         self._menu_scroll = 0
         self._menu_max_scroll = 0
@@ -528,6 +529,57 @@ class Dropdown(tk.Canvas):
             self.close()
         except tk.TclError:
             pass
+
+    def _foreground_is_ours(self) -> bool:
+        """True while the app (or the open list itself) is the OS foreground.
+
+        The list is a -topmost overrideredirect window: when the user clicks
+        another application the rest of the app goes behind it, but a topmost
+        window with no dismiss-on-deactivate just orphans on top of whatever
+        they switched to. GetForegroundWindow is the arbiter. winfo_id() is a
+        CHILD window on Windows, so resolve the real top-level via GA_ROOT (the
+        gotcha popup._top_hwnd documents) before comparing. Fails OPEN — a Win32
+        hiccup must never close a list the user is mid-way through reading."""
+        try:
+            import ctypes
+            u32 = ctypes.windll.user32
+            u32.GetForegroundWindow.restype = ctypes.c_void_p
+            u32.GetAncestor.restype = ctypes.c_void_p
+            u32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            fg = u32.GetForegroundWindow()
+            if not fg:
+                return True
+            GA_ROOT = 2
+            for w in (self.winfo_toplevel(), self._menu):
+                if w is None:
+                    continue
+                try:
+                    root = u32.GetAncestor(ctypes.c_void_p(w.winfo_id()),
+                                           GA_ROOT)
+                except tk.TclError:
+                    continue
+                if root and int(root) == int(fg):
+                    return True
+            return False
+        except Exception:
+            return True
+
+    def _watch_foreground(self) -> None:
+        """While the list is open, close it the moment the app is no longer the
+        foreground window (switched apps, minimised, Alt-Tabbed)."""
+        self._fg_watch = None
+        if self._menu is None:
+            return
+        if not self._foreground_is_ours():
+            try:
+                self.close()
+            except tk.TclError:
+                pass
+            return
+        try:
+            self._fg_watch = self.after(150, self._watch_foreground)
+        except tk.TclError:
+            self._fg_watch = None
 
     def _natural_width(self) -> int:
         widest = max((self._font.measure(v) for v in self._values), default=60)
@@ -633,6 +685,9 @@ class Dropdown(tk.Canvas):
             _apply_popup_corners(top.winfo_id())
         except Exception:
             pass
+        # Close the list as soon as the app loses foreground — a -topmost list
+        # otherwise floats over whatever window the user switches to.
+        self._watch_foreground()
         self._paint()
 
     def _paint_menu(self) -> None:
@@ -709,6 +764,12 @@ class Dropdown(tk.Canvas):
     def close(self) -> None:
         top, self._menu = self._menu, None
         self._menu_cv = None
+        watch, self._fg_watch = self._fg_watch, None
+        if watch is not None:
+            try:
+                self.after_cancel(watch)
+            except (tk.TclError, ValueError):
+                pass
         if top is not None:
             try:
                 top.destroy()
@@ -5556,7 +5617,8 @@ class AppWindow:
         _height_desc = tk.Label(
             _height_col,
             text="How high the popup appears. Low keeps it near the taskbar and "
-                 "clear of chatbot input boxes; High lifts it above the chat window.",
+                 "clear of chatbot input boxes; High lifts it above the chat "
+                 "window. Fine-tune with the ▴▾ arrows on the recording pill.",
             fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 8),
             anchor="w", justify="left", wraplength=260)
         _height_desc.pack(fill="x")

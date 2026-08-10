@@ -143,7 +143,17 @@ class TopmostTests(unittest.TestCase):
         # asserting before the hand-back would be undone by it.
         src = inspect.getsource(FloatingPopup._show_no_activate)
         self.assertLess(src.index("SetForegroundWindow"), src.index("_assert_topmost"))
-        self.assertIn("_start_keep_on_top", src)
+
+    def test_the_recording_pill_raises_once_and_does_not_fight_the_taskbar(self):
+        # v1.6.57 revert: the pill is raised ONCE at show so it appears on top,
+        # but the 500ms keep-on-top loop is gone. It stays -topmost (above
+        # ordinary windows, so you can see you're recording) and yields when the
+        # taskbar or another topmost window is raised — instead of jumping back
+        # in front every tick and burying the taskbar the user is trying to use.
+        src = inspect.getsource(FloatingPopup._show_no_activate)
+        self.assertIn("_assert_topmost", src, "still raised once so it appears on top")
+        self.assertNotIn("_start_keep_on_top", src,
+                         "the continuous re-assert is what buried the taskbar")
 
     def test_the_keep_on_top_tick_stops_when_the_popup_hides(self):
         self.assertIn("_stop_keep_on_top", inspect.getsource(FloatingPopup._do_hide))
@@ -161,6 +171,62 @@ class TopmostTests(unittest.TestCase):
         src = inspect.getsource(FloatingPopup._expand_to_panel)
         self.assertIn("_assert_topmost", src)
         self.assertIn("_start_keep_on_top", src)
+
+
+class PositionNudgeTests(unittest.TestCase):
+    """The ▴▾ arrows on the pill lift/drop the fixed popup and the offset sticks."""
+
+    def _popup(self, offset=30):
+        p = FloatingPopup.__new__(FloatingPopup)
+        p._popup_offset = offset
+        p._status_cx = 0
+        p._status_cy = 0
+        p._reposition = lambda *a, **k: p.__dict__.setdefault("_repos", []).append(True)
+        p._offset_saver = lambda v: p.__dict__.setdefault("_saved", []).append(v)
+        return p
+
+    def test_up_raises_the_offset_by_one_step(self):
+        p = self._popup(30)
+        FloatingPopup._nudge_position(p, +1)
+        self.assertEqual(30 + popup_mod._OFFSET_STEP, p._popup_offset)
+
+    def test_down_lowers_it_and_floors_at_the_baseline(self):
+        p = self._popup(popup_mod._OFFSET_STEP // 2)  # less than one step above 0
+        FloatingPopup._nudge_position(p, -1)
+        self.assertEqual(0, p._popup_offset, "down never drops below the tier baseline")
+
+    def test_up_is_clamped_to_the_max(self):
+        p = self._popup(popup_mod._OFFSET_MAX)
+        FloatingPopup._nudge_position(p, +1)
+        self.assertEqual(popup_mod._OFFSET_MAX, p._popup_offset)
+
+    def test_a_nudge_repositions_live_and_persists(self):
+        p = self._popup(30)
+        FloatingPopup._nudge_position(p, +1)
+        self.assertEqual([True], p._repos, "the pill moves the instant you click")
+        self.assertEqual([30 + popup_mod._OFFSET_STEP], p._saved,
+                         "and the new offset is saved so it survives a restart")
+
+    def test_a_no_op_nudge_neither_moves_nor_saves(self):
+        p = self._popup(popup_mod._OFFSET_MAX)   # already at the ceiling
+        FloatingPopup._nudge_position(p, +1)
+        self.assertNotIn("_repos", p.__dict__)
+        self.assertNotIn("_saved", p.__dict__)
+
+    def test_set_popup_offset_clamps_a_stray_value(self):
+        p = FloatingPopup.__new__(FloatingPopup)
+        FloatingPopup.set_popup_offset(p, 99999)
+        self.assertEqual(popup_mod._OFFSET_MAX, p._popup_offset)
+        FloatingPopup.set_popup_offset(p, -5)
+        self.assertEqual(0, p._popup_offset)
+        FloatingPopup.set_popup_offset(p, "nonsense")
+        self.assertEqual(popup_mod._POPUP_OFFSET_DEFAULT, p._popup_offset)
+
+    def test_reposition_lifts_the_fixed_popup_by_the_offset(self):
+        # The offset is what clears the pill off the taskbar; it must be applied
+        # to the fixed y (and the on-screen clamp below still protects the edge).
+        src = inspect.getsource(FloatingPopup._reposition)
+        self.assertIn("y -= self._popup_offset", src)
 
 
 class RepaintOnMoveTests(unittest.TestCase):

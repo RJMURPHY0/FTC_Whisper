@@ -85,6 +85,7 @@ class Config:
     parakeet_version: str = "v2"  # Parakeet model: "v2" (English) or "v3" (multilingual, lower WER); switching triggers a one-time ~660 MB download
     show_popup: bool = True  # Show the cursor-icon popup (Insert/Replace/Upgrade) after each dictation; off = text is injected silently with no popup
     popup_height: str = "low"  # Vertical position of the popup: "low" (near the taskbar, default — out of the way of chatbot input boxes), "medium" (mid-screen), or "high" (near the top, above a chatbot window)
+    popup_offset: int = 30  # Fine-nudge (px) that lifts the fixed popup ABOVE its popup_height baseline, so the pill clears the taskbar by default; the ▴▾ arrows on the recording pill adjust it live and it sticks. 0 = hug the baseline (old behaviour)
     impact_range: str = "today"  # Home footer words-dictated range: today|week|month|year|all
     trim_silence: bool = True  # Drop fully-silent committed chunks (no words transcribed) from the stored clip to save local disk
     trailing_space: bool = False  # Append a space after each injection (useful when dictating mid-sentence)
@@ -274,6 +275,13 @@ class Config:
                 # to the default so a stray value never breaks _reposition().
                 if config.popup_height not in ("low", "medium", "high"):
                     config.popup_height = "low"
+                # Popup fine-nudge must be a sane pixel count; clamp anything
+                # odd (a corrupt value or a config from a wider screen) so it can
+                # never shove the pill off the top of the work-area.
+                try:
+                    config.popup_offset = max(0, min(int(config.popup_offset), 400))
+                except (TypeError, ValueError):
+                    config.popup_offset = 30
                 # Impact-range footer selector must be a known key; coerce
                 # anything else back to the default so a stray value never
                 # breaks the Home-tab dropdown.

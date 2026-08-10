@@ -118,6 +118,15 @@ _SWP_NOOWNERZORDER = 0x0200
 # covered is never something the user sees for long, slow enough to be free.
 _ONTOP_INTERVAL_MS = 500
 
+# Fine vertical nudge for the fixed popup. The pill sits _POPUP_OFFSET_DEFAULT px
+# ABOVE its popup_height baseline out of the box, so it clears the (centred)
+# taskbar icons instead of hugging them; the ▴▾ arrows on the pill move it by
+# _OFFSET_STEP per click and the result is saved. Clamped to _OFFSET_MAX so it
+# can never be parked off the top of the work-area.
+_POPUP_OFFSET_DEFAULT = 30
+_OFFSET_STEP          = 18
+_OFFSET_MAX           = 400
+
 # The expanded refinement panel dismisses itself after this long with no
 # interaction. Typing in the Ask box, a running AI call, a voice prompt, an
 # in-flight upgrade, or the pointer resting over the panel all count as
@@ -254,6 +263,8 @@ class FloatingPopup:
         self._refine_prompt_spoken: bool = False
         self._popup_hwnd: int = 0
         self._popup_height: str = "low"  # "low" | "medium" | "high" — vertical placement of the fixed popup
+        self._popup_offset: int = _POPUP_OFFSET_DEFAULT  # px lifted above the popup_height baseline (set live by the pill's ▴▾ arrows)
+        self._offset_saver = None  # fn(int) — persists a nudged offset back to config
         self._upgrading: bool = False
         self._upgrade_result: Optional[str] = None
 
@@ -290,6 +301,20 @@ class FloatingPopup:
         default), "medium" (mid-screen) or "high" (near the top). Applies to the
         next _reposition — no restart needed."""
         self._popup_height = value if value in ("low", "medium", "high") else "low"
+
+    def set_popup_offset(self, value) -> None:
+        """Fine vertical nudge (px) applied ON TOP of the popup_height baseline,
+        lifting the fixed popup clear of the taskbar. Clamped so a stray value
+        can never park it off-screen. Applies to the next _reposition."""
+        try:
+            self._popup_offset = max(0, min(int(value), _OFFSET_MAX))
+        except (TypeError, ValueError):
+            self._popup_offset = _POPUP_OFFSET_DEFAULT
+
+    def set_offset_saver(self, fn) -> None:
+        """Register a callback that persists a nudged offset back to config —
+        called with the new pixel value whenever the ▴▾ arrows move the pill."""
+        self._offset_saver = fn
 
     def set_voice_prompt_callback(self, fn) -> None:
         self._voice_prompt_fn = fn
@@ -701,10 +726,16 @@ class FloatingPopup:
             except Exception:
                 pass
         # AFTER handing focus back, not before: activating another window raises
-        # it, and the taskbar shares our band.
+        # it, and the taskbar shares our band. Raise ONCE so the pill appears on
+        # top — but do NOT re-assert on a timer: the continuous keep-on-top loop
+        # (removed here) is what kept the pill fighting the taskbar back to the
+        # front every 500ms, so switching apps and clicking the taskbar buried
+        # under the pill. It stays -topmost (above ordinary windows, so you can
+        # see you're recording) and simply yields when the taskbar or another
+        # topmost window is raised — the pre-v1.6.52 behaviour, plus the position
+        # nudge below the taskbar so there is nothing to overlap in the first place.
         self._assert_topmost()
         self._repaint_popup()
-        self._start_keep_on_top()
 
     def _on_popup_configure(self, event) -> None:
         pass  # corners handled once at initialize via DWM
@@ -812,8 +843,49 @@ class FloatingPopup:
             add="+",
         )
 
+        # ── Position nudge arrows ───────────────────────────────────────────
+        # Two tiny chevrons at the top-centre and bottom-centre of the pill.
+        # Click ▴ to lift the popup a few mm, ▾ to drop it back toward the
+        # taskbar; the offset is saved so it sticks. They ride the status frame
+        # (placed, not packed), so they appear with the pill and vanish with it —
+        # no separate show/hide. WS_EX_NOACTIVATE lets the window take clicks
+        # without stealing focus, so the arrows work mid-dictation.
+        self._pos_up = tk.Label(
+            f, text="▴", fg=CP["subtext"], bg=CP["bg"],
+            font=("Segoe UI", 9), cursor="hand2", padx=12, pady=0)
+        self._pos_down = tk.Label(
+            f, text="▾", fg=CP["subtext"], bg=CP["bg"],
+            font=("Segoe UI", 9), cursor="hand2", padx=12, pady=0)
+        self._pos_up.place(relx=0.5, y=0, anchor="n")
+        self._pos_down.place(relx=0.5, rely=1.0, anchor="s")
+        for _w, _dir in ((self._pos_up, +1), (self._pos_down, -1)):
+            _w.bind("<Button-1>", lambda _e, d=_dir: self._nudge_position(d))
+            _w.bind("<Enter>", lambda _e, w=_w: w.configure(fg=CP["text"]))
+            _w.bind("<Leave>", lambda _e, w=_w: w.configure(fg=CP["subtext"]))
+        self._pos_up.lift()
+        self._pos_down.lift()
+
         # Recording start time (for timer)
         self._rec_start: Optional[float] = None
+
+    def _nudge_position(self, direction: int):
+        """Move the fixed popup up (+1) or down (-1) by one step and remember it.
+        Down floors at the tier baseline (offset 0 — the old hug-the-taskbar
+        spot); up is clamped so the pill can never be parked off the top of the
+        work-area. Repositions live and persists via the offset saver."""
+        new = max(0, min(self._popup_offset + direction * _OFFSET_STEP, _OFFSET_MAX))
+        if new != self._popup_offset:
+            self._popup_offset = new
+            try:
+                self._reposition(self._status_cx, self._status_cy)
+            except Exception:
+                pass
+            if self._offset_saver:
+                try:
+                    self._offset_saver(new)
+                except Exception:
+                    pass
+        return "break"
 
     def _draw_bars_initial(self) -> None:
         self._wave_canvas.delete("all")
@@ -1938,6 +2010,11 @@ class FloatingPopup:
                 y = top + (bottom - top - h) // 2
             else:  # "low" (default) — hug the taskbar, clear of chat inputs
                 y = bottom - h - 6
+            # Fine-nudge saved from the pill's ▴▾ arrows — lifts the popup clear
+            # of the taskbar (a couple mm by default) and sticks wherever the
+            # user parks it. The first-order guard below re-clamps into the
+            # work-area, so a large nudge can never push it off the top edge.
+            y -= self._popup_offset
 
         # First-order guard: keep the whole popup inside the work-area in Tk
         # coordinates, so a stale width or an odd monitor origin can never push
