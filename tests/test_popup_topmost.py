@@ -176,13 +176,14 @@ class TopmostTests(unittest.TestCase):
 class PositionNudgeTests(unittest.TestCase):
     """The ▴▾ arrows on the pill lift/drop the fixed popup and the offset sticks."""
 
-    def _popup(self, offset=30):
+    def _popup(self, offset=30, align="centre"):
         p = FloatingPopup.__new__(FloatingPopup)
         p._popup_offset = offset
+        p._popup_align = align
         p._status_cx = 0
         p._status_cy = 0
         p._reposition = lambda *a, **k: p.__dict__.setdefault("_repos", []).append(True)
-        p._offset_saver = lambda v: p.__dict__.setdefault("_saved", []).append(v)
+        p._settings_saver = lambda k, v: p.__dict__.setdefault("_saved", []).append((k, v))
         return p
 
     def test_up_raises_the_offset_by_one_step(self):
@@ -204,7 +205,7 @@ class PositionNudgeTests(unittest.TestCase):
         p = self._popup(30)
         FloatingPopup._nudge_position(p, +1)
         self.assertEqual([True], p._repos, "the pill moves the instant you click")
-        self.assertEqual([30 + popup_mod._OFFSET_STEP], p._saved,
+        self.assertEqual([("popup_offset", 30 + popup_mod._OFFSET_STEP)], p._saved,
                          "and the new offset is saved so it survives a restart")
 
     def test_a_no_op_nudge_neither_moves_nor_saves(self):
@@ -227,6 +228,37 @@ class PositionNudgeTests(unittest.TestCase):
         # to the fixed y (and the on-screen clamp below still protects the edge).
         src = inspect.getsource(FloatingPopup._reposition)
         self.assertIn("y -= self._popup_offset", src)
+
+    # ── Horizontal ◂ ▸ arrows ──────────────────────────────────────────────
+    def test_left_steps_toward_the_left_and_persists(self):
+        p = self._popup(align="centre")
+        FloatingPopup._nudge_h_position(p, -1)
+        self.assertEqual("left", p._popup_align)
+        self.assertEqual([True], p._repos)
+        self.assertEqual([("popup_align", "left")], p._saved)
+
+    def test_right_steps_toward_the_right(self):
+        p = self._popup(align="centre")
+        FloatingPopup._nudge_h_position(p, +1)
+        self.assertEqual("right", p._popup_align)
+
+    def test_alignment_stops_at_the_ends(self):
+        p = self._popup(align="left")
+        FloatingPopup._nudge_h_position(p, -1)          # already leftmost
+        self.assertEqual("left", p._popup_align)
+        self.assertNotIn("_saved", p.__dict__, "a hard stop saves nothing")
+
+    def test_set_popup_align_rejects_a_stray_value(self):
+        p = FloatingPopup.__new__(FloatingPopup)
+        FloatingPopup.set_popup_align(p, "sideways")
+        self.assertEqual("centre", p._popup_align)
+        FloatingPopup.set_popup_align(p, "right")
+        self.assertEqual("right", p._popup_align)
+
+    def test_reposition_places_the_popup_by_alignment(self):
+        src = inspect.getsource(FloatingPopup._reposition)
+        self.assertIn('self._popup_align == "left"', src)
+        self.assertIn('self._popup_align == "right"', src)
 
 
 class RepaintOnMoveTests(unittest.TestCase):

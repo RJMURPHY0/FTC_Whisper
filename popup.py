@@ -127,6 +127,10 @@ _POPUP_OFFSET_DEFAULT = 30
 _OFFSET_STEP          = 18
 _OFFSET_MAX           = 400
 
+# Horizontal placement of the fixed popup. The ◂ ▸ arrows step through these in
+# order; each end is a hard stop. "centre" is the shipped default.
+_ALIGN_ORDER = ("left", "centre", "right")
+
 # The expanded refinement panel dismisses itself after this long with no
 # interaction. Typing in the Ask box, a running AI call, a voice prompt, an
 # in-flight upgrade, or the pointer resting over the panel all count as
@@ -264,7 +268,8 @@ class FloatingPopup:
         self._popup_hwnd: int = 0
         self._popup_height: str = "low"  # "low" | "medium" | "high" — vertical placement of the fixed popup
         self._popup_offset: int = _POPUP_OFFSET_DEFAULT  # px lifted above the popup_height baseline (set live by the pill's ▴▾ arrows)
-        self._offset_saver = None  # fn(int) — persists a nudged offset back to config
+        self._popup_align: str = "centre"  # "left" | "centre" | "right" — horizontal placement (set live by the pill's ◂ ▸ arrows)
+        self._settings_saver = None  # fn(key, value) — persists a nudged position back to config
         self._upgrading: bool = False
         self._upgrade_result: Optional[str] = None
 
@@ -311,10 +316,15 @@ class FloatingPopup:
         except (TypeError, ValueError):
             self._popup_offset = _POPUP_OFFSET_DEFAULT
 
-    def set_offset_saver(self, fn) -> None:
-        """Register a callback that persists a nudged offset back to config —
-        called with the new pixel value whenever the ▴▾ arrows move the pill."""
-        self._offset_saver = fn
+    def set_popup_align(self, value) -> None:
+        """Horizontal placement of the fixed popup: "left" | "centre" | "right".
+        Applies to the next _reposition."""
+        self._popup_align = value if value in _ALIGN_ORDER else "centre"
+
+    def set_settings_saver(self, fn) -> None:
+        """Register a callback fn(key, value) that persists a nudged position
+        back to config — called whenever the ▴▾ ◂ ▸ arrows move the pill."""
+        self._settings_saver = fn
 
     def set_voice_prompt_callback(self, fn) -> None:
         self._voice_prompt_fn = fn
@@ -743,7 +753,10 @@ class FloatingPopup:
     # ── Status frame (recording / transcribing pill) ───────────────────────────
 
     def _build_status_frame(self) -> None:
-        f = tk.Frame(self.root, bg=CP["bg"], padx=14, pady=10)
+        # Extra padding over the content leaves clear gutters at all four edges
+        # for the position-nudge arrows, so they never sit over the waveform
+        # (the 16px top/bottom gutter comfortably clears the small triangles).
+        f = tk.Frame(self.root, bg=CP["bg"], padx=16, pady=16)
         self._status_frame = f
 
         # Top row: timer | waveform | status label — packed left-to-right.
@@ -844,26 +857,30 @@ class FloatingPopup:
         )
 
         # ── Position nudge arrows ───────────────────────────────────────────
-        # Two tiny chevrons at the top-centre and bottom-centre of the pill.
-        # Click ▴ to lift the popup a few mm, ▾ to drop it back toward the
-        # taskbar; the offset is saved so it sticks. They ride the status frame
-        # (placed, not packed), so they appear with the pill and vanish with it —
-        # no separate show/hide. WS_EX_NOACTIVATE lets the window take clicks
-        # without stealing focus, so the arrows work mid-dictation.
-        self._pos_up = tk.Label(
-            f, text="▴", fg=CP["subtext"], bg=CP["bg"],
-            font=("Segoe UI", 9), cursor="hand2", padx=12, pady=0)
-        self._pos_down = tk.Label(
-            f, text="▾", fg=CP["subtext"], bg=CP["bg"],
-            font=("Segoe UI", 9), cursor="hand2", padx=12, pady=0)
-        self._pos_up.place(relx=0.5, y=0, anchor="n")
-        self._pos_down.place(relx=0.5, rely=1.0, anchor="s")
-        for _w, _dir in ((self._pos_up, +1), (self._pos_down, -1)):
-            _w.bind("<Button-1>", lambda _e, d=_dir: self._nudge_position(d))
+        # Four tiny triangles in the pill's edge gutters (kept clear of the
+        # waveform by the frame padding above): ▴ top / ▾ bottom lift and drop
+        # the pill, ◂ / ▸ at the far edges move it left / right. Each nudge is
+        # saved so it sticks. They ride the status frame (placed, not packed), so
+        # they appear with the pill and vanish with it — no separate show/hide.
+        # WS_EX_NOACTIVATE lets the pill take the click without stealing focus,
+        # so the arrows work mid-dictation.
+        def _arrow(glyph):
+            return tk.Label(f, text=glyph, fg=CP["subtext"], bg=CP["bg"],
+                            font=("Segoe UI", 7), cursor="hand2", padx=3, pady=0)
+        self._pos_up, self._pos_down = _arrow("▴"), _arrow("▾")
+        self._pos_left, self._pos_right = _arrow("◂"), _arrow("▸")
+        self._pos_up.place(relx=0.5, y=1, anchor="n")
+        self._pos_down.place(relx=0.5, rely=1.0, y=-1, anchor="s")
+        self._pos_left.place(x=1, rely=0.5, anchor="w")
+        self._pos_right.place(relx=1.0, x=-1, rely=0.5, anchor="e")
+        for _w, _fn in ((self._pos_up,    lambda: self._nudge_position(+1)),
+                        (self._pos_down,  lambda: self._nudge_position(-1)),
+                        (self._pos_left,  lambda: self._nudge_h_position(-1)),
+                        (self._pos_right, lambda: self._nudge_h_position(+1))):
+            _w.bind("<Button-1>", lambda _e, fn=_fn: fn())
             _w.bind("<Enter>", lambda _e, w=_w: w.configure(fg=CP["text"]))
             _w.bind("<Leave>", lambda _e, w=_w: w.configure(fg=CP["subtext"]))
-        self._pos_up.lift()
-        self._pos_down.lift()
+            _w.lift()
 
         # Recording start time (for timer)
         self._rec_start: Optional[float] = None
@@ -872,20 +889,37 @@ class FloatingPopup:
         """Move the fixed popup up (+1) or down (-1) by one step and remember it.
         Down floors at the tier baseline (offset 0 — the old hug-the-taskbar
         spot); up is clamped so the pill can never be parked off the top of the
-        work-area. Repositions live and persists via the offset saver."""
+        work-area. Repositions live and persists via the settings saver."""
         new = max(0, min(self._popup_offset + direction * _OFFSET_STEP, _OFFSET_MAX))
         if new != self._popup_offset:
             self._popup_offset = new
+            self._commit_position("popup_offset", new)
+        return "break"
+
+    def _nudge_h_position(self, direction: int):
+        """Move the fixed popup left (-1) or right (+1) one place through
+        left/centre/right and remember it. Each end is a hard stop."""
+        try:
+            i = _ALIGN_ORDER.index(self._popup_align)
+        except ValueError:
+            i = 1
+        j = max(0, min(i + direction, len(_ALIGN_ORDER) - 1))
+        if j != i:
+            self._popup_align = _ALIGN_ORDER[j]
+            self._commit_position("popup_align", _ALIGN_ORDER[j])
+        return "break"
+
+    def _commit_position(self, key: str, value) -> None:
+        """Reposition the pill live and persist the new placement to config."""
+        try:
+            self._reposition(self._status_cx, self._status_cy)
+        except Exception:
+            pass
+        if self._settings_saver:
             try:
-                self._reposition(self._status_cx, self._status_cy)
+                self._settings_saver(key, value)
             except Exception:
                 pass
-            if self._offset_saver:
-                try:
-                    self._offset_saver(new)
-                except Exception:
-                    pass
-        return "break"
 
     def _draw_bars_initial(self) -> None:
         self._wave_canvas.delete("all")
@@ -1999,11 +2033,16 @@ class FloatingPopup:
             y_b = round(cy * sy) + gap
             y   = y_b if y_b + h <= bottom else round(cy * sy) - h - gap
         else:
-            # Fixed, horizontally centred on whichever monitor the cursor is on.
-            # Vertical placement follows the user's popup_height preference so it
-            # can sit out of the way of a chatbot's input box (low, default) or
-            # up above the chat window (high).
-            x = left + (right - left - w) // 2
+            # Fixed placement on whichever monitor the cursor is on. Horizontal
+            # placement follows popup_align (◂ ▸ arrows); vertical follows the
+            # popup_height preference, so it can sit out of the way of a chatbot's
+            # input box (low, default) or up above the chat window (high).
+            if self._popup_align == "left":
+                x = left + 8
+            elif self._popup_align == "right":
+                x = right - w - 8
+            else:
+                x = left + (right - left - w) // 2
             if self._popup_height == "high":
                 y = top + 90
             elif self._popup_height == "medium":

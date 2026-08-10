@@ -260,6 +260,19 @@ def icon_glyph(master, name: str, size: int = 20, color: str = "#f39200",
                                 radius=1.2 * u, outline=color, width=lw)
             L((9, 12), (15, 12))
             L((9, 15.5), (15, 15.5))
+        elif name == "clock":
+            # clock face + two hands — time spent using the app
+            d.ellipse([4.5 * u, 4.5 * u, 19.5 * u, 19.5 * u],
+                      outline=color, width=lw)
+            L((12, 12), (12, 7.5))               # hour hand (up)
+            L((12, 12), (15.5, 13.5))            # minute hand
+        elif name == "pen":
+            # pencil at 45° — handwriting
+            L((16, 6), (6.5, 15.5))              # upper long edge
+            L((18, 8), (8.5, 17.5))              # lower long edge
+            L((16, 6), (18, 8))                  # cap (top-right)
+            d.polygon([(6.5 * u, 15.5 * u), (8.5 * u, 17.5 * u),
+                       (4.5 * u, 19.5 * u)], fill=color)   # nib
         else:
             raise ValueError(f"unknown glyph {name!r}")
 

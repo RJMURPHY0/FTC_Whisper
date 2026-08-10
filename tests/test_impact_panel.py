@@ -255,7 +255,31 @@ class TimePanelTests(unittest.TestCase):
         w, cv = self._panel()
         self.assertIn(w._fmt_span(462.0 + 0.35), self._texts(cv))
 
-    def test_all_three_rows_fit_without_the_panel_growing(self):
+    def test_the_typing_by_hand_row_is_shown(self):
+        # The fourth row surfaces the counterfactual: what typing it all would
+        # have cost. 27,326 words / 40 wpm = 11.4 hrs.
+        import stats as stats_mod
+        w, cv = self._panel()
+        texts = self._texts(cv)
+        self.assertIn("Typing by hand", texts)
+        self.assertIn(w._fmt_span(27326 / float(stats_mod.TYPING_WPM)), texts)
+
+    def test_the_headline_rides_the_header_not_a_body_row(self):
+        # Moving the figure into the header is what freed the room for the
+        # fourth row — "saved so far" must be present and near the top.
+        w, cv = self._panel()
+        subs = [i for i in cv.find_all()
+                if cv.type(i) == "text" and cv.itemcget(i, "text") == "saved so far"]
+        self.assertTrue(subs, "the headline caption is gone")
+        self.assertLess(cv.bbox(subs[0])[1], 40, "it should ride the header row")
+
+    def test_each_row_carries_an_icon(self):
+        # Ryan asked for a little icon per row; they are canvas images.
+        w, cv = self._panel()
+        images = [i for i in cv.find_all() if cv.type(i) == "image"]
+        self.assertGreaterEqual(len(images), 4, "one glyph per row")
+
+    def test_all_four_rows_fit_without_the_panel_growing(self):
         w, cv = self._panel()
         h = w._panel_h()
         for item in cv.find_all():
@@ -264,7 +288,7 @@ class TimePanelTests(unittest.TestCase):
                                  f"{cv.type(item)} {cv.bbox(item)} overflows {h}")
 
     def test_every_row_note_stays_on_one_line(self):
-        # Three rows only fit because each explanation is a single short line;
+        # Four rows only fit because each explanation is a single short line;
         # a wrapped note pushes the row below it out of the panel.
         w, cv = self._panel()
         for item in cv.find_all():
@@ -274,13 +298,13 @@ class TimePanelTests(unittest.TestCase):
             self.assertLess(y1 - y0, 18,
                             f"wrapped to two lines: {cv.itemcget(item, 'text')!r}")
 
-    def test_a_fresh_account_still_draws_three_rows(self):
+    def test_a_fresh_account_still_draws_all_four_rows(self):
         w, cv = self._panel(dictation_saved_minutes=0.0, refine_saved_minutes=0.0,
                             refine_count=0, refine_seconds=0.0,
                             refine_prompt_words=0, total_words=0,
                             total_audio_seconds=0.0)
         texts = self._texts(cv)
-        for label in ("Dictation", "AI refine", "Time using it"):
+        for label in ("Dictation", "AI refine", "Time using it", "Typing by hand"):
             self.assertIn(label, texts)
 
 

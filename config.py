@@ -86,6 +86,7 @@ class Config:
     show_popup: bool = True  # Show the cursor-icon popup (Insert/Replace/Upgrade) after each dictation; off = text is injected silently with no popup
     popup_height: str = "low"  # Vertical position of the popup: "low" (near the taskbar, default — out of the way of chatbot input boxes), "medium" (mid-screen), or "high" (near the top, above a chatbot window)
     popup_offset: int = 30  # Fine-nudge (px) that lifts the fixed popup ABOVE its popup_height baseline, so the pill clears the taskbar by default; the ▴▾ arrows on the recording pill adjust it live and it sticks. 0 = hug the baseline (old behaviour)
+    popup_align: str = "centre"  # Horizontal placement of the fixed popup: "left" | "centre" (default) | "right"; the ◂ ▸ arrows on the recording pill move it and it sticks. This shipped default is the first-install position for every user
     impact_range: str = "today"  # Home footer words-dictated range: today|week|month|year|all
     trim_silence: bool = True  # Drop fully-silent committed chunks (no words transcribed) from the stored clip to save local disk
     trailing_space: bool = False  # Append a space after each injection (useful when dictating mid-sentence)
@@ -282,6 +283,10 @@ class Config:
                     config.popup_offset = max(0, min(int(config.popup_offset), 400))
                 except (TypeError, ValueError):
                     config.popup_offset = 30
+                # Horizontal alignment must be a known token; coerce anything
+                # else back to centre so a stray value never breaks _reposition().
+                if config.popup_align not in ("left", "centre", "right"):
+                    config.popup_align = "centre"
                 # Impact-range footer selector must be a known key; coerce
                 # anything else back to the default so a stray value never
                 # breaks the Home-tab dropdown.

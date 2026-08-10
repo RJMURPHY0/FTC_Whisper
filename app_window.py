@@ -2040,6 +2040,9 @@ class AppWindow:
 
         self._impact_font_value = tkfont.Font(family="Segoe UI", size=18, weight="bold")
         self._impact_font_unit  = tkfont.Font(family="Segoe UI", size=10)
+        # Headline that rides the panel header row (time panel), so the body has
+        # room for a fourth row — measured to place the "saved so far" caption.
+        self._impact_font_head  = tkfont.Font(family="Segoe UI", size=14, weight="bold")
 
         self._impact_cards = {}
         specs = [
@@ -2376,8 +2379,12 @@ class AppWindow:
 
     # ── panel chrome ──────────────────────────────────────────────────────────
 
-    def _panel_head(self, cv, w: int, key: str, title: str, right: str = "") -> None:
-        """Card background, icon, tracked-out title and the close control."""
+    def _panel_head(self, cv, w: int, key: str, title: str, right: str = "",
+                    headline: str = "", headline_sub: str = "") -> None:
+        """Card background, icon, and the close control. Normally draws the
+        tracked-out title; when a `headline` is given (the time panel) the card's
+        figure rides the header row instead — icon + "8.5 hrs" + "saved so far" —
+        which frees the body below for an extra row."""
         h = self._panel_h()
         bgimg = None
         try:
@@ -2398,8 +2405,17 @@ class AppWindow:
         # down into the "6.6 hrs" underneath it and the two read as one blob.
         if icon:
             icon(cv, 26, 20, None, 24)
-        cv.create_text(46, 20, text=" ".join(title), anchor="w",
-                       fill=C["subtext"], font=("Segoe UI", 7, "bold"))
+        if headline:
+            cv.create_text(46, 20, text=headline, anchor="w",
+                           fill=C["text"], font=self._impact_font_head)
+            if headline_sub:
+                cv.create_text(
+                    46 + self._impact_font_head.measure(headline) + 8, 22,
+                    text=headline_sub, anchor="w",
+                    fill=C["subtext"], font=("Segoe UI", 9))
+        else:
+            cv.create_text(46, 20, text=" ".join(title), anchor="w",
+                           fill=C["subtext"], font=("Segoe UI", 7, "bold"))
         cv.create_text(w - 18, 20, text="✕", anchor="e",
                        fill=C["subtext"], font=("Segoe UI", 11))
         # No hit region for the ✕: every click that misses a control closes the
@@ -2417,6 +2433,21 @@ class AppWindow:
         fill_w = int(max(0.0, min(1.0, frac)) * w)
         if fill_w >= 3:
             _rr(cv, x, y, x + fill_w, y + 6, 3, fill=colour, outline="")
+
+    @staticmethod
+    def _row_icon(cv, name: str, x: int, y: int, colour: str) -> None:
+        """A small glyph in a panel row's left gutter, so each measure is
+        recognisable at a glance. Reuses ui_render.icon_glyph (the same named
+        icons the history rows and settings cards use), blended against the panel
+        surface. Silently skips if the glyph or PIL is unavailable — the row is
+        still complete without it."""
+        try:
+            import ui_render
+            ph = ui_render.icon_glyph(cv, name, 16, colour, bg=C["surface"])
+            if ph is not None:
+                cv.create_image(x, y, image=ph, anchor="w")
+        except Exception:
+            pass
 
     @staticmethod
     def _fmt_span(minutes: float) -> str:
@@ -2463,9 +2494,6 @@ class AppWindow:
     def _draw_detail_time(self, cv, w: int, snap: dict) -> None:
         import stats as stats_mod
         h = self._panel_h()
-        self._panel_head(cv, w, "time", "TIME SAVED")
-        pad = 20
-        inner = w - pad * 2
         dict_min = float(snap.get("dictation_saved_minutes", 0.0))
         ref_min = float(snap.get("refine_saved_minutes", 0.0))
         # What using the app actually cost: every second of recording plus the
@@ -2474,18 +2502,21 @@ class AppWindow:
         spoke_min = float(snap.get("total_audio_seconds", 0.0)) / 60.0
         used_min = spoke_min + float(snap.get("refine_seconds", 0.0)) / 60.0
         total = dict_min + ref_min
-        biggest = max(dict_min, ref_min, used_min, 0.0001)
-
-        total_txt = self._fmt_span(total)
-        cv.create_text(pad, _PANEL_VALUE_Y, text=total_txt, anchor="w",
-                       fill=C["text"], font=("Segoe UI", 16, "bold"))
-        cv.create_text(pad + self._impact_font_value.measure(total_txt) + 8,
-                       _PANEL_VALUE_Y + 3,
-                       text="saved so far", anchor="w",
-                       fill=C["subtext"], font=("Segoe UI", 9))
-
         words = int(snap.get("total_words", 0))
         typing_min = words / float(stats_mod.TYPING_WPM) if words else 0.0
+        # Typing time is the largest figure, so it anchors the bars: dictation
+        # fills most of it, the time you actually spent is a small slice of it.
+        biggest = max(dict_min, ref_min, used_min, typing_min, 0.0001)
+
+        # The headline rides the header row now (icon + figure + "saved so far"),
+        # which frees the body for a fourth row — see _panel_head.
+        self._panel_head(cv, w, "time", "TIME SAVED",
+                         headline=self._fmt_span(total), headline_sub="saved so far")
+
+        pad = 20
+        inner = w - pad * 2
+        label_x = pad + 24              # clears the row icon in the gutter
+
         n = int(snap.get("refine_count", 0))
         if n:
             in_app = float(snap.get("refine_seconds", 0.0)) / n
@@ -2503,28 +2534,29 @@ class AppWindow:
             spent_note += f" + {self._fmt_span(used_min - spoke_min)} refining"
         spent_note += " · already deducted above"
 
-        # Three rows, one short line of working each — the panel has to show
-        # what was spent as well as what was saved, and it may not grow to do
-        # it (the block is a fixed height, see _panel_h).
+        # Four rows, each with a leading icon: two savings (coloured), then the
+        # cost and the typing-by-hand counterfactual (grey). One short line of
+        # working each — the block is a fixed height and may not grow (_panel_h).
         rows = (
-            ("Dictation", dict_min, C["accent"], C["text"],
-             f"{words:,} words · {self._fmt_span(typing_min)} to type at "
-             f"{stats_mod.TYPING_WPM} wpm"),
-            ("AI refine", ref_min, C["success"], C["text"], ref_note),
-            ("Time using it", used_min, _PANEL_DIM, C["subtext"], spent_note),
+            ("mic", "Dictation", dict_min, C["accent"], C["text"],
+             f"{words:,} words dictated"),
+            ("wand", "AI refine", ref_min, C["success"], C["text"], ref_note),
+            ("clock", "Time using it", used_min, _PANEL_DIM, C["subtext"],
+             spent_note),
+            ("keyboard", "Typing by hand", typing_min, _PANEL_DIM, C["subtext"],
+             f"{words:,} words at {stats_mod.TYPING_WPM} wpm"),
         )
-        # A row is label/value, bar, one line of working — 40px tall, so three
-        # of them plus the rule only fit in the block's fixed height at this
-        # spacing. Nothing here may grow: see _panel_h.
-        top, gap = 72, 7
-        step = max(42, (h - top - gap - 34) // 3)
-        ys = (top, top + step, top + 2 * step + gap)
-        # A hairline separates what was spent from what was saved, so the third
-        # figure never reads as part of the total above it.
-        cv.create_line(pad, (ys[1] + 33 + ys[2] - 7) // 2, w - pad,
-                       (ys[1] + 33 + ys[2] - 7) // 2, fill=C["border"])
-        for y, (label, value, bar_col, label_col, note) in zip(ys, rows):
-            cv.create_text(pad, y, text=label, anchor="w",
+        top = 48
+        step = max(38, (h - top - 34) // 3)
+        ys = tuple(top + i * step for i in range(4))
+        # A hairline splits the two savings from the cost/counterfactual below,
+        # so the grey figures never read as part of the total in the header.
+        rule_y = (ys[1] + ys[2] + 25) // 2
+        cv.create_line(pad, rule_y, w - pad, rule_y, fill=C["border"])
+        for y, (icon, label, value, bar_col, label_col, note) in zip(ys, rows):
+            self._row_icon(cv, icon, pad, y,
+                           bar_col if bar_col != _PANEL_DIM else C["subtext"])
+            cv.create_text(label_x, y, text=label, anchor="w",
                            fill=label_col, font=("Segoe UI", 9, "bold"))
             cv.create_text(w - pad, y, text=self._fmt_span(value), anchor="e",
                            fill=label_col if label_col == C["subtext"] else bar_col,
@@ -2552,18 +2584,23 @@ class AppWindow:
                        text=f"{ratio:.1f}× faster than typing".replace(".0×", "×"),
                        anchor="e", fill=C["subtext"], font=("Segoe UI", 9))
 
+        # Each row leads with an icon — you speaking, a keyboard, a pen — so the
+        # three ways of getting words down read at a glance.
         rows = [
-            ("You" if measured else "Dictation", shown, C["accent"]),
-            ("Typing", stats_mod.TYPING_WPM, C["subtext"]),
-            ("Handwriting", 20, _PANEL_DIM),
+            ("mic", "You" if measured else "Dictation", shown, C["accent"]),
+            ("keyboard", "Typing", stats_mod.TYPING_WPM, C["subtext"]),
+            ("pen", "Handwriting", 20, _PANEL_DIM),
         ]
-        fastest = max(r[1] for r in rows)
+        fastest = max(r[2] for r in rows)
         top = 74
+        label_x = pad + 24              # clears the row icon in the gutter
         # Three bars and a two-line note share whatever height is left.
         step = max(26, (h - top - 34) // 3)
         y = top
-        for label, value, colour in rows:
-            cv.create_text(pad, y, text=label, anchor="w", fill=C["text"],
+        for icon, label, value, colour in rows:
+            self._row_icon(cv, icon, pad, y,
+                           colour if colour != _PANEL_DIM else C["subtext"])
+            cv.create_text(label_x, y, text=label, anchor="w", fill=C["text"],
                            font=("Segoe UI", 9))
             cv.create_text(w - pad, y, text=f"{value} wpm", anchor="e",
                            fill=C["subtext"], font=("Segoe UI", 9))

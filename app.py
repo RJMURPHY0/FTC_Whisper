@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.57"
+APP_VERSION = "1.6.58"
 
 
 class _RECT(ctypes.Structure):
@@ -214,10 +214,11 @@ class WhisperFlowApp:
         self.popup.set_ai_refiner(self.ai_refiner)
         self.popup.set_popup_height(getattr(self.config, "popup_height", "low"))
         self.popup.set_popup_offset(getattr(self.config, "popup_offset", 30))
-        # The ▴▾ arrows on the pill save their nudge through the normal settings
-        # path (setattr + async save + runtime apply), so it survives a restart.
-        self.popup.set_offset_saver(
-            lambda v: self._on_settings_change("popup_offset", v))
+        self.popup.set_popup_align(getattr(self.config, "popup_align", "centre"))
+        # The ▴▾ ◂ ▸ arrows on the pill save their nudge through the normal
+        # settings path (setattr + async save + runtime apply), so the position
+        # survives a restart.
+        self.popup.set_settings_saver(self._on_settings_change)
         self.popup.set_voice_prompt_callback(
             lambda audio, rate, blocking=True: self._fast_engine().transcribe(audio, rate, blocking=blocking)
         )
@@ -1029,6 +1030,8 @@ class WhisperFlowApp:
             self.popup.set_popup_height(value)
         elif key == "popup_offset":
             self.popup.set_popup_offset(value)
+        elif key == "popup_align":
+            self.popup.set_popup_align(value)
         elif key == "openrouter_model":
             self.ai_refiner.openrouter_model = (value or "").strip() or self.ai_refiner.openrouter_model
         elif key == "auto_punctuate":
