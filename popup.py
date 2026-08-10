@@ -753,10 +753,10 @@ class FloatingPopup:
     # ── Status frame (recording / transcribing pill) ───────────────────────────
 
     def _build_status_frame(self) -> None:
-        # Extra padding over the content leaves clear gutters at all four edges
-        # for the position-nudge arrows, so they never sit over the waveform
-        # (the 16px top/bottom gutter comfortably clears the small triangles).
-        f = tk.Frame(self.root, bg=CP["bg"], padx=16, pady=16)
+        # 18px gutters on every side give the position-nudge arrows their own
+        # band, clear of the content (timer, waveform, label) — the arrows only
+        # ever live on the edges, never over the bar.
+        f = tk.Frame(self.root, bg=CP["bg"], padx=18, pady=18)
         self._status_frame = f
 
         # Top row: timer | waveform | status label — packed left-to-right.
@@ -857,30 +857,35 @@ class FloatingPopup:
         )
 
         # ── Position nudge arrows ───────────────────────────────────────────
-        # Four tiny triangles in the pill's edge gutters (kept clear of the
-        # waveform by the frame padding above): ▴ top / ▾ bottom lift and drop
-        # the pill, ◂ / ▸ at the far edges move it left / right. Each nudge is
-        # saved so it sticks. They ride the status frame (placed, not packed), so
-        # they appear with the pill and vanish with it — no separate show/hide.
-        # WS_EX_NOACTIVATE lets the pill take the click without stealing focus,
-        # so the arrows work mid-dictation.
-        def _arrow(glyph):
-            return tk.Label(f, text=glyph, fg=CP["subtext"], bg=CP["bg"],
-                            font=("Segoe UI", 7), cursor="hand2", padx=3, pady=0)
-        self._pos_up, self._pos_down = _arrow("▴"), _arrow("▾")
-        self._pos_left, self._pos_right = _arrow("◂"), _arrow("▸")
-        self._pos_up.place(relx=0.5, y=1, anchor="n")
-        self._pos_down.place(relx=0.5, rely=1.0, y=-1, anchor="s")
-        self._pos_left.place(x=1, rely=0.5, anchor="w")
-        self._pos_right.place(relx=1.0, x=-1, rely=0.5, anchor="e")
-        for _w, _fn in ((self._pos_up,    lambda: self._nudge_position(+1)),
+        # Four small triangles drawn on tiny canvases, pinned FLUSH to the four
+        # edges and sitting in the 18px gutters — so they never touch the timer,
+        # waveform or label. The rule: arrows only ever live on the edges. ▲ top
+        # / ▼ bottom move the pill up / down, ◀ / ▶ at the far sides move it left
+        # / right. Canvas (not a Label) gives an exact small size — a Label's
+        # font line-height made the glyph big enough to crowd the waveform. Each
+        # nudge is saved so it sticks; they ride the status frame (placed), so
+        # they appear and vanish with the pill. WS_EX_NOACTIVATE lets the pill
+        # take the click without stealing focus, so they work mid-dictation.
+        def _tri(w_, h_, pts):
+            c = tk.Canvas(f, width=w_, height=h_, bg=CP["bg"],
+                          highlightthickness=0, bd=0, cursor="hand2")
+            c.create_polygon(pts, fill=CP["subtext"], outline="", tags="tri")
+            return c
+        self._pos_up    = _tri(18, 10, (3, 8, 15, 8, 9, 2))
+        self._pos_down  = _tri(18, 10, (3, 2, 15, 2, 9, 8))
+        self._pos_left  = _tri(10, 18, (8, 3, 8, 15, 2, 9))
+        self._pos_right = _tri(10, 18, (2, 3, 2, 15, 8, 9))
+        self._pos_up.place(relx=0.5, y=0, anchor="n")
+        self._pos_down.place(relx=0.5, rely=1.0, anchor="s")
+        self._pos_left.place(x=0, rely=0.5, anchor="w")
+        self._pos_right.place(relx=1.0, rely=0.5, anchor="e")
+        for _c, _fn in ((self._pos_up,    lambda: self._nudge_position(+1)),
                         (self._pos_down,  lambda: self._nudge_position(-1)),
                         (self._pos_left,  lambda: self._nudge_h_position(-1)),
                         (self._pos_right, lambda: self._nudge_h_position(+1))):
-            _w.bind("<Button-1>", lambda _e, fn=_fn: fn())
-            _w.bind("<Enter>", lambda _e, w=_w: w.configure(fg=CP["text"]))
-            _w.bind("<Leave>", lambda _e, w=_w: w.configure(fg=CP["subtext"]))
-            _w.lift()
+            _c.bind("<Button-1>", lambda _e, fn=_fn: fn())
+            _c.bind("<Enter>", lambda _e, c=_c: c.itemconfigure("tri", fill=CP["text"]))
+            _c.bind("<Leave>", lambda _e, c=_c: c.itemconfigure("tri", fill=CP["subtext"]))
 
         # Recording start time (for timer)
         self._rec_start: Optional[float] = None

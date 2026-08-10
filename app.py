@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.58"
+APP_VERSION = "1.6.59"
 
 
 class _RECT(ctypes.Structure):
