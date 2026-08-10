@@ -804,12 +804,19 @@ class HotkeyManager:
         if self._suspended:
             return
         self._suspended = True
+        # Resume restores the state we found, it never invents one: the
+        # dashboard is reachable before _init_core registers anything, and
+        # registering early would fire a recording into a pipeline that does
+        # not exist yet.
+        self._was_registered = self._registered
         self.unregister()
 
     def resume(self) -> bool:
         if not self._suspended:
             return self._registered
         self._suspended = False
+        if not getattr(self, "_was_registered", True):
+            return False
         return self.register()
 
     def _kb_combo_down(self, _event=None) -> None:
@@ -1128,12 +1135,16 @@ class TriggerHotkeyManager:
         if self._suspended:
             return
         self._suspended = True
+        # See HotkeyManager.suspend — resume restores, never invents.
+        self._was_registered = self._registered
         self.unregister()
 
     def resume(self) -> bool:
         if not self._suspended:
             return self._registered
         self._suspended = False
+        if not getattr(self, "_was_registered", True):
+            return False
         return self.register()
 
     def unregister(self) -> None:

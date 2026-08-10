@@ -217,6 +217,17 @@ class ManagerSuspendTests(unittest.TestCase):
         TriggerHotkeyManager.suspend(tm)
         self.assertEqual(1, tm.unregistered)
 
+    def test_resume_restores_the_prior_state_rather_than_inventing_one(self):
+        # The dashboard opens before _init_core registers anything. Resuming
+        # into a registration that never existed would fire a recording at a
+        # pipeline that is not built yet.
+        tm = self._trigger()
+        tm._registered = False
+        TriggerHotkeyManager.suspend(tm)
+        TriggerHotkeyManager.resume(tm)
+        self.assertEqual(0, tm.registered)
+        self.assertFalse(tm._suspended)
+
     def test_saving_while_suspended_registers_immediately(self):
         # The save arrives before the recorder's resume; without clearing the
         # flag the new shortcut would sit dead until the next capture.

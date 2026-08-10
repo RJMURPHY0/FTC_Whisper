@@ -3098,8 +3098,10 @@ class AppWindow:
                 self._stop_ptt_recording(cancelled=True)
             if self._recording_refine_hotkey:
                 self._stop_refine_hotkey_recording(cancelled=True)
-        except tk.TclError:
-            pass
+        except Exception as e:
+            # Broad on purpose: whatever went wrong tidying the card up, the
+            # binds MUST come back on the line below.
+            print(f"[AppWindow] Hotkey capture cancel failed: {e}")
         # Belt and braces: whatever happened above, the binds come back.
         self._resume_global_hotkeys()
 
