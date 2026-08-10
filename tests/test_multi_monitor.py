@@ -86,8 +86,8 @@ class ClampSourceTests(unittest.TestCase):
         self.assertNotIn("winfo_screenwidth", src)
 
 
-class RefineAnchorTests(unittest.TestCase):
-    """The refine panel opens where the TEXT is, not where the mouse is.
+class PopupAnchorTests(unittest.TestCase):
+    """Recording and refine popups open where the TEXT is, not the mouse.
 
     The popup picks its monitor from the coordinates it is handed, and refine
     handed it the raw cursor position. Selections are routinely made with the
@@ -102,8 +102,6 @@ class RefineAnchorTests(unittest.TestCase):
 
     def _anchor(self, hwnd, *, caret, mouse, rect):
         import app as app_mod
-        real_capture = app_mod._capture_focus_target
-        real_rect = None
 
         class _FakeU32:
             @staticmethod
@@ -122,15 +120,13 @@ class RefineAnchorTests(unittest.TestCase):
         class _FakeWindll:
             user32 = _FakeU32
 
-        app_mod._capture_focus_target = lambda _h: (0, caret)
         real_windll = app_mod.ctypes.windll
         app_mod.ctypes.windll = _FakeWindll
         try:
-            return app_mod.WhisperFlowApp._refine_anchor(self.whisper, hwnd)
+            return app_mod.WhisperFlowApp._popup_anchor(
+                self.whisper, hwnd, caret)
         finally:
-            app_mod._capture_focus_target = real_capture
             app_mod.ctypes.windll = real_windll
-            del real_rect
 
     def test_the_caret_wins(self):
         # Text on the left monitor, mouse parked on the right one.
@@ -156,6 +152,13 @@ class RefineAnchorTests(unittest.TestCase):
         self.assertEqual(
             (2600, 700),
             self._anchor(0, caret=(0, 0), mouse=(2600, 700), rect=None))
+
+    def test_recording_state_uses_the_focus_anchor_not_raw_mouse(self):
+        # Guard the actual Alt+V/PTT call site. Keeping _popup_anchor only in
+        # refine would reproduce the reported wrong-monitor recording pill.
+        src = inspect.getsource(self.app_mod.WhisperFlowApp._on_state_change)
+        self.assertIn("_recording_popup_anchor", src)
+        self.assertIn("self._popup_anchor", src)
 
 
 if __name__ == "__main__":

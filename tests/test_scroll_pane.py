@@ -34,6 +34,34 @@ class BlitFreeInvariantTests(unittest.TestCase):
         src = inspect.getsource(AppWindow._switch_dash_tab)
         self.assertIn("grid_remove", src)
 
+    def test_atomic_swap_drains_tk_expose_events_before_returning(self):
+        # RedrawWindow queues Expose events; without a synchronous window-event
+        # drain the old Settings pixels remain visible over Hotkey for a frame.
+        src = inspect.getsource(AppWindow._atomic_ui)
+        self.assertIn("_drain_window_events", src)
+
+    def test_window_event_drain_excludes_timers_and_input(self):
+        import _tkinter
+
+        seen = []
+
+        class _Tk:
+            def dooneevent(self, flags):
+                seen.append(flags)
+                return 1 if len(seen) < 3 else 0
+
+        window = object.__new__(AppWindow)
+        window._root = type("_Root", (), {"tk": _Tk()})()
+        self.assertEqual(2, window._drain_window_events())
+        self.assertTrue(seen)
+        expected = _tkinter.WINDOW_EVENTS | _tkinter.DONT_WAIT
+        self.assertTrue(all(flags == expected for flags in seen))
+
+        seen.clear()
+        self.assertEqual(2, window._drain_window_events(include_idle=True))
+        expected |= _tkinter.IDLE_EVENTS
+        self.assertTrue(all(flags == expected for flags in seen))
+
 
 def _make_pane(content_h=1000, viewport_h=200, width=300):
     import tkinter as tk

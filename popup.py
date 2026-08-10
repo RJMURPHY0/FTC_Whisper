@@ -1855,8 +1855,9 @@ class FloatingPopup:
         try:
             MONITOR_DEFAULTTONEAREST = 2
             u32 = ctypes.windll.user32
-            # Prefer explicit cursor coords — always puts popup on the user's active screen.
-            # Fall back to target hwnd only when no cursor coords given.
+            # Prefer the explicit interaction anchor supplied by app.py (caret
+            # or focused-window point, not blindly the mouse). Fall back to the
+            # target HWND only when no usable anchor was supplied.
             if x or y:
                 pt = _POINT()
                 pt.x, pt.y = x, y
@@ -1903,8 +1904,8 @@ class FloatingPopup:
         self.root.update_idletasks()
         w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
 
-        # Pick the monitor (multi-monitor aware — follows whichever screen the
-        # cursor is on) and convert its Win32 work-area to tkinter logical
+        # Pick the monitor (multi-monitor aware — follows the focused text/
+        # window anchor) and convert its Win32 work-area to tkinter logical
         # pixels. Keep the raw *physical* bounds too: the second-order guard
         # below re-checks the real landing spot against them.
         try:
@@ -1927,7 +1928,7 @@ class FloatingPopup:
             y_b = round(cy * sy) + gap
             y   = y_b if y_b + h <= bottom else round(cy * sy) - h - gap
         else:
-            # Fixed, horizontally centred on whichever monitor the cursor is on.
+            # Fixed, horizontally centred on the anchored monitor.
             # Vertical placement follows the user's popup_height preference so it
             # can sit out of the way of a chatbot's input box (low, default) or
             # up above the chat window (high).
