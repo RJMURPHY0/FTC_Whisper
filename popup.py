@@ -753,10 +753,11 @@ class FloatingPopup:
     # ── Status frame (recording / transcribing pill) ───────────────────────────
 
     def _build_status_frame(self) -> None:
-        # 18px gutters on every side give the position-nudge arrows their own
-        # band, clear of the content (timer, waveform, label) — the arrows only
-        # ever live on the edges, never over the bar.
-        f = tk.Frame(self.root, bg=CP["bg"], padx=18, pady=18)
+        # Gutters give the position-nudge arrows their own band, clear of the
+        # content (timer, waveform, label). Wider left/right (22) than top/bottom
+        # (16) because the side arrows sit level with the timer and label and
+        # must never crowd them; the arrows themselves hug the very edges below.
+        f = tk.Frame(self.root, bg=CP["bg"], padx=22, pady=16)
         self._status_frame = f
 
         # Top row: timer | waveform | status label — packed left-to-right.
@@ -871,10 +872,13 @@ class FloatingPopup:
                           highlightthickness=0, bd=0, cursor="hand2")
             c.create_polygon(pts, fill=CP["subtext"], outline="", tags="tri")
             return c
-        self._pos_up    = _tri(18, 10, (3, 8, 15, 8, 9, 2))
-        self._pos_down  = _tri(18, 10, (3, 2, 15, 2, 9, 8))
-        self._pos_left  = _tri(10, 18, (8, 3, 8, 15, 2, 9))
-        self._pos_right = _tri(10, 18, (2, 3, 2, 15, 8, 9))
+        # Each triangle's tip reaches 1px from the canvas edge, and every canvas
+        # is pinned flush to its pill edge, so the arrows hug the very edges with
+        # only a hair of gap — and the wide gutters keep them off the content.
+        self._pos_up    = _tri(18, 9, (3, 8, 15, 8, 9, 1))
+        self._pos_down  = _tri(18, 9, (3, 1, 15, 1, 9, 8))
+        self._pos_left  = _tri(9, 18, (8, 3, 8, 15, 1, 9))
+        self._pos_right = _tri(9, 18, (1, 3, 1, 15, 8, 9))
         self._pos_up.place(relx=0.5, y=0, anchor="n")
         self._pos_down.place(relx=0.5, rely=1.0, anchor="s")
         self._pos_left.place(x=0, rely=0.5, anchor="w")
