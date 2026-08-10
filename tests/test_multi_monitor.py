@@ -86,13 +86,14 @@ class ClampSourceTests(unittest.TestCase):
         self.assertNotIn("winfo_screenwidth", src)
 
 
-class PopupAnchorTests(unittest.TestCase):
-    """Recording and refine popups open where the TEXT is, not the mouse.
+class RefineAnchorTests(unittest.TestCase):
+    """The refine panel and the dictation pill open on the CURSOR's monitor.
 
-    The popup picks its monitor from the coordinates it is handed, and refine
-    handed it the raw cursor position. Selections are routinely made with the
-    keyboard, and on a two-monitor desk the pointer is often parked on the other
-    screen — which is how the refine panel kept opening on the wrong monitor.
+    The popup picks its monitor from the coordinates it is handed. The rule is
+    the mouse cursor, always: on a multi-monitor desk the caret (the text being
+    edited) is routinely on a different screen from the cursor, and anchoring to
+    it opened the panel on the wrong monitor. `_refine_anchor` therefore returns
+    the raw cursor position and never consults the caret or the window rect.
     """
 
     def setUp(self):
@@ -100,7 +101,7 @@ class PopupAnchorTests(unittest.TestCase):
         self.app_mod = app_mod
         self.whisper = app_mod.WhisperFlowApp.__new__(app_mod.WhisperFlowApp)
 
-    def _anchor(self, hwnd, *, caret, mouse, rect):
+    def _anchor(self, hwnd, *, mouse):
         import app as app_mod
 
         class _FakeU32:
@@ -109,56 +110,39 @@ class PopupAnchorTests(unittest.TestCase):
                 ref._obj.x, ref._obj.y = mouse
                 return 1
 
-            @staticmethod
-            def GetWindowRect(_h, ref):
-                if rect is None:
-                    return 0
-                (ref._obj.left, ref._obj.top,
-                 ref._obj.right, ref._obj.bottom) = rect
-                return 1
-
         class _FakeWindll:
             user32 = _FakeU32
 
+        # A caret on a different monitor must NOT be able to pull the anchor
+        # off the cursor's screen — so make consulting it explode if it ever runs.
+        real_capture = app_mod._capture_focus_target
+        def _boom(_h):
+            raise AssertionError("refine must not read the caret")
+        app_mod._capture_focus_target = _boom
         real_windll = app_mod.ctypes.windll
         app_mod.ctypes.windll = _FakeWindll
         try:
-            return app_mod.WhisperFlowApp._popup_anchor(
-                self.whisper, hwnd, caret)
+            return app_mod.WhisperFlowApp._refine_anchor(self.whisper, hwnd)
         finally:
+            app_mod._capture_focus_target = real_capture
             app_mod.ctypes.windll = real_windll
 
-    def test_the_caret_wins(self):
-        # Text on the left monitor, mouse parked on the right one.
-        self.assertEqual(
-            (400, 300),
-            self._anchor(0x1234, caret=(400, 300), mouse=(2600, 700),
-                         rect=(0, 0, 1900, 1000)))
+    def test_the_cursor_wins_even_with_a_target_window(self):
+        # Mouse on the right monitor — the panel goes to the right monitor.
+        self.assertEqual((2600, 700), self._anchor(0x1234, mouse=(2600, 700)))
 
-    def test_the_mouse_is_used_when_it_is_over_the_target_window(self):
-        self.assertEqual(
-            (900, 500),
-            self._anchor(0x1234, caret=(0, 0), mouse=(900, 500),
-                         rect=(0, 0, 1900, 1000)))
+    def test_the_cursor_wins_on_the_left_monitor(self):
+        # Virtual-screen coords go negative on a left-hand display.
+        self.assertEqual((-1400, 500), self._anchor(0x1234, mouse=(-1400, 500)))
 
-    def test_a_mouse_on_another_screen_falls_back_to_the_window(self):
-        # Without this the popup follows the pointer to the other display.
-        self.assertEqual(
-            (950, 500),
-            self._anchor(0x1234, caret=(0, 0), mouse=(2600, 700),
-                         rect=(0, 0, 1900, 1000)))
+    def test_no_target_window_still_returns_the_cursor(self):
+        self.assertEqual((900, 500), self._anchor(0, mouse=(900, 500)))
 
-    def test_no_target_window_still_returns_a_point(self):
-        self.assertEqual(
-            (2600, 700),
-            self._anchor(0, caret=(0, 0), mouse=(2600, 700), rect=None))
-
-    def test_recording_state_uses_the_focus_anchor_not_raw_mouse(self):
-        # Guard the actual Alt+V/PTT call site. Keeping _popup_anchor only in
-        # refine would reproduce the reported wrong-monitor recording pill.
-        src = inspect.getsource(self.app_mod.WhisperFlowApp._on_state_change)
-        self.assertIn("_recording_popup_anchor", src)
-        self.assertIn("self._popup_anchor", src)
+    def test_source_has_no_caret_preference(self):
+        # Guard against a future refactor quietly reintroducing the caret anchor
+        # that caused the wrong-monitor regression.
+        src = inspect.getsource(self.app_mod.WhisperFlowApp._refine_anchor)
+        self.assertNotIn("_capture_focus_target", src)
 
 
 if __name__ == "__main__":

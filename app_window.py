@@ -1435,34 +1435,6 @@ class AppWindow:
         except Exception:
             return 0
 
-    def _drain_window_events(self, include_idle: bool = False) -> int:
-        """Synchronously consume queued Win32/Tk window events only.
-
-        RedrawWindow(RDW_UPDATENOW) does not draw tkinter widgets itself: Tk
-        translates WM_PAINT into queued Expose events. Returning to the user
-        before those events run exposes the old page's pixels for a frame (or
-        longer under load), which is the Settings-over-Hotkey ghost. Drain
-        WINDOW_EVENTS without timers, file handlers or input events so the
-        final widget tree is painted before an atomic swap returns, without
-        the re-entrancy risk of root.update(). After a resize, include Tk idle
-        layout callbacks too; timers and user input always remain excluded.
-        """
-        try:
-            import _tkinter
-            flags = _tkinter.WINDOW_EVENTS | _tkinter.DONT_WAIT
-            if include_idle:
-                flags |= _tkinter.IDLE_EVENTS
-            drained = 0
-            # A complex page can queue many child Expose/Configure events. The
-            # cap is only a safety valve for a broken widget that self-invalidates.
-            for _ in range(512):
-                if not self._root.tk.dooneevent(flags):
-                    break
-                drained += 1
-            return drained
-        except Exception:
-            return 0
-
     def _atomic_ui(self, fn) -> None:
         """Run a multi-step layout change as ONE visual frame. WM_SETREDRAW
         freezes painting, fn() does its pack work, update_idletasks settles the
@@ -1519,11 +1491,6 @@ class AppWindow:
                     u32.RedrawWindow(hwnd, None, None, 0x585)
                 except Exception:
                     pass
-                # Paint the destination page once at the CURRENT geometry
-                # before applying a deferred resize. Otherwise Windows blits
-                # pixels from the old login/dashboard page into the new size
-                # and Tk only replaces them on a later Expose cycle.
-                self._drain_window_events()
             geo = getattr(self, "_pending_geometry", None)
             moved = bool(geo)
             if geo:
@@ -1545,10 +1512,6 @@ class AppWindow:
             # own glitch — and same-size swaps (tab changes, opening an impact
             # breakdown) are the common case.
             self._repaint_all(erase=moved)
-            # RedrawWindow queues Tk Expose events; it does not paint the
-            # widgets. Present the completed page synchronously so the next
-            # visible frame cannot contain pixels from the unmapped tab.
-            self._drain_window_events(include_idle=moved)
             try:
                 self._root.after(0, lambda e=moved: self._repaint_all(erase=e))
             except Exception:
@@ -1558,12 +1521,6 @@ class AppWindow:
         self._cancel_signing_in()
         self._login_visible = True
         def _swap():
-            # Reset repacks several form rows. Doing it after _atomic_ui had
-            # already presented the page exposed a blank/black login frame for
-            # one paint cycle; settle the complete form while it is still part
-            # of the hidden atomic swap instead.
-            if hasattr(self, "_login_ui"):
-                self._login_ui.reset()
             self._dash_visible = False
             self._header_outer.pack_forget()
             self._dash_frame.pack_forget()
@@ -1571,6 +1528,8 @@ class AppWindow:
             self._login_frame.pack(fill="both", expand=True)
             self._resize(WINDOW_W, 560)
         self._atomic_ui(_swap)
+        if hasattr(self, "_login_ui"):
+            self._login_ui.reset()
 
     def _switch_to_dashboard(self) -> None:
         self._cancel_signing_in()

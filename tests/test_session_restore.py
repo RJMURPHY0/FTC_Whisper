@@ -220,15 +220,6 @@ class PageSwapHealTests(unittest.TestCase):
         self.assertLess(geo_at, heal_at,
                         "the heal must come after the geometry change")
 
-    def test_destination_is_painted_before_resize_then_idle_layout_is_drained(self):
-        import inspect
-        from app_window import AppWindow
-        src = inspect.getsource(AppWindow._atomic_ui)
-        prepaint_at = src.index("self._drain_window_events()")
-        geo_at = src.index("self._root.geometry(geo)")
-        self.assertLess(prepaint_at, geo_at)
-        self.assertIn("_drain_window_events(include_idle=moved)", src)
-
     def test_erase_is_reserved_for_swaps_that_moved_the_window(self):
         """Erasing a same-size swap flashes the whole window background for a
         frame. Only a move/resize exposes pixels no widget repaints over."""
@@ -252,14 +243,6 @@ class PageSwapHealTests(unittest.TestCase):
         # RedrawWindow(NULL) repaints the whole screen; _top_hwnd returns 0 on
         # failure, so the guard has to be there.
         self.assertIn("if not hwnd:", src)
-
-    def test_login_form_is_reset_before_the_atomic_present(self):
-        import inspect
-        from app_window import AppWindow
-        src = inspect.getsource(AppWindow._switch_to_login)
-        reset_at = src.index("self._login_ui.reset()")
-        present_at = src.index("self._atomic_ui(_swap)")
-        self.assertLess(reset_at, present_at)
 
 
 class SplashRevealTests(unittest.TestCase):

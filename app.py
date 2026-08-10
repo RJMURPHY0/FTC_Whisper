@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.55"
+APP_VERSION = "1.6.56"
 
 
 class _RECT(ctypes.Structure):
@@ -377,14 +377,10 @@ class WhisperFlowApp:
                     daemon=True, name="warm-mic",
                 ).start()
 
-            # ── Pre-load the engines on the immediate dictation path ─────
-            # The accurate Whisper model is deliberately LAZY. English
-            # dictation uses Parakeet and never touches it; eagerly loading the
-            # configured large-v3-turbo model consumed several GB for no user-
-            # facing benefit and put a 16 GB machine close enough to memory
-            # pressure for Tk/Windows repaint allocation to fail. Transcriber
-            # loads itself on the first explicit Retry or Whisper-fallback
-            # upgrade, both background/non-primary paths.
+            # ── Pre-load all models immediately in background ─────────
+            threading.Thread(
+                target=self.transcriber.load_model, daemon=True, name="model-preload"
+            ).start()
             threading.Thread(
                 target=self.fast_transcriber.load_model, daemon=True, name="fast-model-preload"
             ).start()
@@ -1975,12 +1971,6 @@ class WhisperFlowApp:
             except Exception:
                 cx = getattr(self, "_rec_cursor_x", 0)
                 cy = getattr(self, "_rec_cursor_y", 0)
-            # Popup placement follows the focused text/window, not a mouse
-            # parked on another display. Keep _rec_cursor_x/y as the real mouse
-            # snapshot because injection focus-restore still needs it.
-            popup_x, popup_y = self._popup_anchor(
-                hwnd, getattr(self, "_recording_caret", (0, 0)))
-            self._recording_popup_anchor = (popup_x, popup_y)
             _captions_on = self._captions_active()
             self.popup.set_captions_enabled(_captions_on)
             # Honest cue: this fires on the hotkey thread BEFORE recorder.start()
@@ -1993,8 +1983,8 @@ class WhisperFlowApp:
                 "Recording" if _mic_live else "Starting…",
                 hwnd=hwnd,
                 recording=True,
-                cursor_x=popup_x,
-                cursor_y=popup_y,
+                cursor_x=cx,
+                cursor_y=cy,
             )
             # Always feed mic levels to the popup waveform while recording — the
             # waveform now animates in caption mode too (captions render in a bar
@@ -2017,17 +2007,12 @@ class WhisperFlowApp:
             # while the final injection pass needs it.
             self._caption_stop_event.set()
             self._caption_loop_running.clear()
-            popup_x, popup_y = getattr(
-                self, "_recording_popup_anchor",
-                (getattr(self, "_rec_cursor_x", 0),
-                 getattr(self, "_rec_cursor_y", 0)),
-            )
             self.popup.show_status(
                 "Transcribing…",
                 hwnd=self._recording_hwnd,
                 recording=False,
-                cursor_x=popup_x,
-                cursor_y=popup_y,
+                cursor_x=getattr(self, "_rec_cursor_x", 0),
+                cursor_y=getattr(self, "_rec_cursor_y", 0),
             )
         elif state == AppState.IDLE:
             self._mic_loop_running.clear()
@@ -2461,44 +2446,22 @@ class WhisperFlowApp:
         except Exception:
             return (int(getattr(self.popup, "_popup_hwnd", 0) or 0),)
 
-    def _popup_anchor(self, hwnd: int, caret: tuple = (0, 0)) -> tuple:
-        """Anchor a popup to the user's focused text/window.
+    def _refine_anchor(self, hwnd: int) -> tuple:
+        """Where to put the refine popup: on the MONITOR the cursor is on.
 
-        The mouse is not proof of the active monitor: keyboard dictation and
-        selections leave it parked anywhere. Preference order:
-
-          1. a captured caret in the focused control (the actual text),
-          2. the mouse, but only when it is genuinely over the target window,
-          3. the centre of the target window.
-
-        Falls back to the raw cursor position if there is no target window."""
+        The rule is simple and predictable: the refine panel — and the
+        dictation pill — always open on the same screen as the mouse cursor.
+        An earlier build anchored refine to the focused control's caret; on a
+        multi-monitor desk the text being edited is routinely on a different
+        screen from the cursor, so the panel kept opening on the "wrong"
+        monitor. The cursor is the anchor, full stop."""
         u32 = ctypes.windll.user32
         pt = ctypes.wintypes.POINT()
-        u32.GetCursorPos(ctypes.byref(pt))
-        mouse = (int(pt.x), int(pt.y))
-        if caret and (caret[0] or caret[1]):
-            return int(caret[0]), int(caret[1])
-        if not hwnd:
-            return mouse
         try:
-            r = _RECT()
-            if u32.GetWindowRect(hwnd, ctypes.byref(r)):
-                if (r.left <= mouse[0] <= r.right
-                        and r.top <= mouse[1] <= r.bottom):
-                    return mouse
-                return ((r.left + r.right) // 2, (r.top + r.bottom) // 2)
+            u32.GetCursorPos(ctypes.byref(pt))
+            return (int(pt.x), int(pt.y))
         except Exception:
-            pass
-        return mouse
-
-    def _refine_anchor(self, hwnd: int) -> tuple:
-        """Where to put the refine popup: at the TEXT, not at the mouse."""
-        caret = (0, 0)
-        try:
-            _child, caret = _capture_focus_target(hwnd)
-        except Exception:
-            pass
-        return self._popup_anchor(hwnd, caret)
+            return (0, 0)
 
     def _on_refine_selection(self) -> None:
         """Fires when the refine-selection hotkey is pressed.

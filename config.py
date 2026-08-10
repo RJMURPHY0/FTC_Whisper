@@ -307,25 +307,14 @@ class Config:
         # the shared FTC backend so the FTC Contacts login works here too. The stale
         # silent-auth creds (for the old project) are dropped — the user re-signs in
         # once with their FTC Contacts account, then the saved session persists.
-        backend_migration = ""
         if config.supabase_url in _LEGACY_SUPABASE_URLS:
-            backend_migration = "legacy"
-        elif not config.supabase_url and not config.supabase_key:
-            # Older/source configs could disable AuthManager before it had a
-            # chance to restore the valid encrypted per-device session.
-            backend_migration = "blank"
-        elif config.supabase_url == _SHARED_SUPABASE_URL and not config.supabase_key:
-            backend_migration = "missing-key"
-
-        if backend_migration:
             config.supabase_url = _SHARED_SUPABASE_URL
             config.supabase_key = _SHARED_SUPABASE_KEY
-            if backend_migration == "legacy":
-                config.supabase_email = ""
-                config.supabase_password = ""
+            config.supabase_email = ""
+            config.supabase_password = ""
             try:
                 config.save()
-                print("[Config] Restored shared FTC account backend.")
+                print("[Config] Migrated Supabase backend to shared FTC project.")
             except Exception as e:
                 print(f"[Config] Backend migration save failed (non-fatal): {e}")
 
