@@ -826,6 +826,8 @@ class AppWindow:
         on_quit: Callable,
         on_hotkey_change: Callable,
         on_refine_hotkey_change: Callable = None,
+        on_hotkey_capture: Callable = None,
+        on_ptt_hotkey_change: Callable = None,
         on_settings_change: Callable = None,
         on_sign_in: Callable = None,
         db=None,
@@ -846,6 +848,8 @@ class AppWindow:
         self._on_quit                 = on_quit
         self._on_hotkey_change        = on_hotkey_change
         self._on_refine_hotkey_change = on_refine_hotkey_change
+        self._on_hotkey_capture       = on_hotkey_capture
+        self._on_ptt_hotkey_change    = on_ptt_hotkey_change
         self._on_settings_change      = on_settings_change
         self._on_sign_in              = on_sign_in
         self._db                      = db
@@ -905,6 +909,11 @@ class AppWindow:
         self._pending_refine_hotkey: Optional[str] = None
         self._recording_ptt_hotkey    = False
         self._pending_ptt_hotkey: Optional[str] = None
+        self._hotkeys_suspended       = False
+        # A registration warning must survive the 4s "Shortcut updated" flash,
+        # or the only sign that a combo didn't take gets wiped off the card.
+        self._hotkey_warned           = False
+        self._ptt_warned              = False
         self._ptt_hotkey = (getattr(config, "ptt_hotkey", "") or "").upper() \
             if config else ""
 
@@ -1322,6 +1331,11 @@ class AppWindow:
     def _switch_dash_tab(self, name: str) -> None:
         previous = getattr(self, "_current_tab", None)
         self._current_tab = name
+
+        # A capture left running on another tab keeps every global bind
+        # suspended and swallows keystrokes meant for this one.
+        if previous == "hotkey" and name != "hotkey":
+            self._cancel_hotkey_capture()
 
         # Leaving Home with a breakdown open would strand it there: come back
         # later and the cards are still replaced by a panel you have forgotten
@@ -2978,6 +2992,7 @@ class AppWindow:
             self._stop_ptt_recording(cancelled=True)
         self._recording_hotkey = True
         self._pending_hotkey = None
+        self._suspend_global_hotkeys()
         self._record_btn.configure(text="Cancel", bg=C["error"], fg=C["text"])
         self._hotkey_record_msg.configure(
             text="Press your new key or combination… (Escape to cancel)",
@@ -2992,20 +3007,176 @@ class AppWindow:
     _TK_ALT   = 0x20000
     _TK_SHIFT = 0x0001
 
+    # ── Shared shortcut-capture machinery ─────────────────────────────────────
+
+    # Keys that are safe to bind on their own: they carry no character, so a
+    # bare bind can't fire in the middle of ordinary typing.
+    _STANDALONE_KEYS = frozenset(
+        [f"f{n}" for n in range(1, 25)]
+        + ["caps lock", "insert", "pause", "scroll_lock", "print", "home",
+           "end", "pageup", "pagedown", "num_lock"]
+    )
+
+    # Virtual-key code → the name hotkey_manager._vk_code() understands.
+    # Deliberately the inverse of its _VK_MAP: a captured key that maps to
+    # anything else registers as vk 0, i.e. a shortcut that saves and then
+    # never fires. tkinter's keysym is NOT good enough on its own — Alt+; comes
+    # through as "semicolon", which _vk_code() cannot resolve.
+    _VK_KEY_NAMES = {
+        **{c: chr(c).lower() for c in range(0x41, 0x5B)},        # A–Z
+        **{0x30 + d: str(d) for d in range(10)},                 # 0–9
+        **{0x70 + n: f"f{n + 1}" for n in range(12)},            # F1–F12
+        0x20: "space", 0x09: "tab", 0x0D: "enter", 0x1B: "esc",
+        0x24: "home", 0x23: "end", 0x21: "pageup", 0x22: "pagedown",
+        0x2D: "insert", 0x2E: "delete", 0x14: "caps lock",
+        0x26: "up", 0x28: "down", 0x25: "left", 0x27: "right",
+        0xC0: "`", 0xBD: "-", 0xBB: "=", 0xDB: "[", 0xDD: "]",
+        0xDC: "\\", 0xBA: ";", 0xDE: "'", 0xBC: ",", 0xBE: ".", 0xBF: "/",
+    }
+
+    # (name, virtual-key codes) for every modifier, left and right variants.
+    _MODIFIER_PROBE = (
+        ("ctrl",  (0xA2, 0xA3, 0x11)),
+        ("alt",   (0xA4, 0xA5, 0x12)),
+        ("shift", (0xA0, 0xA1, 0x10)),
+        ("super", (0x5B, 0x5C)),
+    )
+
+    def _physical_modifiers(self) -> list:
+        """Modifiers actually held down, straight from Windows.
+
+        event.state is not trustworthy here: Windows folds Ctrl+Alt into AltGr
+        and Tk then reports the press with its Ctrl bit only, so capturing
+        Ctrl+Alt+R silently recorded CTRL+R (measured). GetAsyncKeyState is read
+        inside the key handler, so it is the state at the moment of the press."""
+        held = []
+        try:
+            u32 = ctypes.windll.user32
+            for name, vks in self._MODIFIER_PROBE:
+                if any(u32.GetAsyncKeyState(vk) & 0x8000 for vk in vks):
+                    held.append(name)
+        except Exception:
+            pass
+        return held
+
+    def _suspend_global_hotkeys(self) -> None:
+        """Take the live binds down for the duration of a capture.
+
+        Without this the recorder is blind to the very shortcuts a user is most
+        likely to re-press: RegisterHotKey eats the combo at OS level, so the
+        keystroke never reaches this window, and the bound ACTION runs instead.
+        For refine that action synthesises Ctrl+C to copy the selection, and
+        that Ctrl+C is what the recorder captured — pressing ALT+R recorded
+        CTRL+C."""
+        if self._hotkeys_suspended or not self._on_hotkey_capture:
+            return
+        self._hotkeys_suspended = True
+        try:
+            self._on_hotkey_capture(True)
+        except Exception as e:
+            print(f"[AppWindow] Could not suspend hotkeys for capture: {e}")
+
+    def _resume_global_hotkeys(self) -> None:
+        if not self._hotkeys_suspended:
+            return
+        self._hotkeys_suspended = False
+        if not self._on_hotkey_capture:
+            return
+        try:
+            self._on_hotkey_capture(False)
+        except Exception as e:
+            print(f"[AppWindow] Could not resume hotkeys after capture: {e}")
+
+    def _cancel_hotkey_capture(self) -> None:
+        """Abandon any in-flight capture. Leaving the tab or hiding the window
+        must never strand the app with its hotkeys suspended — that is the whole
+        app dead until restart."""
+        try:
+            if self._recording_hotkey:
+                self._stop_hotkey_recording(cancelled=True)
+            if self._recording_ptt_hotkey:
+                self._stop_ptt_recording(cancelled=True)
+            if self._recording_refine_hotkey:
+                self._stop_refine_hotkey_recording(cancelled=True)
+        except tk.TclError:
+            pass
+        # Belt and braces: whatever happened above, the binds come back.
+        self._resume_global_hotkeys()
+
+    def _combo_from_event(self, event) -> Optional[str]:
+        """The pressed combination, or None for a modifier-only press."""
+        keysym = event.keysym.lower()
+        if keysym in ("control_l", "control_r", "alt_l", "alt_r",
+                      "shift_l", "shift_r", "super_l", "super_r",
+                      "meta_l", "meta_r"):
+            return None
+        # Union of what Tk reports and what is physically down — Tk under-reports
+        # (Ctrl+Alt), and a modifier can only be missed, never invented.
+        held = set(self._physical_modifiers())
+        state = getattr(event, "state", 0) or 0
+        if state & self._TK_CTRL:  held.add("ctrl")
+        if state & self._TK_ALT:   held.add("alt")
+        if state & self._TK_SHIFT: held.add("shift")
+        mods = [m for m, _vks in self._MODIFIER_PROBE if m in held]
+
+        # The VK code is authoritative for the base key; the keysym varies with
+        # the modifiers held ("R" under Alt, "r" under Shift) and names some keys
+        # in a way the registrar cannot resolve.
+        base = self._VK_KEY_NAMES.get(getattr(event, "keycode", 0) or 0)
+        if not base:
+            base = self._norm_keysym(keysym)
+        if base in ("shift", "control", "alt", "win", "??"):
+            return None
+        return "+".join(mods + [base]) if mods else base
+
+    def _combo_conflict(self, combo: str, slot: str) -> str:
+        """Why this combo can't be used for ``slot``, or "" if it's fine.
+
+        Two rules, both of which shipped as real breakage: a bare character key
+        fires every time you type it, and two binds on one combo means only one
+        of them can ever register."""
+        if not combo:
+            return ""
+        c = combo.lower()
+        base = c.split("+")[-1]
+        if "+" not in c and base not in self._STANDALONE_KEYS:
+            return ("Needs Ctrl, Alt or Shift — a plain key would fire "
+                    "while you type.")
+        others = {
+            "main":   [("push-to-talk", self._ptt_hotkey),
+                       ("refine", self._refine_hotkey)],
+            "ptt":    [("hands-free", self._hotkey),
+                       ("refine", self._refine_hotkey)],
+            "refine": [("hands-free", self._hotkey),
+                       ("push-to-talk", self._ptt_hotkey)],
+        }.get(slot, [])
+        for name, existing in others:
+            if existing and c == (existing or "").lower():
+                return f"Already the {name} shortcut. Pick a different combo."
+        return ""
+
+    def _describe_bind_status(self, status) -> tuple:
+        """(message, colour) for what a save actually achieved."""
+        if not isinstance(status, dict):
+            return "", C["success"]
+        combo = (status.get("combo") or "").upper()
+        if not status.get("ok"):
+            return (f"{combo} could not be registered — another app is "
+                    "probably using it. Pick a different combo."), C["error"]
+        if not status.get("os_level"):
+            return (f"{combo} is shared with another app, so it may also do "
+                    "that app's action. Working, but a free combo is better."
+                    ), C["accent"]
+        return "", C["success"]
+
     def _on_hk_keypress(self, event) -> str:
         keysym = event.keysym.lower()
         if keysym == "escape":
             self._stop_hotkey_recording(cancelled=True)
             return "break"
-        if keysym in ("control_l", "control_r", "alt_l", "alt_r",
-                      "shift_l", "shift_r", "super_l", "super_r", "meta_l", "meta_r"):
+        combo = self._combo_from_event(event)
+        if combo is None:
             return "break"
-        mods = []
-        if event.state & self._TK_CTRL:  mods.append("ctrl")
-        if event.state & self._TK_ALT:   mods.append("alt")
-        if event.state & self._TK_SHIFT: mods.append("shift")
-        base = self._norm_keysym(keysym)
-        combo = "+".join(mods + [base]) if mods else base
         self._pending_hotkey = combo
         self._hotkey_display_lbl.configure(text=combo.upper())
         self._root.after(300, lambda: self._stop_hotkey_recording(cancelled=False))
@@ -3018,8 +3189,17 @@ class AppWindow:
         self._recording_hotkey = False
         self._root.unbind("<KeyPress>")
         self._root.unbind("<KeyRelease>")
+        self._resume_global_hotkeys()
         self._record_btn.configure(text="Change Shortcut",
                                    bg=C["surface"], fg=C["text"], cursor="hand2")
+
+        conflict = self._combo_conflict(self._pending_hotkey or "", "main")
+        if conflict and not cancelled:
+            self._pending_hotkey = None
+            self._hotkey_display_lbl.configure(text=self._hotkey or "—")
+            self._hotkey_record_msg.configure(text=conflict, fg=C["error"])
+            self._save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
+            return
 
         if cancelled or not self._pending_hotkey:
             self._hotkey_display_lbl.configure(text=self._hotkey or "—")
@@ -3056,17 +3236,44 @@ class AppWindow:
         # Let the confirmation flash, then settle back to the mode-aware help.
         def _restore_help():
             try:
-                if not self._recording_hotkey:
+                if not self._recording_hotkey and not self._hotkey_warned:
                     self._hotkey_record_msg.configure(
                         text=self._hotkey_help_text(), fg=C["subtext"])
             except tk.TclError:
                 pass
+        self._hotkey_warned = False
         if self._root:
             self._root.after(4000, _restore_help)
 
         threading.Thread(
-            target=self._on_hotkey_change, args=(new_hotkey,), daemon=True
+            target=self._on_hotkey_change,
+            args=(new_hotkey,),
+            kwargs={"report": lambda st: self._ui_after(
+                0, self._report_bind_result, "main", st)},
+            daemon=True,
         ).start()
+
+    def _report_bind_result(self, slot: str, status) -> None:
+        """Say what the save actually achieved, on the Tk thread.
+
+        A shortcut that saved but never registered used to look identical to one
+        that worked — the card said "Shortcut updated" either way and the key
+        simply did nothing."""
+        msg, colour = self._describe_bind_status(status)
+        if not msg:
+            return
+        label = {"main": getattr(self, "_hotkey_record_msg", None),
+                 "ptt": getattr(self, "_ptt_record_msg", None),
+                 "refine": getattr(self, "_refine_record_msg", None)}.get(slot)
+        if slot == "main":
+            self._hotkey_warned = True
+        elif slot == "ptt":
+            self._ptt_warned = True
+        try:
+            if label:
+                label.configure(text=msg, fg=colour)
+        except tk.TclError:
+            pass
 
     # ── Push-to-talk hotkey recorder ──────────────────────────────────────────
 
@@ -3083,6 +3290,7 @@ class AppWindow:
             self._stop_refine_hotkey_recording(cancelled=True)
         self._recording_ptt_hotkey = True
         self._pending_ptt_hotkey = None
+        self._suspend_global_hotkeys()
         self._ptt_record_btn.configure(text="Cancel", bg=C["error"], fg=C["text"])
         self._ptt_record_msg.configure(
             text="Press your new key or combination… (Escape to cancel)",
@@ -3098,15 +3306,9 @@ class AppWindow:
         if keysym == "escape":
             self._stop_ptt_recording(cancelled=True)
             return "break"
-        if keysym in ("control_l", "control_r", "alt_l", "alt_r",
-                      "shift_l", "shift_r", "super_l", "super_r", "meta_l", "meta_r"):
+        combo = self._combo_from_event(event)
+        if combo is None:
             return "break"
-        mods = []
-        if event.state & self._TK_CTRL:  mods.append("ctrl")
-        if event.state & self._TK_ALT:   mods.append("alt")
-        if event.state & self._TK_SHIFT: mods.append("shift")
-        base = self._norm_keysym(keysym)
-        combo = "+".join(mods + [base]) if mods else base
         self._pending_ptt_hotkey = combo
         self._ptt_display_lbl.configure(text=combo.upper())
         self._root.after(300, lambda: self._stop_ptt_recording(cancelled=False))
@@ -3119,9 +3321,20 @@ class AppWindow:
         self._recording_ptt_hotkey = False
         self._root.unbind("<KeyPress>")
         self._root.unbind("<KeyRelease>")
+        self._resume_global_hotkeys()
         self._ptt_record_btn.configure(
             text="Change Shortcut" if self._ptt_hotkey else "Set Shortcut",
             bg=C["surface"], fg=C["text"], cursor="hand2")
+
+        conflict = self._combo_conflict(self._pending_ptt_hotkey or "", "ptt")
+        if conflict and not cancelled:
+            self._pending_ptt_hotkey = None
+            self._ptt_display_lbl.configure(
+                text=self._ptt_hotkey or "Not set",
+                fg=C["accent"] if self._ptt_hotkey else C["subtext"])
+            self._ptt_record_msg.configure(text=conflict, fg=C["error"])
+            self._ptt_save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
+            return
 
         if cancelled or not self._pending_ptt_hotkey:
             self._ptt_display_lbl.configure(
@@ -3131,17 +3344,6 @@ class AppWindow:
                 text=self._ptt_help_text(), fg=C["subtext"])
             self._ptt_save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
         else:
-            if (self._pending_ptt_hotkey or "").upper() == (self._hotkey or "").upper():
-                # Same combo as the hands-free bind can't hold both meanings.
-                self._pending_ptt_hotkey = None
-                self._ptt_display_lbl.configure(
-                    text=self._ptt_hotkey or "Not set",
-                    fg=C["accent"] if self._ptt_hotkey else C["subtext"])
-                self._ptt_record_msg.configure(
-                    text="That's already the hands-free shortcut. "
-                         "Pick a different combo.", fg=C["error"])
-                self._ptt_save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
-                return
             self._ptt_display_lbl.configure(
                 text=self._pending_ptt_hotkey.upper(), fg=C["accent"])
             self._ptt_record_msg.configure(
@@ -3168,16 +3370,24 @@ class AppWindow:
 
         def _restore_help():
             try:
-                if not self._recording_ptt_hotkey:
+                if not self._recording_ptt_hotkey and not self._ptt_warned:
                     self._ptt_record_msg.configure(
                         text=self._ptt_help_text(), fg=C["subtext"])
             except tk.TclError:
                 pass
+        self._ptt_warned = False
         if self._root:
             self._root.after(4000, _restore_help)
 
         self._update_home_ptt_row()
-        if self._on_settings_change:
+        report = lambda st: self._ui_after(0, self._report_bind_result, "ptt", st)
+        if self._on_ptt_hotkey_change:
+            threading.Thread(
+                target=self._on_ptt_hotkey_change,
+                args=(new_hotkey.lower(),), kwargs={"report": report},
+                daemon=True,
+            ).start()
+        elif self._on_settings_change:
             threading.Thread(
                 target=self._on_settings_change,
                 args=("ptt_hotkey", new_hotkey.lower()), daemon=True,
@@ -3198,6 +3408,7 @@ class AppWindow:
             self._stop_ptt_recording(cancelled=True)
         self._recording_refine_hotkey = True
         self._pending_refine_hotkey = None
+        self._suspend_global_hotkeys()
         self._refine_record_btn.configure(text="Cancel", bg=C["error"], fg=C["text"])
         self._refine_record_msg.configure(
             text="Press your new key or combination… (Escape to cancel)",
@@ -3213,15 +3424,9 @@ class AppWindow:
         if keysym == "escape":
             self._stop_refine_hotkey_recording(cancelled=True)
             return "break"
-        if keysym in ("control_l", "control_r", "alt_l", "alt_r",
-                      "shift_l", "shift_r", "super_l", "super_r", "meta_l", "meta_r"):
+        combo = self._combo_from_event(event)
+        if combo is None:
             return "break"
-        mods = []
-        if event.state & self._TK_CTRL:  mods.append("ctrl")
-        if event.state & self._TK_ALT:   mods.append("alt")
-        if event.state & self._TK_SHIFT: mods.append("shift")
-        base = self._norm_keysym(keysym)
-        combo = "+".join(mods + [base]) if mods else base
         self._pending_refine_hotkey = combo
         self._refine_hotkey_display_lbl.configure(text=combo.upper())
         self._root.after(300, lambda: self._stop_refine_hotkey_recording(cancelled=False))
@@ -3234,8 +3439,18 @@ class AppWindow:
         self._recording_refine_hotkey = False
         self._root.unbind("<KeyPress>")
         self._root.unbind("<KeyRelease>")
+        self._resume_global_hotkeys()
         self._refine_record_btn.configure(
             text="Change Shortcut", bg=C["surface"], fg=C["text"], cursor="hand2")
+
+        conflict = self._combo_conflict(self._pending_refine_hotkey or "", "refine")
+        if conflict and not cancelled:
+            self._pending_refine_hotkey = None
+            self._refine_hotkey_display_lbl.configure(text=self._refine_hotkey or "—")
+            self._refine_record_msg.configure(text=conflict, fg=C["error"])
+            self._refine_save_btn.configure(
+                bg=C["border"], cursor="", fg=C["subtext"])
+            return
 
         if cancelled or not self._pending_refine_hotkey:
             self._refine_hotkey_display_lbl.configure(text=self._refine_hotkey or "—")
@@ -3271,7 +3486,11 @@ class AppWindow:
         )
         if self._on_refine_hotkey_change:
             threading.Thread(
-                target=self._on_refine_hotkey_change, args=(new_hotkey,), daemon=True
+                target=self._on_refine_hotkey_change,
+                args=(new_hotkey,),
+                kwargs={"report": lambda st: self._ui_after(
+                    0, self._report_bind_result, "refine", st)},
+                daemon=True,
             ).start()
 
     @staticmethod
@@ -5747,6 +5966,9 @@ class AppWindow:
             self._stop_history_playback(redraw=False)
         except Exception:
             pass
+        # Closing the window mid-capture would leave the hotkeys suspended with
+        # no visible recorder to cancel — the app would look completely dead.
+        self._cancel_hotkey_capture()
         self._root.withdraw()
 
     def _resize(self, w: int, h: int) -> None:

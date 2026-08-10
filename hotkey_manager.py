@@ -209,6 +209,10 @@ class HotkeyManager:
         self._base_key_suppress_hook = None
         self._ptt_suppress_hook = None
 
+        # Set while the dashboard is recording a NEW shortcut: the binds are
+        # fully unregistered so the keystroke reaches the capture window.
+        self._suspended = False
+
         self._parse_hotkey(self.hotkey)
         self._parse_ptt(self.ptt_hotkey)
 
@@ -651,9 +655,9 @@ class HotkeyManager:
     # Public API
     # ------------------------------------------------------------------
 
-    def register(self) -> None:
+    def register(self) -> bool:
         if self._registered:
-            return
+            return True
 
         self._kb_hooks = []
         registered = False
@@ -755,6 +759,58 @@ class HotkeyManager:
                         if self._ptt_base_key else "")
             print(f"[HotkeyManager] Registered '{self.hotkey}' "
                   f"(mode: {self.mode}){ptt_note}")
+        return registered
+
+    # ------------------------------------------------------------------
+    # What actually registered — the dashboard reports this back to the user
+    # ------------------------------------------------------------------
+
+    def bind_status(self, which: str = "main") -> dict:
+        """Whether a bind is live, and by which mechanism.
+
+        ``os_level`` False means RegisterHotKey lost the combo to another app
+        and we are riding a keyboard hook instead: the hotkey still fires, but
+        the keystroke ALSO reaches whatever has focus. The user has to be told,
+        because "it does nothing" and "it does something else too" look
+        identical from the outside."""
+        if which == "ptt":
+            combo = self.ptt_hotkey
+            if not combo:
+                return {"ok": True, "os_level": True, "combo": "",
+                        "detail": "disabled"}
+            live = self._registered and (
+                self._win32_ok_ptt or bool(self._ptt_base_key))
+            return {"ok": bool(live), "os_level": bool(self._win32_ok_ptt),
+                    "combo": combo,
+                    "detail": "" if self._win32_ok_ptt else "not os level"}
+        live = self._registered
+        os_level = bool(self._win32_ok) or self._suppress_caps or not self._is_combo
+        return {"ok": bool(live), "os_level": bool(os_level),
+                "combo": self.hotkey,
+                "detail": "" if os_level else "not os level"}
+
+    # ------------------------------------------------------------------
+    # Capture suspension — see AppWindow's shortcut recorder
+    # ------------------------------------------------------------------
+
+    def suspend(self) -> None:
+        """Drop every bind so the keystroke reaches the capture window.
+
+        A RegisterHotKey bind is swallowed by the OS before any app sees it, so
+        while the dashboard is listening for a new shortcut the CURRENT binds
+        must be gone entirely — a flag that merely ignores the callback still
+        leaves the key invisible to the recorder, and the recorder then either
+        captures nothing or captures whatever the fired action synthesised."""
+        if self._suspended:
+            return
+        self._suspended = True
+        self.unregister()
+
+    def resume(self) -> bool:
+        if not self._suspended:
+            return self._registered
+        self._suspended = False
+        return self.register()
 
     def _kb_combo_down(self, _event=None) -> None:
         """Keyboard-library fallback for combos: fire only when all modifiers
@@ -817,7 +873,7 @@ class HotkeyManager:
         self._registered = False
         print("[HotkeyManager] Unregistered")
 
-    def update_hotkey(self, new_hotkey: str) -> None:
+    def update_hotkey(self, new_hotkey: str) -> dict:
         """Swap to a new hotkey without losing callbacks."""
         self.unregister()
         self.hotkey = new_hotkey.lower()
@@ -825,17 +881,23 @@ class HotkeyManager:
         # A PTT combo identical to the new main combo silently disables itself
         # (and re-enables if the main moves away again) — re-parse.
         self._parse_ptt(self.ptt_hotkey)
+        # A shortcut saved while the recorder had the binds suspended must not
+        # stay dead until the recorder happens to resume.
+        self._suspended = False
         self.register()
         print(f"[HotkeyManager] Hotkey updated to '{self.hotkey}'")
+        return self.bind_status("main")
 
-    def update_ptt_hotkey(self, new_hotkey: str) -> None:
+    def update_ptt_hotkey(self, new_hotkey: str) -> dict:
         """Swap/set/clear the push-to-talk bind ('' disables it)."""
         self.unregister()
         self.ptt_hotkey = (new_hotkey or "").lower()
         self._parse_ptt(self.ptt_hotkey)
+        self._suspended = False
         self.register()
         print(f"[HotkeyManager] PTT hotkey updated to "
               f"'{self.ptt_hotkey or '(disabled)'}'")
+        return self.bind_status("ptt")
 
 
 # ---------------------------------------------------------------------------
@@ -870,6 +932,7 @@ class TriggerHotkeyManager:
         self._combo_base_down = False
         self._combo_base_pressed_at = 0.0
         self._combo_guard = threading.Lock()
+        self._suspended = False
         self._parse_hotkey(self.hotkey)
 
     def _parse_hotkey(self, hotkey: str) -> None:
@@ -981,9 +1044,9 @@ class TriggerHotkeyManager:
         self._hotkey_thread_id = 0
         self._win32_ok = False
 
-    def register(self) -> None:
+    def register(self) -> bool:
         if self._registered:
-            return
+            return True
         self._kb_hooks = []
         self._kb_hotkeys = []
         registered = False
@@ -1046,6 +1109,32 @@ class TriggerHotkeyManager:
             self._install_simultaneous_combo_observers()
         if registered:
             print(f"[TriggerHotkeyManager] Registered '{self.hotkey}'")
+        return registered
+
+    def bind_status(self) -> dict:
+        """Same contract as HotkeyManager.bind_status — see there."""
+        os_level = bool(self._win32_ok) or not self._is_combo
+        return {"ok": bool(self._registered), "os_level": os_level,
+                "combo": self.hotkey,
+                "detail": "" if os_level else "not os level"}
+
+    def suspend(self) -> None:
+        """Drop the bind while the dashboard records a new shortcut.
+
+        Without this, pressing the CURRENT refine combo during capture is eaten
+        by RegisterHotKey, fires a refine, and the refine's own synthetic Ctrl+C
+        (it copies the selection) lands in the capture window — which is how
+        "press Alt+R" recorded CTRL+C."""
+        if self._suspended:
+            return
+        self._suspended = True
+        self.unregister()
+
+    def resume(self) -> bool:
+        if not self._suspended:
+            return self._registered
+        self._suspended = False
+        return self.register()
 
     def unregister(self) -> None:
         if not self._registered:
@@ -1074,9 +1163,13 @@ class TriggerHotkeyManager:
         self._registered = False
         print("[TriggerHotkeyManager] Unregistered")
 
-    def update_hotkey(self, new_hotkey: str) -> None:
+    def update_hotkey(self, new_hotkey: str) -> dict:
         self.unregister()
         self.hotkey = new_hotkey.lower()
         self._parse_hotkey(self.hotkey)
+        # Saved while suspended for capture — register now, don't wait for a
+        # resume that has already been and gone.
+        self._suspended = False
         self.register()
         print(f"[TriggerHotkeyManager] Hotkey updated to '{self.hotkey}'")
+        return self.bind_status()

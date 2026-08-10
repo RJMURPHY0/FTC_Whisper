@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.52"
+APP_VERSION = "1.6.53"
 
 
 class _RECT(ctypes.Structure):
@@ -188,6 +188,8 @@ class WhisperFlowApp:
             on_quit=self._shutdown_from_window,
             on_hotkey_change=self._on_hotkey_change,
             on_refine_hotkey_change=self._on_refine_hotkey_change,
+            on_hotkey_capture=self._set_hotkey_capture,
+            on_ptt_hotkey_change=self._on_ptt_hotkey_change,
             on_settings_change=self._on_settings_change,
             db=self.db,
             stats=self.stats,
@@ -903,7 +905,37 @@ class WhisperFlowApp:
             "Microphone stopped responding — reconnected. Please dictate again.")
         return True
 
-    def _on_hotkey_change(self, new_hotkey: str) -> None:
+    def _set_hotkey_capture(self, active: bool) -> None:
+        """Suspend every global bind while the dashboard records a new shortcut.
+
+        RegisterHotKey swallows its combo before any window sees it, so with the
+        binds live the recorder can never observe the very keys the user is most
+        likely to press — their current shortcuts. Worse, the press FIRES the
+        action: the refine trigger copies the selection with a synthetic Ctrl+C,
+        which the focused capture window then recorded as the new shortcut (the
+        "pressed ALT+R, got CTRL+C" bug)."""
+        try:
+            if active:
+                if self.hotkey_manager.state == AppState.RECORDING:
+                    self._on_cancel_recording()
+                self.hotkey_manager.suspend()
+                self.refine_hotkey_manager.suspend()
+                print("[App] Global hotkeys suspended for shortcut capture.")
+            else:
+                self.hotkey_manager.resume()
+                self.refine_hotkey_manager.resume()
+                print("[App] Global hotkeys resumed.")
+        except Exception as e:
+            print(f"[App] Hotkey capture toggle failed: {e}")
+            # Never leave the app with no hotkeys because a suspend half-failed.
+            if not active:
+                try:
+                    self.hotkey_manager.register()
+                    self.refine_hotkey_manager.register()
+                except Exception:
+                    pass
+
+    def _on_hotkey_change(self, new_hotkey: str, report=None) -> None:
         """Called when the user saves a new hotkey in the dashboard."""
         print(f"[App] Updating hotkey to: {new_hotkey}")
         # Re-registering mid-recording kills the release-poll thread without
@@ -912,14 +944,38 @@ class WhisperFlowApp:
             self._on_cancel_recording()
         self.config.hotkey = new_hotkey
         self.config.save_async()
-        self.hotkey_manager.update_hotkey(new_hotkey)
+        status = self.hotkey_manager.update_hotkey(new_hotkey)
+        if report:
+            report(status)
 
-    def _on_refine_hotkey_change(self, new_hotkey: str) -> None:
+    def _on_refine_hotkey_change(self, new_hotkey: str, report=None) -> None:
         """Called when the user saves a new refine hotkey in the dashboard."""
         print(f"[App] Updating refine hotkey to: {new_hotkey}")
         self.config.refine_hotkey = new_hotkey
         self.config.save_async()
-        self.refine_hotkey_manager.update_hotkey(new_hotkey)
+        status = self.refine_hotkey_manager.update_hotkey(new_hotkey)
+        if report:
+            report(status)
+
+    def _on_ptt_hotkey_change(self, new_hotkey: str, report=None) -> None:
+        """Called when the user saves the push-to-talk bind in the dashboard.
+
+        Its own callback rather than the generic settings path, so the save can
+        report back whether the combo actually registered."""
+        print(f"[App] Updating push-to-talk hotkey to: {new_hotkey!r}")
+        self.config.ptt_hotkey = new_hotkey
+        self.config.save_async()
+        if not self._core_ready.is_set():
+            # Core still building — the value is saved and picked up on init.
+            if report:
+                report({"ok": True, "os_level": True, "combo": new_hotkey,
+                        "detail": "pending"})
+            return
+        if self.hotkey_manager.state == AppState.RECORDING:
+            self._on_cancel_recording()
+        status = self.hotkey_manager.update_ptt_hotkey(new_hotkey or "")
+        if report:
+            report(status)
 
     def _on_settings_change(self, key: str, value) -> None:
         """Called when the user saves a setting in the Settings panel."""
@@ -2381,6 +2437,52 @@ class WhisperFlowApp:
                 app_exe=_app.get("app_exe", ""),
             )
 
+    def _popup_hwnds(self) -> tuple:
+        """Every window handle the popup owns (tkinter's child AND the real
+        top-level wrapper), so a foreground check can't miss it."""
+        try:
+            return (int(self.popup._popup_hwnd or 0),
+                    int(self.popup._top_hwnd() or 0))
+        except Exception:
+            return (int(getattr(self.popup, "_popup_hwnd", 0) or 0),)
+
+    def _refine_anchor(self, hwnd: int) -> tuple:
+        """Where to put the refine popup: at the TEXT, not at the mouse.
+
+        The mouse is a bad anchor for refine. Selections are routinely made
+        with the keyboard, and on a multi-monitor desk the pointer is often
+        parked on a different screen entirely from the window being edited —
+        which is exactly how the refine panel kept opening on the wrong
+        monitor. Preference order:
+
+          1. the caret in the focused control (screen coords, the actual text),
+          2. the mouse, but only when it is genuinely over the target window,
+          3. the centre of the target window.
+
+        Falls back to the raw cursor position if there is no target window."""
+        u32 = ctypes.windll.user32
+        pt = ctypes.wintypes.POINT()
+        u32.GetCursorPos(ctypes.byref(pt))
+        mouse = (int(pt.x), int(pt.y))
+        if not hwnd:
+            return mouse
+        try:
+            _child, caret = _capture_focus_target(hwnd)
+            if caret and (caret[0] or caret[1]):
+                return caret
+        except Exception:
+            pass
+        try:
+            r = _RECT()
+            if u32.GetWindowRect(hwnd, ctypes.byref(r)):
+                if (r.left <= mouse[0] <= r.right
+                        and r.top <= mouse[1] <= r.bottom):
+                    return mouse
+                return ((r.left + r.right) // 2, (r.top + r.bottom) // 2)
+        except Exception:
+            pass
+        return mouse
+
     def _on_refine_selection(self) -> None:
         """Fires when the refine-selection hotkey is pressed.
 
@@ -2401,16 +2503,25 @@ class WhisperFlowApp:
         """
         try:
             if self.hotkey_manager.state != AppState.IDLE:
+                # Dictating (or still transcribing) — say so instead of doing
+                # nothing at all, which reads as a dead hotkey.
+                print("[App] Refine selection ignored — "
+                      f"state is {self.hotkey_manager.state.value}.")
+                try:
+                    self.popup.flash_status("Finish dictating first")
+                except Exception:
+                    pass
                 return
             self._last_dictation_ts = time.time()
 
             hwnd = ctypes.windll.user32.GetForegroundWindow()
-            if hwnd and hwnd == self.popup._popup_hwnd:
+            # Compare against the REAL top-level popup window: _popup_hwnd is
+            # tkinter's child handle, which GetForegroundWindow never returns,
+            # so this guard used to let the panel refine its own contents.
+            if hwnd and hwnd in self._popup_hwnds():
                 return
 
-            pt = ctypes.wintypes.POINT()
-            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-            cx, cy = pt.x, pt.y
+            cx, cy = self._refine_anchor(hwnd)
 
             self._focus_window(hwnd)
             time.sleep(0.05)

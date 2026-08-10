@@ -86,5 +86,77 @@ class ClampSourceTests(unittest.TestCase):
         self.assertNotIn("winfo_screenwidth", src)
 
 
+class RefineAnchorTests(unittest.TestCase):
+    """The refine panel opens where the TEXT is, not where the mouse is.
+
+    The popup picks its monitor from the coordinates it is handed, and refine
+    handed it the raw cursor position. Selections are routinely made with the
+    keyboard, and on a two-monitor desk the pointer is often parked on the other
+    screen — which is how the refine panel kept opening on the wrong monitor.
+    """
+
+    def setUp(self):
+        import app as app_mod
+        self.app_mod = app_mod
+        self.whisper = app_mod.WhisperFlowApp.__new__(app_mod.WhisperFlowApp)
+
+    def _anchor(self, hwnd, *, caret, mouse, rect):
+        import app as app_mod
+        real_capture = app_mod._capture_focus_target
+        real_rect = None
+
+        class _FakeU32:
+            @staticmethod
+            def GetCursorPos(ref):
+                ref._obj.x, ref._obj.y = mouse
+                return 1
+
+            @staticmethod
+            def GetWindowRect(_h, ref):
+                if rect is None:
+                    return 0
+                (ref._obj.left, ref._obj.top,
+                 ref._obj.right, ref._obj.bottom) = rect
+                return 1
+
+        class _FakeWindll:
+            user32 = _FakeU32
+
+        app_mod._capture_focus_target = lambda _h: (0, caret)
+        real_windll = app_mod.ctypes.windll
+        app_mod.ctypes.windll = _FakeWindll
+        try:
+            return app_mod.WhisperFlowApp._refine_anchor(self.whisper, hwnd)
+        finally:
+            app_mod._capture_focus_target = real_capture
+            app_mod.ctypes.windll = real_windll
+            del real_rect
+
+    def test_the_caret_wins(self):
+        # Text on the left monitor, mouse parked on the right one.
+        self.assertEqual(
+            (400, 300),
+            self._anchor(0x1234, caret=(400, 300), mouse=(2600, 700),
+                         rect=(0, 0, 1900, 1000)))
+
+    def test_the_mouse_is_used_when_it_is_over_the_target_window(self):
+        self.assertEqual(
+            (900, 500),
+            self._anchor(0x1234, caret=(0, 0), mouse=(900, 500),
+                         rect=(0, 0, 1900, 1000)))
+
+    def test_a_mouse_on_another_screen_falls_back_to_the_window(self):
+        # Without this the popup follows the pointer to the other display.
+        self.assertEqual(
+            (950, 500),
+            self._anchor(0x1234, caret=(0, 0), mouse=(2600, 700),
+                         rect=(0, 0, 1900, 1000)))
+
+    def test_no_target_window_still_returns_a_point(self):
+        self.assertEqual(
+            (2600, 700),
+            self._anchor(0, caret=(0, 0), mouse=(2600, 700), rect=None))
+
+
 if __name__ == "__main__":
     unittest.main()
