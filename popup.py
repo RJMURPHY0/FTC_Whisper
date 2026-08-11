@@ -131,14 +131,15 @@ _OFFSET_MAX           = 400
 # order; each end is a hard stop. "centre" is the shipped default.
 _ALIGN_ORDER = ("left", "centre", "right")
 
-# Status-pill padding = the gutter the position arrows live in. It is generous
-# so the arrows sit hard against the box border, well clear of the content. NB
-# tk place() coordinates on a PADDED frame are measured from the INNER (padded)
-# corner, so the arrows are placed at NEGATIVE offsets (-_STATUS_PAD_*) to reach
-# the real box edge; placing them at 0 would pin them to the content edge, which
-# is the whole overlap bug.
-_STATUS_PAD_X = 30
-_STATUS_PAD_Y = 24
+# Status-pill padding = the gutter the position arrows live in. Kept at the
+# ORIGINAL pill values (14/10) so the box is exactly the size it always was; the
+# arrows are small enough to sit in these gutters with a hair of gap to the
+# content. NB tk place() coordinates on a PADDED frame are measured from the
+# INNER (padded) corner, so the arrows are placed at NEGATIVE offsets
+# (-_STATUS_PAD_*) to reach the real box edge; placing them at 0 would pin them
+# to the content edge, which is the whole overlap bug.
+_STATUS_PAD_X = 14
+_STATUS_PAD_Y = 10
 
 # The expanded refinement panel dismisses itself after this long with no
 # interaction. Typing in the Ask box, a running AI call, a voice prompt, an
@@ -884,10 +885,10 @@ class FloatingPopup:
         # Each triangle's tip reaches 1px from the canvas edge, and every canvas
         # is pinned flush to its pill edge, so the arrows hug the very edges with
         # only a hair of gap — and the wide gutters keep them off the content.
-        self._pos_up    = _tri(18, 9, (3, 8, 15, 8, 9, 1))
-        self._pos_down  = _tri(18, 9, (3, 1, 15, 1, 9, 8))
-        self._pos_left  = _tri(9, 18, (8, 3, 8, 15, 1, 9))
-        self._pos_right = _tri(9, 18, (1, 3, 1, 15, 8, 9))
+        self._pos_up    = _tri(16, 6, (3, 5, 13, 5, 8, 1))
+        self._pos_down  = _tri(16, 6, (3, 1, 13, 1, 8, 5))
+        self._pos_left  = _tri(6, 16, (5, 3, 5, 13, 1, 8))
+        self._pos_right = _tri(6, 16, (1, 3, 1, 13, 5, 8))
         # Negative offsets cancel the frame padding so each arrow lands on the
         # real box border (tip ~1px off the edge), NOT the padded content edge.
         self._pos_up.place(relx=0.5, y=-_STATUS_PAD_Y, anchor="n")
