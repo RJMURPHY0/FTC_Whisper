@@ -39,14 +39,14 @@ from config import Config
 from spoken_commands import apply_spoken_commands
 from hotkey_manager import HotkeyManager, TriggerHotkeyManager, AppState
 from feedback import Feedback
-from popup import FloatingPopup
+from popup import FloatingPopup, _MONITORINFO
 from ai_refiner import AIRefiner
 from supabase_client import SupabaseLogger
 from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.63"
+APP_VERSION = "1.6.64"
 
 
 class _RECT(ctypes.Structure):
@@ -215,6 +215,9 @@ class WhisperFlowApp:
         self.popup.set_popup_height(getattr(self.config, "popup_height", "low"))
         self.popup.set_popup_offset(getattr(self.config, "popup_offset", 30))
         self.popup.set_popup_align(getattr(self.config, "popup_align", "centre"))
+        self.popup.set_pill_arrows(getattr(self.config, "show_pill_arrows", True))
+        self.popup.set_capture_hidden(
+            getattr(self.config, "hide_popup_in_screenshots", False))
         # The ▴▾ ◂ ▸ arrows on the pill save their nudge through the normal
         # settings path (setattr + async save + runtime apply), so the position
         # survives a restart.
@@ -1032,6 +1035,10 @@ class WhisperFlowApp:
             self.popup.set_popup_offset(value)
         elif key == "popup_align":
             self.popup.set_popup_align(value)
+        elif key == "show_pill_arrows":
+            self.popup.set_pill_arrows(value)
+        elif key == "hide_popup_in_screenshots":
+            self.popup.set_capture_hidden(value)
         elif key == "openrouter_model":
             self.ai_refiner.openrouter_model = (value or "").strip() or self.ai_refiner.openrouter_model
         elif key == "auto_punctuate":
@@ -2461,39 +2468,83 @@ class WhisperFlowApp:
             return (int(getattr(self.popup, "_popup_hwnd", 0) or 0),)
 
     def _popup_anchor(self, hwnd: int) -> tuple:
-        """Where the popup opens: on the MONITOR of the window receiving the
-        text — the foreground window captured at the hotkey press.
+        """Where the popup opens: a point on the monitor the user is actually
+        working on, derived from the window receiving the text.
 
-        This is the third anchor policy, and the reasoning matters because the
-        first two both shipped and both failed on a multi-monitor desk:
+        Priority order, and every step is there because a simpler policy
+        shipped and failed on a multi-monitor desk:
 
-        1. The CARET (v1.6.53). Chromium/Electron apps expose no caret via
-           GetGUIThreadInfo, so the anchor silently fell back towards (0,0)
-           and the popup landed on the primary display.
-        2. The raw MOUSE position. Dictation and refine are keyboard flows;
-           the mouse is routinely parked on a different screen from the app
-           being typed into, and the popup followed the mouse there.
+        1. The MOUSE, when it sits INSIDE the target window's rect. The user
+           just clicked or selected there, and for a window STRADDLING two
+           monitors it is the only signal that says which side they are on.
+           (Screens sharing an edge make this real: a wide restored window
+           hanging across the boundary puts every window-derived point on
+           whichever half the user is NOT looking at — the v1.6.63 window-
+           centre anchor still opened refine on the wrong screen this way.)
+        2. The target window's own monitor via MonitorFromWindow (largest
+           intersection — the canonical "which screen is this window on"),
+           returned as that monitor's work-area centre. This is the parked-
+           mouse case: dictation and refine are keyboard flows, so the mouse
+           is routinely on ANOTHER screen and must be ignored here (the
+           pre-v1.6.63 raw-mouse anchor failed exactly there).
+        3. The mouse wherever it is (no usable window at all).
 
-        The foreground window is, by definition, the app the dictation lands
-        in — "the screen the user is actually on". GetWindowRect works for
-        every app class (no accessibility involvement), so its centre is a
-        reliable point on the right monitor. The cursor remains only the
-        fallback for when there is no usable window rect."""
+        NEVER the caret: Chromium/Electron apps expose none via
+        GetGUIThreadInfo, so the v1.6.53 caret anchor silently fell back
+        towards (0,0) and opened on the primary display."""
         u32 = ctypes.windll.user32
+        cursor = None
+        try:
+            pt = ctypes.wintypes.POINT()
+            if u32.GetCursorPos(ctypes.byref(pt)):
+                cursor = (int(pt.x), int(pt.y))
+        except Exception:
+            cursor = None
+        rect = None
         try:
             if hwnd and not u32.IsIconic(hwnd):
                 r = ctypes.wintypes.RECT()
                 if u32.GetWindowRect(hwnd, ctypes.byref(r)) \
                         and r.right > r.left and r.bottom > r.top:
-                    return ((r.left + r.right) // 2, (r.top + r.bottom) // 2)
+                    rect = (int(r.left), int(r.top),
+                            int(r.right), int(r.bottom))
+        except Exception:
+            rect = None
+        anchor, why = cursor or (0, 0), "cursor"
+        if rect is not None:
+            if cursor and rect[0] <= cursor[0] < rect[2] \
+                    and rect[1] <= cursor[1] < rect[3]:
+                anchor, why = cursor, "cursor-in-window"
+            else:
+                anchor, why = self._window_monitor_centre(hwnd, rect)
+        try:
+            from popup import pos_log
+            pos_log(f"anchor hwnd={hwnd:#x} rect={rect} cursor={cursor} "
+                    f"-> {anchor} via={why}")
         except Exception:
             pass
-        pt = ctypes.wintypes.POINT()
+        return anchor
+
+    @staticmethod
+    def _window_monitor_centre(hwnd: int, rect: tuple) -> tuple:
+        """Work-area centre of the monitor MonitorFromWindow assigns to hwnd
+        (largest intersection). Falls back to the window's own centre, which
+        resolves to the same monitor whenever the window doesn't straddle."""
         try:
-            u32.GetCursorPos(ctypes.byref(pt))
-            return (int(pt.x), int(pt.y))
+            u32 = ctypes.windll.user32
+            MONITOR_DEFAULTTONEAREST = 2
+            hmon = u32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+            if hmon:
+                mi = _MONITORINFO()
+                mi.cbSize = ctypes.sizeof(_MONITORINFO)
+                if u32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+                    wa = mi.rcWork
+                    return (((wa.left + wa.right) // 2,
+                             (wa.top + wa.bottom) // 2), "window-monitor")
         except Exception:
-            return (0, 0)
+            pass
+        return (((rect[0] + rect[2]) // 2,
+                 (rect[1] + rect[3]) // 2), "window-centre")
 
     def _on_refine_selection(self) -> None:
         """Fires when the refine-selection hotkey is pressed.

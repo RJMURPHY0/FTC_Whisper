@@ -273,6 +273,14 @@ def icon_glyph(master, name: str, size: int = 20, color: str = "#f39200",
             L((16, 6), (18, 8))                  # cap (top-right)
             d.polygon([(6.5 * u, 15.5 * u), (8.5 * u, 17.5 * u),
                        (4.5 * u, 19.5 * u)], fill=color)   # nib
+        elif name == "camera":
+            # camera body + viewfinder bump + lens — screenshots
+            d.rounded_rectangle([4 * u, 8 * u, 20 * u, 18.5 * u],
+                                radius=2 * u, outline=color, width=lw)
+            L((9, 8), (10, 5.5), (14, 5.5), (15, 8))
+            r = 3.0 * u
+            d.ellipse([12 * u - r, 13.2 * u - r, 12 * u + r, 13.2 * u + r],
+                      outline=color, width=lw)
         else:
             raise ValueError(f"unknown glyph {name!r}")
 

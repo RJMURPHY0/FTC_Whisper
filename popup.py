@@ -10,10 +10,32 @@ Three modes:
 import ctypes
 import ctypes.wintypes
 import math
+import os
 import threading
 import time
 import tkinter as tk
 from typing import Callable, Optional
+
+
+_POS_LOG_PATH = os.path.join(os.environ.get("TEMP", "."), "ftc_pos_debug.log")
+
+
+def pos_log(msg: str) -> None:
+    """One-line placement log for the multi-monitor saga. Every anchor
+    decision and every popup placement writes its inputs and its result, so
+    the next 'it opened on the wrong screen' report comes with the exact
+    numbers instead of a guess (ask for %TEMP%\\ftc_pos_debug.log). Capped:
+    the file is dropped once it passes ~256KB. Never raises."""
+    try:
+        try:
+            if os.path.getsize(_POS_LOG_PATH) > 262144:
+                os.remove(_POS_LOG_PATH)
+        except OSError:
+            pass
+        with open(_POS_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+    except Exception:
+        pass
 
 
 # ctypes structs
@@ -279,6 +301,8 @@ class FloatingPopup:
         self._popup_height: str = "low"  # "low" | "medium" | "high" — vertical placement of the fixed popup
         self._popup_offset: int = _POPUP_OFFSET_DEFAULT  # px lifted above the popup_height baseline (set live by the pill's ▴▾ arrows)
         self._popup_align: str = "centre"  # "left" | "centre" | "right" — horizontal placement (set live by the pill's ◂ ▸ arrows)
+        self._arrows_visible: bool = True   # show the ▴▾◂▸ nudge arrows on the pill (config.show_pill_arrows)
+        self._capture_hidden: bool = False  # exclude the popup from screenshots/recordings (config.hide_popup_in_screenshots)
         self._settings_saver = None  # fn(key, value) — persists a nudged position back to config
         self._upgrading: bool = False
         self._upgrade_result: Optional[str] = None
@@ -330,6 +354,55 @@ class FloatingPopup:
         """Horizontal placement of the fixed popup: "left" | "centre" | "right".
         Applies to the next _reposition."""
         self._popup_align = value if value in _ALIGN_ORDER else "centre"
+
+    def set_pill_arrows(self, value) -> None:
+        """Show or hide the ▴▾◂▸ nudge arrows on the recording pill. Safe to
+        call before initialize() — the flag is applied when the arrows are
+        built, and live afterwards. Hiding never loses the saved position."""
+        self._arrows_visible = bool(value)
+        self._apply_arrow_visibility()
+
+    def _apply_arrow_visibility(self) -> None:
+        """place/place_forget the four arrow canvases per the flag. The place
+        specs are captured at build time, so a re-show restores the exact
+        negative-offset placement that puts each arrow on the box border."""
+        specs = getattr(self, "_arrow_place_specs", None)
+        if not specs:
+            return          # arrows not built yet (pre-initialize)
+        for canvas, spec in specs:
+            try:
+                if self._arrows_visible:
+                    canvas.place(**spec)
+                else:
+                    canvas.place_forget()
+            except tk.TclError:
+                pass
+
+    def set_capture_hidden(self, value) -> None:
+        """Exclude (or re-include) the popup in screenshots and screen
+        recordings. Safe to call before initialize() — applied on creation."""
+        self._capture_hidden = bool(value)
+        self._apply_capture_affinity()
+
+    def _apply_capture_affinity(self) -> None:
+        """SetWindowDisplayAffinity on the REAL top-level (winfo_id() is the
+        CHILD window — the same gotcha _top_hwnd exists for; the affinity call
+        on the child succeeds but captures still show the popup). Excluded
+        windows stay fully visible on the user's screen but vanish from
+        screenshots, Snipping Tool and recorders. Needs Win10 2004+; on older
+        builds the call fails and the popup simply stays capturable."""
+        if self.root is None:
+            return
+        try:
+            WDA_NONE, WDA_EXCLUDEFROMCAPTURE = 0x0, 0x11
+            hw = self._top_hwnd()
+            if hw:
+                ctypes.windll.user32.SetWindowDisplayAffinity(
+                    hw,
+                    WDA_EXCLUDEFROMCAPTURE if self._capture_hidden
+                    else WDA_NONE)
+        except Exception:
+            pass
 
     def set_settings_saver(self, fn) -> None:
         """Register a callback fn(key, value) that persists a nudged position
@@ -512,6 +585,9 @@ class FloatingPopup:
 
         self.root.update_idletasks()
         self._popup_hwnd = self.root.winfo_id()
+        # Screenshot exclusion may have been requested before the window
+        # existed (config is pushed at startup) — apply it now that it does.
+        self._apply_capture_affinity()
 
         # WS_EX_NOACTIVATE: popup can never steal focus from the foreground app.
         # This is the critical fix for ChatGPT / browser inputs — without it the
@@ -893,10 +969,17 @@ class FloatingPopup:
         self._pos_right = _tri(6, 16, (1, 3, 1, 13, 5, 8))
         # Negative offsets cancel the frame padding so each arrow lands on the
         # real box border (tip ~1px off the edge), NOT the padded content edge.
-        self._pos_up.place(relx=0.5, y=-_STATUS_PAD_Y, anchor="n")
-        self._pos_down.place(relx=0.5, rely=1.0, y=_STATUS_PAD_Y, anchor="s")
-        self._pos_left.place(x=-_STATUS_PAD_X, rely=0.5, anchor="w")
-        self._pos_right.place(relx=1.0, x=_STATUS_PAD_X, rely=0.5, anchor="e")
+        # Specs are kept so the show_pill_arrows toggle can re-place them
+        # exactly after a hide (place_forget drops the geometry).
+        self._arrow_place_specs = (
+            (self._pos_up,    dict(relx=0.5, y=-_STATUS_PAD_Y, anchor="n")),
+            (self._pos_down,  dict(relx=0.5, rely=1.0, y=_STATUS_PAD_Y,
+                                   anchor="s")),
+            (self._pos_left,  dict(x=-_STATUS_PAD_X, rely=0.5, anchor="w")),
+            (self._pos_right, dict(relx=1.0, x=_STATUS_PAD_X, rely=0.5,
+                                   anchor="e")),
+        )
+        self._apply_arrow_visibility()
         for _c, _fn in ((self._pos_up,    lambda: self._nudge_position(+1)),
                         (self._pos_down,  lambda: self._nudge_position(-1)),
                         (self._pos_left,  lambda: self._nudge_h_position(-1)),
@@ -2085,6 +2168,10 @@ class FloatingPopup:
         # the fixed popup off an edge (the cut-off refine panel).
         x = max(left, min(x, right - w))
         y = max(top, min(y, bottom - h))
+
+        pos_log(f"place mode={self._mode} in=({cx},{cy}) "
+                f"hwnd={self._target_hwnd:#x} "
+                f"wa=({left_p},{top_p},{right_p},{bottom_p}) xy=({x},{y})")
 
         # Size counts as a move: the caption bar grows downward while the pill is
         # bottom-anchored, so a taller pill at the same y is still a blit.

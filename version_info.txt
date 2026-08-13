@@ -1,7 +1,7 @@
 ﻿VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 6, 63, 0),
-    prodvers=(1, 6, 63, 0),
+    filevers=(1, 6, 64, 0),
+    prodvers=(1, 6, 64, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -15,12 +15,12 @@
         '040904B0',
         [StringStruct('CompanyName', 'FTC Safety Solutions'),
          StringStruct('FileDescription', 'FTC Whisper - Voice to Text'),
-         StringStruct('FileVersion', '1.6.63.0'),
+         StringStruct('FileVersion', '1.6.64.0'),
          StringStruct('InternalName', 'FTCWhisper'),
          StringStruct('LegalCopyright', 'Copyright 2025 FTC Safety Solutions. All rights reserved.'),
          StringStruct('OriginalFilename', 'FTC Whisper.exe'),
          StringStruct('ProductName', 'FTC Whisper'),
-         StringStruct('ProductVersion', '1.6.63.0'),
+         StringStruct('ProductVersion', '1.6.64.0'),
          # Reputation heuristics score sparse/blank version metadata. These
          # cost nothing and make the binary look like the real product it is.
          StringStruct('Comments', 'Push-to-talk speech to text for Windows. Transcription runs locally on this PC.'),

@@ -87,17 +87,16 @@ class ClampSourceTests(unittest.TestCase):
 
 
 class PopupAnchorTests(unittest.TestCase):
-    """The pill and the refine panel open on the monitor of the WINDOW the
-    text goes into — the foreground window at the hotkey press.
+    """The pill and the refine panel open on the monitor the user is working
+    on, derived from the WINDOW receiving the text.
 
-    Third (and final) anchor policy; the first two both shipped and both put
-    the popup on the wrong screen. The caret is unreadable in Chromium and
-    Electron apps (fell back towards (0,0), i.e. the primary display); the raw
-    mouse is routinely parked on a different monitor from the app being typed
-    into, because dictation and refine are keyboard flows. The foreground
-    window IS the app receiving the dictation, so its centre is right by
-    definition; the cursor is only the fallback when the window rect is
-    unusable.
+    Priority (each step earned by a shipped failure): the mouse when it is
+    INSIDE the target window (the only signal that disambiguates a window
+    straddling two monitors — the v1.6.63 window-centre anchor tie-broke
+    those wrong); otherwise the window's own monitor via MonitorFromWindow
+    (the parked-mouse case the raw-cursor anchor failed); otherwise the
+    cursor. Never the caret (unreadable in Chromium/Electron — the v1.6.53
+    failure).
     """
 
     def setUp(self):
@@ -105,7 +104,7 @@ class PopupAnchorTests(unittest.TestCase):
         self.app_mod = app_mod
         self.whisper = app_mod.WhisperFlowApp.__new__(app_mod.WhisperFlowApp)
 
-    def _anchor(self, hwnd, *, mouse, rect=None, iconic=False):
+    def _anchor(self, hwnd, *, mouse, rect=None, iconic=False, work=None):
         import app as app_mod
 
         class _FakeU32:
@@ -126,6 +125,19 @@ class PopupAnchorTests(unittest.TestCase):
                  ref._obj.right, ref._obj.bottom) = rect
                 return 1
 
+            @staticmethod
+            def MonitorFromWindow(_h, _flag):
+                return 42 if work is not None else 0
+
+            @staticmethod
+            def GetMonitorInfoW(_hm, ref):
+                if work is None:
+                    return 0
+                mi = ref._obj
+                (mi.rcWork.left, mi.rcWork.top,
+                 mi.rcWork.right, mi.rcWork.bottom) = work
+                return 1
+
         class _FakeWindll:
             user32 = _FakeU32
 
@@ -143,18 +155,49 @@ class PopupAnchorTests(unittest.TestCase):
             app_mod._capture_focus_target = real_capture
             app_mod.ctypes.windll = real_windll
 
-    def test_the_window_wins_over_a_mouse_parked_elsewhere(self):
-        # The exact reported bug: typing into an app on the right monitor,
-        # mouse parked on another screen. The pill follows the window.
+    def test_the_window_monitor_wins_over_a_mouse_parked_elsewhere(self):
+        # The original reported bug: typing into an app on the right monitor,
+        # mouse parked on another screen. The pill follows the window's
+        # monitor (work-area centre).
+        self.assertEqual(
+            (2880, 516),
+            self._anchor(0x1234, mouse=(-800, 400),
+                         rect=(2000, 200, 3200, 1200),
+                         work=(1920, 0, 3840, 1032)))
+
+    def test_the_mouse_wins_inside_a_straddling_window(self):
+        # The second reported bug: a wide window hanging across the shared
+        # edge of two monitors. Every window-derived point can land on the
+        # half the user is NOT working in — but the mouse sits on the text
+        # they just selected, INSIDE the window, and that says which side.
         self.assertEqual(
             (2600, 700),
-            self._anchor(0x1234, mouse=(-800, 400), rect=(2000, 200, 3200, 1200)))
+            self._anchor(0x1234, mouse=(2600, 700),
+                         rect=(500, 100, 3300, 1000),
+                         work=(0, 0, 1920, 1032)))
+
+    def test_the_mouse_inside_the_window_short_circuits(self):
+        # Mouse inside a non-straddling window: same monitor either way,
+        # and the mouse is simply used as the point.
+        self.assertEqual(
+            (2500, 600),
+            self._anchor(0x1234, mouse=(2500, 600),
+                         rect=(2000, 200, 3200, 1200),
+                         work=(1920, 0, 3840, 1032)))
 
     def test_a_window_on_a_negative_coordinate_monitor_wins_too(self):
         # Virtual-screen coords go negative on a left/upper display.
         self.assertEqual(
-            (-1400, -500),
-            self._anchor(0x1234, mouse=(900, 500), rect=(-2000, -900, -800, -100)))
+            (-1280, -540),
+            self._anchor(0x1234, mouse=(900, 500),
+                         rect=(-2000, -900, -800, -100),
+                         work=(-2560, -1080, 0, 0)))
+
+    def test_monitor_info_failure_falls_back_to_the_window_centre(self):
+        self.assertEqual(
+            (2600, 700),
+            self._anchor(0x1234, mouse=(-800, 400),
+                         rect=(2000, 200, 3200, 1200), work=None))
 
     def test_no_target_window_falls_back_to_the_cursor(self):
         self.assertEqual((900, 500), self._anchor(0, mouse=(900, 500)))

@@ -87,6 +87,8 @@ class Config:
     popup_height: str = "low"  # Vertical position of the popup: "low" (near the taskbar, default — out of the way of chatbot input boxes), "medium" (mid-screen), or "high" (near the top, above a chatbot window)
     popup_offset: int = 30  # Fine-nudge (px) that lifts the fixed popup ABOVE its popup_height baseline, so the pill clears the taskbar by default; the ▴▾ arrows on the recording pill adjust it live and it sticks. 0 = hug the baseline (old behaviour)
     popup_align: str = "centre"  # Horizontal placement of the fixed popup: "left" | "centre" (default) | "right"; the ◂ ▸ arrows on the recording pill move it and it sticks. This shipped default is the first-install position for every user
+    show_pill_arrows: bool = True  # Show the ▴▾◂▸ nudge arrows on the recording pill; off = clean pill (the saved position still applies)
+    hide_popup_in_screenshots: bool = False  # Exclude the pill/badge/refine panel from screenshots and screen recordings (SetWindowDisplayAffinity WDA_EXCLUDEFROMCAPTURE; needs Win10 2004+, silently stays visible on older builds)
     impact_range: str = "today"  # Home footer words-dictated range: today|week|month|year|all
     trim_silence: bool = True  # Drop fully-silent committed chunks (no words transcribed) from the stored clip to save local disk
     trailing_space: bool = False  # Append a space after each injection (useful when dictating mid-sentence)

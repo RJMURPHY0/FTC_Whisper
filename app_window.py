@@ -5721,6 +5721,17 @@ class AppWindow:
                     "popup_height", _HEIGHT_FROM_LABEL.get(_height_var.get(), "low"))
         _height_var.trace_add("write", _on_height_change)
 
+        _toggle_card("show_pill_arrows", "Position Arrows on the Pill",
+                     "Show the small nudge arrows on the recording pill for "
+                     "moving it. Off gives a clean pill; the saved position "
+                     "still applies",
+                     True, icon="wand")
+        _toggle_card("hide_popup_in_screenshots", "Hide Popup in Screenshots",
+                     "Leave the recording pill and refine panel out of "
+                     "screenshots and screen recordings (you still see them "
+                     "on screen)",
+                     False, icon="camera")
+
         _toggle_card("copy_to_clipboard", "Copy to Clipboard",
                      "Also leave every dictation on the clipboard, so you can "
                      "paste it with Ctrl+V if the text landed in the wrong place",
