@@ -323,13 +323,11 @@ class StatsStore:
         with self._lock:
             u = self._user_blob()
             days = dict(u["days"])
-            carry_saved = float(u.get("carry_saved_min", 0.0))
             carry_words = int(u.get("carry_words", 0))
 
         today = _today()
         today_words = int(days.get(today.isoformat(), {}).get("w", 0))
 
-        dictation_min = carry_saved
         voiced_s = 0.0
         voiced_w = 0
         total_words = carry_words
@@ -340,7 +338,6 @@ class StatsStore:
         refine_voice_n = 0
         refine_min = 0.0
         for rec in days.values():
-            dictation_min += _saved_minutes(int(rec.get("w", 0)), float(rec.get("s", 0.0)))
             voiced_s += float(rec.get("v", 0.0))
             voiced_w += int(rec.get("vw", 0))
             total_words += int(rec.get("w", 0))
@@ -353,14 +350,32 @@ class StatsStore:
                 refine_voice_n += int(rec.get("rv", 0))
                 refine_min += _refine_saved_minutes(
                     n, float(rec.get("rs", 0.0)), int(rec.get("rp", 0)))
-        saved_min = dictation_min + refine_min
 
         # Real dictation speed: words per minute of actual speech. Shown only
         # once there's enough data to be a measurement rather than noise;
-        # before that the card keeps the nominal 160 default.
+        # before that the maths uses the nominal 160 default.
         avg_wpm = 0
         if voiced_w >= 50 and voiced_s >= 30.0:
             avg_wpm = int(round(voiced_w / (voiced_s / 60.0)))
+
+        # Time saved is a like-for-like speech-vs-typing comparison: both are
+        # pure production rates with thinking pauses left OUT. The typing figure
+        # (40 wpm) is a sustained rate that already excludes thinking, so
+        # charging dictation its full wall-clock — every pause counted against
+        # it — would be an asymmetric, pessimistic comparison. Dictation time is
+        # therefore modelled from the user's own measured speech rate (nominal
+        # 160 until it unlocks), applied to every word. This yields ONE multiple,
+        # effective_wpm / TYPING_WPM, that holds across every surface: the speed
+        # panel, the headline, and the time panel's "time you spent" all agree,
+        # with no 5.6×-vs-3.4× reconciliation. Floored at zero so a rate slower
+        # than typing (or a mic left running) never shows negative savings.
+        effective_wpm = avg_wpm if avg_wpm > 0 else DICTATION_WPM
+        dictation_time_min = (total_words / float(effective_wpm)
+                              if total_words > 0 else 0.0)
+        typing_all_min = (total_words / float(TYPING_WPM)
+                          if total_words > 0 else 0.0)
+        dictation_min = max(0.0, typing_all_min - dictation_time_min)
+        saved_min = dictation_min + refine_min
 
         # Streak: weekend-aware. Weekdays are required; Saturday/Sunday bridge
         # the streak (missing one never breaks it, using one counts). Today —
@@ -388,6 +403,8 @@ class StatsStore:
             "words": _words_by_range(days, carry_words, today),
             # ── breakdown data (drives the click-through panels) ──────────
             "dictation_saved_minutes": dictation_min,
+            "dictation_time_minutes": dictation_time_min,
+            "effective_wpm": effective_wpm,
             "refine_saved_minutes": refine_min,
             "refine_count": refine_n,
             "refine_seconds": refine_s,

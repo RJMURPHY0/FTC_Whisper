@@ -218,8 +218,16 @@ class TimePanelTests(unittest.TestCase):
         from app_window import C
         import stats as stats_mod
         base = dict(stats_mod.StatsStore().snapshot())    # every key the cards read
-        base.update({"dictation_saved_minutes": 462.0, "refine_saved_minutes": 0.35,
-                     "saved_minutes": 462.35, "refine_count": 1,
+        # A self-consistent speech-rate snapshot: 27,326 words, nominal 160 wpm,
+        # so speaking time = 27326/160 and the saving = typing (27326/40) minus
+        # that. Time-using-it and Dictation-saved therefore sum to Typing-by-hand
+        # by construction, exactly as production draws them.
+        _spoke = 27326 / 160.0
+        _dict_saved = 27326 / 40.0 - _spoke
+        base.update({"dictation_saved_minutes": _dict_saved,
+                     "dictation_time_minutes": _spoke, "effective_wpm": 160,
+                     "refine_saved_minutes": 0.35,
+                     "saved_minutes": _dict_saved + 0.35, "refine_count": 1,
                      "refine_seconds": 6.0, "refine_prompt_words": 8,
                      "total_words": 27326, "total_audio_seconds": 11880.0})
         base.update(snap)
@@ -242,18 +250,20 @@ class TimePanelTests(unittest.TestCase):
         return [cv.itemcget(i, "text") for i in cv.find_all()
                 if cv.type(i) == "text"]
 
-    def test_it_reports_the_time_actually_spent_using_the_app(self):
+    def test_it_reports_the_time_you_spent_speaking(self):
         w, cv = self._panel()
         texts = self._texts(cv)
         self.assertIn("Time using it", texts)
-        # 11880s of recording + 6s in the refine panel = 3.3 hrs, measured.
-        self.assertIn(w._fmt_span(11886.0 / 60.0), texts)
+        # Speaking time at your rate (27326/160 min) + 6s in the refine panel,
+        # the like-for-like cost the saving is netted against — not wall-clock.
+        self.assertIn(w._fmt_span(27326 / 160.0 + 6.0 / 60.0), texts)
 
     def test_the_spent_row_is_not_added_into_the_headline(self):
         # The saving already has the speaking and refining time netted off, so
         # a panel that summed all three rows would be double counting.
         w, cv = self._panel()
-        self.assertIn(w._fmt_span(462.0 + 0.35), self._texts(cv))
+        self.assertIn(w._fmt_span((27326 / 40.0 - 27326 / 160.0) + 0.35),
+                      self._texts(cv))
 
     def test_the_typing_by_hand_row_is_shown(self):
         # The fourth row surfaces the counterfactual: what typing it all would
@@ -302,6 +312,7 @@ class TimePanelTests(unittest.TestCase):
         w, cv = self._panel(dictation_saved_minutes=0.0, refine_saved_minutes=0.0,
                             refine_count=0, refine_seconds=0.0,
                             refine_prompt_words=0, total_words=0,
+                            dictation_time_minutes=0.0, effective_wpm=160,
                             total_audio_seconds=0.0)
         texts = self._texts(cv)
         for label in ("Dictation", "AI refine", "Time using it", "Typing by hand"):
@@ -309,13 +320,15 @@ class TimePanelTests(unittest.TestCase):
 
 
 class SpeedPanelTests(unittest.TestCase):
-    """The speed panel's figure rides the header (matching the time panel),
-    the speech-rate multiple takes the old figure line, and the footnote
-    reconciles with the time panel: the wpm excludes silence, the hours do
-    not, and both panels must quote the SAME end-to-end multiple."""
+    """The speed panel's figure rides the header (matching the time panel) and
+    the speech-rate multiple takes the old figure line. Under the speech-rate
+    model the speed multiple (wpm/40) and the end-to-end multiple (typing time
+    ÷ time spent) are the SAME number, so both panels quote one figure and the
+    footnote no longer has a 5.6×-vs-3.4× gap to reconcile."""
 
-    _SNAP = dict(avg_wpm=224, voiced_words=30335, voiced_seconds=8127.0,
-                 total_words=34369, total_audio_seconds=15120.0,
+    _SNAP = dict(avg_wpm=224, effective_wpm=224, voiced_words=30335,
+                 voiced_seconds=8127.0, total_words=34369,
+                 dictation_time_minutes=34369 / 224.0, total_audio_seconds=15120.0,
                  refine_count=4, refine_seconds=28.0, refine_prompt_words=32)
 
     @classmethod
@@ -362,27 +375,30 @@ class SpeedPanelTests(unittest.TestCase):
         # 224 / 40 = 5.6, quoted right above the rows it is computed from.
         self.assertIn("5.6× faster than typing", self._texts(cv))
 
-    def test_the_footnote_reconciles_with_the_time_panel(self):
-        # 34,369 words / 40 wpm = 859.2 min of typing; 15,120s + 28s used =
-        # 252.5 min → 3.4×. The same figure the time panel's typing row quotes.
+    def test_the_speech_and_end_to_end_multiples_now_agree(self):
+        # The whole point of the speech-rate model: 34,369 words / 40 wpm =
+        # 859.2 min typing; speaking time = 34369/224 = 153.4 min (+28s refine)
+        # → 5.6×, the SAME multiple the speed card shows (224/40). No gap left
+        # to reconcile, so the footnote no longer quotes a second figure.
         w, cv = self._panel()
         overall = w._overall_typing_ratio(dict(self._SNAP))
-        self.assertAlmostEqual(3.4, overall, places=1)
+        self.assertAlmostEqual(5.6, overall, places=1)
         note = next(t for t in self._texts(cv) if "silence left out" in t)
-        self.assertIn(f"{w._fmt_ratio(overall)} faster overall", note)
+        self.assertNotIn("faster overall", note)
 
-    def test_both_panels_quote_the_same_end_to_end_multiple(self):
+    def test_both_panels_quote_the_same_multiple(self):
+        # Speed panel shows it as "5.6× faster than typing"; the time panel's
+        # typing row shows it as "5.6× the time you spent". One number now.
         w, cv = self._panel()
-        speed_note = next(t for t in self._texts(cv)
-                          if "silence left out" in t)
+        ratio_txt = w._fmt_ratio(w._overall_typing_ratio(dict(self._SNAP)))
+        speed_texts = self._texts(cv)
+        self.assertIn(f"{ratio_txt} faster than typing", speed_texts)
         w._close_impact_detail()
         self.root.update()
         w._open_impact_detail("time")
         self.root.update()
         time_note = next(t for t in self._texts(w._impact_detail)
                          if "the time you spent" in t)
-        ratio_txt = w._fmt_ratio(w._overall_typing_ratio(dict(self._SNAP)))
-        self.assertIn(ratio_txt, speed_note)
         self.assertIn(ratio_txt, time_note)
 
     def test_nothing_overflows_the_panel(self):

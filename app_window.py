@@ -2491,19 +2491,20 @@ class AppWindow:
 
     @staticmethod
     def _overall_typing_ratio(snap: dict) -> float:
-        """Typing-time ÷ app-time: the END-TO-END multiple, pauses and refine
-        time included. This is deliberately a different number from the
-        speech-rate multiple (avg_wpm / TYPING_WPM, e.g. 224/40 = 5.6×), which
-        excludes silence — quoting the speech ratio next to the time panel's
-        hours made the panels look inconsistent (14 hrs typing vs 4.2 hrs used
-        is 3.4×, not 5.6×). Both panels quote THIS figure for the end-to-end
-        claim, computed here once from the same snapshot fields the time
-        panel's 'Time using it' and 'Typing by hand' rows draw, so the two
+        """Typing time ÷ the time you actually spent — speaking at your own
+        measured rate plus the measured refine time. Under the speech-rate
+        model this equals the speech multiple (effective_wpm / TYPING_WPM, e.g.
+        224/40 = 5.6×), because both sides are pure production rates with
+        thinking pauses excluded. That is deliberate: it means the speed panel
+        and this figure AGREE, rather than the old split where the speed card
+        said 5.6× and this said 3.4× (wall-clock, pauses in) and a footnote had
+        to reconcile them. Computed here once from the same snapshot fields the
+        time panel's 'Time using it' and 'Typing by hand' rows draw, so the two
         can never disagree."""
         import stats as stats_mod
         words = int(snap.get("total_words", 0))
-        used_min = (float(snap.get("total_audio_seconds", 0.0))
-                    + float(snap.get("refine_seconds", 0.0))) / 60.0
+        used_min = (float(snap.get("dictation_time_minutes", 0.0))
+                    + float(snap.get("refine_seconds", 0.0)) / 60.0)
         if words <= 0 or used_min <= 0:
             return 0.0
         return (words / float(stats_mod.TYPING_WPM)) / used_min
@@ -2537,10 +2538,12 @@ class AppWindow:
         h = self._panel_h()
         dict_min = float(snap.get("dictation_saved_minutes", 0.0))
         ref_min = float(snap.get("refine_saved_minutes", 0.0))
-        # What using the app actually cost: every second of recording plus the
-        # measured time spent in the refine panel. Both are measured, never
-        # assumed, and both are already netted off the savings above.
-        spoke_min = float(snap.get("total_audio_seconds", 0.0)) / 60.0
+        # What using the app cost you: the time spent speaking (your words at
+        # your own measured rate, thinking pauses excluded — the same basis the
+        # typing figure uses, so the comparison is like-for-like) plus the
+        # measured time in the refine panel. Both are already netted off the
+        # savings above.
+        spoke_min = float(snap.get("dictation_time_minutes", 0.0))
         used_min = spoke_min + float(snap.get("refine_seconds", 0.0)) / 60.0
         total = dict_min + ref_min
         words = int(snap.get("total_words", 0))
@@ -2663,15 +2666,12 @@ class AppWindow:
         voiced_w = int(snap.get("voiced_words", 0))
         voiced_m = float(snap.get("voiced_seconds", 0.0)) / 60.0
         if measured:
-            # Reconcile with the time panel: this figure excludes silence, the
-            # time panel's hours do not, and the difference between 5.6× and
-            # 3.4× is exactly that. Say so where the user is looking.
+            # Your real rate, measured over actual speech with silence left out.
+            # The time panel applies this same rate to your whole word count, so
+            # the multiple here and the "time you spent" figure there agree —
+            # no 5.6×-vs-3.4× reconciliation to explain any more.
             body = (f"From {voiced_w:,} words over {self._fmt_span(voiced_m)} "
                     f"of speech, silence left out.")
-            overall = self._overall_typing_ratio(snap)
-            if overall > 0:
-                body += (f" Pauses included: "
-                         f"{self._fmt_ratio(overall)} faster overall.")
         else:
             body = (f"Showing the nominal {stats_mod.DICTATION_WPM} wpm. "
                     f"Dictate 50 words ({voiced_w:,} so far) and this becomes "
