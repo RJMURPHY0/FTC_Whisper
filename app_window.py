@@ -102,17 +102,39 @@ class _MONITORINFO(ctypes.Structure):
 
 _MONITOR_DEFAULTTONEAREST = 2
 
+# user32 on a PRIVATE WinDLL instance. ctypes.windll is CACHED: windll.user32
+# is one object shared by every module in the process, so pinning argtypes on
+# its functions rewrites the signature for every other caller too. This module
+# doing exactly that (v1.6.51) is what sent every popup to the main display:
+# GetMonitorInfoW was pinned to THIS module's _MONITORINFO class, so popup.py's
+# call with its own struct raised ArgumentError, was swallowed, and fell back
+# to the primary screen. ctypes.WinDLL() builds a fresh instance with its own
+# function objects, so these signatures are invisible outside this module.
+_U32 = None
+
+
+def _user32():
+    global _U32
+    if _U32 is None:
+        u32 = ctypes.WinDLL("user32")
+        u32.MonitorFromWindow.restype = ctypes.c_void_p
+        u32.MonitorFromWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        u32.GetMonitorInfoW.restype = ctypes.c_int
+        u32.GetMonitorInfoW.argtypes = [ctypes.c_void_p,
+                                        ctypes.POINTER(_MONITORINFO)]
+        u32.GetForegroundWindow.restype = ctypes.c_void_p
+        u32.GetAncestor.restype = ctypes.c_void_p
+        u32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        _U32 = u32
+    return _U32
+
 
 def _monitor_work_area(widget) -> tuple:
     """(left, top, right, bottom) of the work area of the monitor *widget* is
     on — taskbar excluded, and in virtual-screen coordinates, so `left`/`top`
     are negative on a monitor placed left of or above the primary."""
     try:
-        u32 = ctypes.windll.user32
-        u32.MonitorFromWindow.restype = ctypes.c_void_p
-        u32.MonitorFromWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
-        u32.GetMonitorInfoW.argtypes = [ctypes.c_void_p,
-                                        ctypes.POINTER(_MONITORINFO)]
+        u32 = _user32()
         mon = u32.MonitorFromWindow(ctypes.c_void_p(widget.winfo_id()),
                                     _MONITOR_DEFAULTTONEAREST)
         if mon:
@@ -541,11 +563,7 @@ class Dropdown(tk.Canvas):
         gotcha popup._top_hwnd documents) before comparing. Fails OPEN — a Win32
         hiccup must never close a list the user is mid-way through reading."""
         try:
-            import ctypes
-            u32 = ctypes.windll.user32
-            u32.GetForegroundWindow.restype = ctypes.c_void_p
-            u32.GetAncestor.restype = ctypes.c_void_p
-            u32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            u32 = _user32()
             fg = u32.GetForegroundWindow()
             if not fg:
                 return True
@@ -5986,22 +6004,39 @@ class AppWindow:
         ).start()
 
     # Retry cadence: short at first so a cold boot recovers in seconds once the
-    # network appears, then stretching out. Trailing value repeats to fill the
-    # attempt budget (~10 min total).
+    # network appears, then stretching out. Trailing value repeats through the
+    # burst (~13 min), after which the loop settles at a steady once-a-minute
+    # retry FOREVER — see below for why it must never stop.
     _RESTORE_BACKOFF = (2, 3, 5, 8, 12, 20, 30)
+    _RESTORE_STEADY_GAP = 60
+    _RESTORE_BURST_ATTEMPTS = 30
 
     def _session_restore_retry_loop(self) -> None:
         import time
         # This loop IS the startup session restore (main() no longer blocks on
         # it — the network token refresh used to delay first paint by seconds).
-        # First attempt fires immediately; retries continue for ~10 min to cover
-        # a slow Wi-Fi reconnect after a cold boot, but bounded so we don't spin
-        # forever. Stops early if the session becomes valid, gets cleared
-        # (definitive auth failure), or the user signs in manually meanwhile.
-        for attempt in range(30):
+        # First attempt fires immediately; the burst covers a slow reconnect
+        # after a cold boot. The loop must NEVER give up while a saved session
+        # exists: the old 30-attempt budget expired after ~13 min, and on a
+        # machine whose network flaps in blackhole windows after boot (measured
+        # live 2026-08-13: reboot 13:01, NETLOGON dead at 13:01:20, link still
+        # dropping in 30-60s windows half an hour later) every burst attempt
+        # landed in a bad window — leaving the app at the login form for the
+        # rest of the session with a perfectly valid session file on disk.
+        # After the burst it retries quietly once a minute; a signed-in user
+        # eventually gets their dashboard without touching anything. Stops
+        # only when the session becomes valid, the file is cleared (definitive
+        # auth failure / sign-out), or a manual sign-in lands (which makes
+        # is_authenticated true → promote → return).
+        attempt = 0
+        while True:
             if attempt:
                 gaps = self._RESTORE_BACKOFF
-                time.sleep(gaps[min(attempt - 1, len(gaps) - 1)])
+                if attempt <= self._RESTORE_BURST_ATTEMPTS:
+                    gap = gaps[min(attempt - 1, len(gaps) - 1)]
+                else:
+                    gap = self._RESTORE_STEADY_GAP
+                time.sleep(gap)
             if self._auth.is_authenticated:
                 # An earlier attempt (or the late-landing worker) already signed
                 # us in. Promote — returning without promoting is what left the
@@ -6017,9 +6052,12 @@ class AppWindow:
                     return
             except Exception:
                 pass
-        # Budget exhausted without a restore — stop pretending and let the user act.
-        if not self._auth.is_authenticated:
-            self._ui_after(0, self._reveal_login_now)
+            attempt += 1
+            if attempt == self._RESTORE_BURST_ATTEMPTS \
+                    and not self._auth.is_authenticated:
+                # Burst spent: stop pretending and let the user act — but the
+                # loop keeps retrying quietly behind the login form.
+                self._ui_after(0, self._reveal_login_now)
 
     def _promote_restored_session(self) -> None:
         """Main-thread: a background retry restored the session — switch to the

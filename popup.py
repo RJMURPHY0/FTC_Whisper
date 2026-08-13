@@ -61,6 +61,32 @@ class _MONITORINFO(ctypes.Structure):
     ]
 
 
+# The monitor APIs on a PRIVATE WinDLL instance. ctypes.windll.user32 is one
+# CACHED object shared by every module in the process: app_window pinned
+# GetMonitorInfoW's argtypes to ITS OWN _MONITORINFO class there (v1.6.51), so
+# this module's byref(_MONITORINFO) raised ArgumentError on every call, the
+# except swallowed it, and every popup placement fell back to the PRIMARY
+# monitor. The entire wrong-screen saga (v1.6.51→v1.6.64) was that one shared
+# mutation, not the anchor policy. A private instance has its own function
+# objects and cannot be poisoned from outside this module.
+_U32_MON = None
+
+
+def _monitor_user32():
+    global _U32_MON
+    if _U32_MON is None:
+        u32 = ctypes.WinDLL("user32")
+        u32.MonitorFromPoint.restype = ctypes.c_void_p
+        u32.MonitorFromPoint.argtypes = [_POINT, ctypes.c_ulong]
+        u32.MonitorFromWindow.restype = ctypes.c_void_p
+        u32.MonitorFromWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        u32.GetMonitorInfoW.restype = ctypes.c_int
+        u32.GetMonitorInfoW.argtypes = [ctypes.c_void_p,
+                                        ctypes.POINTER(_MONITORINFO)]
+        _U32_MON = u32
+    return _U32_MON
+
+
 # ── Popup palette (light grey floating pill) ──────────────────────────────────
 # The main app window stays dark; the small floating popups use a softer look.
 CP = {
@@ -2066,7 +2092,11 @@ class FloatingPopup:
     ) -> tuple[int, int, int, int]:
         try:
             MONITOR_DEFAULTTONEAREST = 2
-            u32 = ctypes.windll.user32
+            # PRIVATE typed instance — never the shared ctypes.windll.user32,
+            # whose GetMonitorInfoW app_window used to pin to its own struct
+            # class, making this exact call raise and fall back to the primary
+            # monitor on every placement (the wrong-screen saga's root cause).
+            u32 = _monitor_user32()
             # Prefer the explicit anchor coords the app computed — the centre
             # of the window being dictated into, with the cursor only as its
             # fallback (see app._popup_anchor). Fall back to the target hwnd
@@ -2086,11 +2116,13 @@ class FloatingPopup:
                 hmon = u32.MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)
             info = _MONITORINFO()
             info.cbSize = ctypes.sizeof(_MONITORINFO)
-            u32.GetMonitorInfoW(hmon, ctypes.byref(info))
-            r = info.rcWork
-            return r.left, r.top, r.right, r.bottom
+            if hmon and u32.GetMonitorInfoW(hmon, ctypes.byref(info)):
+                r = info.rcWork
+                if r.right > r.left and r.bottom > r.top:
+                    return r.left, r.top, r.right, r.bottom
         except Exception:
-            return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+            pass
+        return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
 
     def _dpi_scale(self) -> tuple[float, float]:
         """

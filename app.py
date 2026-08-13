@@ -39,14 +39,14 @@ from config import Config
 from spoken_commands import apply_spoken_commands
 from hotkey_manager import HotkeyManager, TriggerHotkeyManager, AppState
 from feedback import Feedback
-from popup import FloatingPopup, _MONITORINFO
+from popup import FloatingPopup, _MONITORINFO, _monitor_user32
 from ai_refiner import AIRefiner
 from supabase_client import SupabaseLogger
 from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.64"
+APP_VERSION = "1.6.65"
 
 
 class _RECT(ctypes.Structure):
@@ -2531,7 +2531,11 @@ class WhisperFlowApp:
         (largest intersection). Falls back to the window's own centre, which
         resolves to the same monitor whenever the window doesn't straddle."""
         try:
-            u32 = ctypes.windll.user32
+            # PRIVATE typed instance (popup._monitor_user32) — the shared
+            # ctypes.windll.user32 GetMonitorInfoW could be re-typed by any
+            # module, which is exactly how every placement collapsed to the
+            # primary display for four releases (v1.6.51→v1.6.64).
+            u32 = _monitor_user32()
             MONITOR_DEFAULTTONEAREST = 2
             hmon = u32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
             if hmon:
@@ -2593,7 +2597,11 @@ class WhisperFlowApp:
                 _Input, _KbdInput, _INPUT_KEYBOARD, _KEYEVENTF_KEYUP,
                 _get_focused_child, _release_modifiers, Injector,
             )
-            u32 = ctypes.windll.user32
+            # Private WinDLL instance: typing a function on the CACHED
+            # ctypes.windll.user32 rewrites it for every module (the
+            # wrong-screen root cause) — user32 is already loaded, so this
+            # is just a refcount bump.
+            u32 = ctypes.WinDLL("user32")
             u32.GetClipboardSequenceNumber.restype = ctypes.wintypes.DWORD
 
             # Preserve whatever the user had copied. Refining a selection must

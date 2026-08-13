@@ -149,11 +149,16 @@ class PopupAnchorTests(unittest.TestCase):
         app_mod._capture_focus_target = _boom
         real_windll = app_mod.ctypes.windll
         app_mod.ctypes.windll = _FakeWindll
+        # _window_monitor_centre runs on the PRIVATE typed user32 (immune to
+        # shared-windll poisoning), so the fake has to stand in for that too.
+        real_mon_u32 = app_mod._monitor_user32
+        app_mod._monitor_user32 = lambda: _FakeU32
         try:
             return app_mod.WhisperFlowApp._popup_anchor(self.whisper, hwnd)
         finally:
             app_mod._capture_focus_target = real_capture
             app_mod.ctypes.windll = real_windll
+            app_mod._monitor_user32 = real_mon_u32
 
     def test_the_window_monitor_wins_over_a_mouse_parked_elsewhere(self):
         # The original reported bug: typing into an app on the right monitor,
@@ -236,6 +241,128 @@ class PopupAnchorTests(unittest.TestCase):
     def test_refine_uses_the_window_anchor(self):
         src = inspect.getsource(self.app_mod.WhisperFlowApp._on_refine_selection)
         self.assertIn("_popup_anchor", src)
+
+
+class SharedUser32HygieneTests(unittest.TestCase):
+    """Root cause of the whole wrong-screen saga (fixed v1.6.65).
+
+    ctypes.windll is CACHED: windll.user32 is ONE object shared by every
+    module in the process. app_window pinned GetMonitorInfoW.argtypes to its
+    own _MONITORINFO class on that shared object (v1.6.51), so popup.py's
+    call with ITS own struct class raised ctypes.ArgumentError, the except
+    swallowed it, and every popup placement fell back to the PRIMARY
+    monitor — no matter what the anchor said. Four releases of anchor-policy
+    fixes (v1.6.53→v1.6.64) fought the wrong layer; the repro harnesses drove
+    the popup WITHOUT the dashboard, so the poisoning never showed in tests.
+    These tests exercise the modules TOGETHER, in the poisoning order.
+    """
+
+    @staticmethod
+    def _fake_widget():
+        return types.SimpleNamespace(winfo_id=lambda: 0,
+                                     winfo_screenwidth=lambda: 1600,
+                                     winfo_screenheight=lambda: 900)
+
+    @staticmethod
+    def _win32_monitor_available() -> bool:
+        """A real monitor lookup must work in this session at all (a bare CI
+        window station may have none) — otherwise the cross-module tests
+        can't distinguish poisoning from a headless environment."""
+        import ctypes
+
+        class _PT(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+        try:
+            u32 = ctypes.WinDLL("user32")
+            u32.MonitorFromPoint.restype = ctypes.c_void_p
+            u32.MonitorFromPoint.argtypes = [_PT, ctypes.c_ulong]
+            return bool(u32.MonitorFromPoint(_PT(5, 5), 2))
+        except Exception:
+            return False
+
+    def test_app_window_leaves_the_shared_user32_untyped(self):
+        import ctypes
+        _monitor_work_area(self._fake_widget())  # runs the typing path
+        shared = ctypes.windll.user32
+        self.assertIsNone(shared.GetMonitorInfoW.argtypes,
+                          "app_window typed the SHARED user32 — that breaks "
+                          "every other module's GetMonitorInfoW call")
+        self.assertIsNone(shared.MonitorFromWindow.argtypes)
+
+    def test_popup_monitor_lookup_survives_app_window_running_first(self):
+        # The exact shipped sequence: dashboard resolves its work area first
+        # (poisoning point in the old code), then the popup places itself.
+        if not self._win32_monitor_available():
+            raise unittest.SkipTest("no monitor in this window station")
+        import popup
+        _monitor_work_area(self._fake_widget())
+        sentinel = types.SimpleNamespace(
+            root=types.SimpleNamespace(winfo_screenwidth=lambda: -1,
+                                       winfo_screenheight=lambda: -1),
+            _target_hwnd=0)
+        wa = popup.FloatingPopup._get_monitor_workarea(sentinel, 5, 5)
+        # (5,5) is on the primary monitor by definition; a REAL work area
+        # must come back — -1 marks the Tk-numbers fallback the poisoned
+        # build collapsed to on every single placement.
+        self.assertNotIn(-1, wa,
+                         "popup fell back to primary-screen Tk numbers")
+        self.assertGreater(wa[2], wa[0])
+        self.assertGreater(wa[3], wa[1])
+
+    def test_window_monitor_centre_survives_app_window_running_first(self):
+        if not self._win32_monitor_available():
+            raise unittest.SkipTest("no monitor in this window station")
+        import ctypes
+        import app as app_mod
+        _monitor_work_area(self._fake_widget())
+        hwnd = ctypes.windll.user32.GetDesktopWindow()
+        (_, why) = app_mod.WhisperFlowApp._window_monitor_centre(
+            hwnd, (0, 0, 100, 100))
+        self.assertEqual("window-monitor", why,
+                         "the anchor silently degraded to window-centre — "
+                         "the poisoned-GetMonitorInfoW failure mode")
+
+    def test_no_module_types_the_shared_windll(self):
+        # Static: the direct form is forbidden outright in every root module.
+        import re
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        offenders = []
+        for name in os.listdir(root):
+            if not name.endswith(".py"):
+                continue
+            with open(os.path.join(root, name), encoding="utf-8") as f:
+                src = f.read()
+            for m in re.finditer(
+                    r"windll\.\w+\.\w+\.(argtypes|restype)\s*=", src):
+                offenders.append(f"{name}: {m.group(0)}")
+        self.assertEqual([], offenders)
+        # Runtime: import every module that types Win32 signatures, run the
+        # one that types at call time, then confirm the SHARED cache is still
+        # pristine on every function any of them touch. (The aliased form
+        # can't be caught reliably by regex — app.py legitimately binds `u32`
+        # to the shared object in untyped functions.)
+        import ctypes
+        import app  # noqa: F401 — imported for its module-level ctypes work
+        import app_icons  # noqa: F401
+        import injector  # noqa: F401
+        import popup as popup_mod
+        _monitor_work_area(self._fake_widget())
+        popup_mod._monitor_user32()
+        for dll, fn in (("user32", "GetMonitorInfoW"),
+                        ("user32", "MonitorFromWindow"),
+                        ("user32", "MonitorFromPoint"),
+                        ("user32", "GetForegroundWindow"),
+                        ("user32", "GetAncestor"),
+                        ("user32", "PrivateExtractIconsW"),
+                        ("shell32", "ExtractIconExW")):
+            func = getattr(getattr(ctypes.windll, dll), fn)
+            self.assertIsNone(
+                func.argtypes,
+                f"shared windll {dll}.{fn}.argtypes was set by a module")
+            self.assertIs(
+                func.restype, ctypes.c_int,
+                f"shared windll {dll}.{fn}.restype was changed by a module")
 
 
 if __name__ == "__main__":

@@ -292,6 +292,24 @@ class SplashRevealTests(unittest.TestCase):
         self.assertIn("_promote_restored_session", head,
                       "the is_authenticated early-return must promote first")
 
+    def test_retry_loop_never_gives_up_while_a_session_file_exists(self):
+        # The old 30-attempt budget expired after ~13 minutes. On a machine
+        # whose network flaps in blackhole windows after a reboot (measured
+        # live 2026-08-13), every burst attempt landed in a bad window and the
+        # app then sat at the login form for the REST OF THE SESSION with a
+        # perfectly valid session file on disk. The loop now retries forever
+        # (steady once-a-minute after the burst); it exits only on success,
+        # a cleared session file, or a manual sign-in.
+        import inspect
+        from app_window import AppWindow
+        src = inspect.getsource(AppWindow._session_restore_retry_loop)
+        self.assertIn("while True", src)
+        self.assertIn("_RESTORE_STEADY_GAP", src)
+        # The post-burst reveal must not end the loop — retries continue
+        # quietly behind the login form.
+        tail = src[src.index("attempt =="):]
+        self.assertNotIn("return", tail)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -39,9 +39,12 @@ _BRAND_DIR = os.path.join(_BASE_DIR, "assets", "brand_icons")
 
 # Explicit signature — ExtractIconExW has HICON* out-params that must be full
 # pointer width on 64-bit Windows; without argtypes ctypes can mis-marshal the
-# handles/count. Declared once at import (best-effort).
+# handles/count. Declared once at import (best-effort). NB typed on PRIVATE
+# WinDLL instances — ctypes.windll.<dll> is cached process-wide, and typing a
+# function there rewrites it for every other module (the popup wrong-screen
+# root cause).
 try:
-    _ExtractIconExW = ctypes.windll.shell32.ExtractIconExW
+    _ExtractIconExW = ctypes.WinDLL("shell32").ExtractIconExW
     _ExtractIconExW.argtypes = [
         wt.LPCWSTR, ctypes.c_int,
         ctypes.POINTER(wt.HICON), ctypes.POINTER(wt.HICON), ctypes.c_uint,
@@ -55,7 +58,7 @@ except Exception:
 # handle at that size, so a 48px extraction stays crisp when downsampled to the
 # 36px row icon. ExtractIconEx/SHGetFileInfo only give the 32px system size.
 try:
-    _PrivateExtractIconsW = ctypes.windll.user32.PrivateExtractIconsW
+    _PrivateExtractIconsW = ctypes.WinDLL("user32").PrivateExtractIconsW
     _PrivateExtractIconsW.argtypes = [
         wt.LPCWSTR, ctypes.c_int, ctypes.c_int, ctypes.c_int,
         ctypes.POINTER(wt.HICON), ctypes.POINTER(wt.UINT), wt.UINT, wt.DWORD,

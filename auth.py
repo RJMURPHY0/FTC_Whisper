@@ -10,6 +10,7 @@ import ctypes.wintypes
 import json
 import os
 import threading
+import time
 from typing import Optional
 
 
@@ -191,7 +192,29 @@ class AuthManager:
         if not self._client:
             try:
                 from supabase import create_client  # lazy — only loaded when auth is used
-                self._client = create_client(self._url, self._key)
+                # supabase-auth ships NO timeout of its own, so every auth
+                # round trip ran on httpx's 5-SECOND default. On a machine
+                # that just booted (Wi-Fi still associating, Defender
+                # scanning the freshly-updated exe, OneDrive saturating the
+                # link) 5s is routinely blown, and both sign-in and session
+                # restore failed with "The read operation timed out" until
+                # the machine settled. 30s read / 15s connect rides that out;
+                # a genuinely dead network still fails fast at connect.
+                options = None
+                try:
+                    import httpx
+                    from supabase.lib.client_options import SyncClientOptions
+                    options = SyncClientOptions(
+                        httpx_client=httpx.Client(
+                            timeout=httpx.Timeout(30.0, connect=15.0)))
+                except Exception as e:  # a future SDK rename must not kill auth
+                    print(f"[Auth] Timeout options unavailable ({e}) — "
+                          "using SDK defaults")
+                if options is not None:
+                    self._client = create_client(self._url, self._key,
+                                                 options=options)
+                else:
+                    self._client = create_client(self._url, self._key)
                 self._attach_auth_listener(self._client)
             except Exception as e:
                 print(f"[Auth] ERROR creating Supabase client: {e}")
@@ -446,30 +469,45 @@ class AuthManager:
             return False, f"Sign-up failed: {msg}"
 
     def sign_in(self, email: str, password: str) -> tuple[bool, str]:
-        try:
-            client = self._get_client()
-            print(f"[Auth] Signing in as {email}...")
-            result = client.auth.sign_in_with_password(
-                {"email": email, "password": password}
-            )
-            if result.user and result.session:
-                self._user = result.user
-                self._save_session(result.session)
-                _write_last_email(result.user.email or email)
-                return True, f"Welcome back, {result.user.email}"
-            return False, "Sign-in failed — please check your email and password."
-        except Exception as e:
-            # Supabase wraps the real message in several ways
-            msg = getattr(e, "message", None) or (e.args[0] if e.args else str(e))
-            msg = str(msg)
-            print(f"[Auth] Sign-in error: {msg!r}")
-            if "email not confirmed" in msg.lower() or "email_not_confirmed" in msg.lower():
-                return False, "Email not confirmed — check your inbox and click the confirmation link."
-            if "invalid" in msg.lower() or "credentials" in msg.lower() or "wrong" in msg.lower():
-                return False, "Incorrect email or password."
-            if "user not found" in msg.lower() or "no user" in msg.lower():
-                return False, "No account found with that email."
-            return False, f"Sign-in failed: {msg or 'unknown error — check your connection.'}"
+        msg = ""
+        for attempt in (1, 2):
+            try:
+                client = self._get_client()
+                print(f"[Auth] Signing in as {email}...")
+                result = client.auth.sign_in_with_password(
+                    {"email": email, "password": password}
+                )
+                if result.user and result.session:
+                    self._user = result.user
+                    self._save_session(result.session)
+                    _write_last_email(result.user.email or email)
+                    return True, f"Welcome back, {result.user.email}"
+                return False, "Sign-in failed — please check your email and password."
+            except Exception as e:
+                # Supabase wraps the real message in several ways
+                msg = getattr(e, "message", None) or (e.args[0] if e.args else str(e))
+                msg = str(msg)
+                print(f"[Auth] Sign-in error (attempt {attempt}): {msg!r}")
+                low = msg.lower()
+                # Network markers win, same rule as _is_definitive_auth_error:
+                # a TLS/proxy failure can carry words like "invalid", and
+                # reading that as a wrong password would mislead the user.
+                if any(k in low for k in _NETWORK_ERROR_MARKERS):
+                    if attempt == 1:
+                        # One transient hiccup (cold boot, Wi-Fi
+                        # reassociating) must not surface as a failure.
+                        time.sleep(1.5)
+                        continue
+                    return False, ("Can't reach the sign-in server — check "
+                                   "your internet connection and try again.")
+                if "email not confirmed" in low or "email_not_confirmed" in low:
+                    return False, "Email not confirmed — check your inbox and click the confirmation link."
+                if "invalid" in low or "credentials" in low or "wrong" in low:
+                    return False, "Incorrect email or password."
+                if "user not found" in low or "no user" in low:
+                    return False, "No account found with that email."
+                return False, f"Sign-in failed: {msg or 'unknown error — check your connection.'}"
+        return False, f"Sign-in failed: {msg or 'unknown error — check your connection.'}"
 
     def reset_password(self, email: str) -> tuple[bool, str]:
         try:
