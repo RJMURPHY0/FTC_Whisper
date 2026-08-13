@@ -358,7 +358,9 @@ class FloatingPopup:
         cursor_y: int = 0,
     ) -> None:
         self._target_hwnd = hwnd
-        # Store cursor position so popup appears on the correct monitor
+        # Store the anchor the app computed (window-centre first, cursor as
+        # fallback — see app._popup_anchor) so the popup opens on the monitor
+        # the user is actually working on.
         if cursor_x or cursor_y:
             self._status_cx, self._status_cy = cursor_x, cursor_y
         else:
@@ -1982,8 +1984,10 @@ class FloatingPopup:
         try:
             MONITOR_DEFAULTTONEAREST = 2
             u32 = ctypes.windll.user32
-            # Prefer explicit cursor coords — always puts popup on the user's active screen.
-            # Fall back to target hwnd only when no cursor coords given.
+            # Prefer the explicit anchor coords the app computed — the centre
+            # of the window being dictated into, with the cursor only as its
+            # fallback (see app._popup_anchor). Fall back to the target hwnd
+            # only when no anchor coords were given.
             if x or y:
                 pt = _POINT()
                 pt.x, pt.y = x, y

@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.62"
+APP_VERSION = "1.6.63"
 
 
 class _RECT(ctypes.Structure):
@@ -1976,11 +1976,15 @@ class WhisperFlowApp:
             try:
                 pt = ctypes.wintypes.POINT()
                 ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-                cx, cy = pt.x, pt.y
-                self._rec_cursor_x, self._rec_cursor_y = cx, cy
+                self._rec_cursor_x, self._rec_cursor_y = pt.x, pt.y
             except Exception:
-                cx = getattr(self, "_rec_cursor_x", 0)
-                cy = getattr(self, "_rec_cursor_y", 0)
+                pass
+            # The pill's monitor comes from the WINDOW being dictated into,
+            # never the mouse (_popup_anchor). _rec_cursor_x/y above stays the
+            # true mouse position — injection's same-cursor check and the
+            # browser DOM-focus click depend on it.
+            ax, ay = self._popup_anchor(hwnd)
+            self._rec_anchor_x, self._rec_anchor_y = ax, ay
             _captions_on = self._captions_active()
             self.popup.set_captions_enabled(_captions_on)
             # Honest cue: this fires on the hotkey thread BEFORE recorder.start()
@@ -1993,8 +1997,8 @@ class WhisperFlowApp:
                 "Recording" if _mic_live else "Starting…",
                 hwnd=hwnd,
                 recording=True,
-                cursor_x=cx,
-                cursor_y=cy,
+                cursor_x=ax,
+                cursor_y=ay,
             )
             # Always feed mic levels to the popup waveform while recording — the
             # waveform now animates in caption mode too (captions render in a bar
@@ -2021,8 +2025,8 @@ class WhisperFlowApp:
                 "Transcribing…",
                 hwnd=self._recording_hwnd,
                 recording=False,
-                cursor_x=getattr(self, "_rec_cursor_x", 0),
-                cursor_y=getattr(self, "_rec_cursor_y", 0),
+                cursor_x=getattr(self, "_rec_anchor_x", 0),
+                cursor_y=getattr(self, "_rec_anchor_y", 0),
             )
         elif state == AppState.IDLE:
             self._mic_loop_running.clear()
@@ -2456,16 +2460,34 @@ class WhisperFlowApp:
         except Exception:
             return (int(getattr(self.popup, "_popup_hwnd", 0) or 0),)
 
-    def _refine_anchor(self, hwnd: int) -> tuple:
-        """Where to put the refine popup: on the MONITOR the cursor is on.
+    def _popup_anchor(self, hwnd: int) -> tuple:
+        """Where the popup opens: on the MONITOR of the window receiving the
+        text — the foreground window captured at the hotkey press.
 
-        The rule is simple and predictable: the refine panel — and the
-        dictation pill — always open on the same screen as the mouse cursor.
-        An earlier build anchored refine to the focused control's caret; on a
-        multi-monitor desk the text being edited is routinely on a different
-        screen from the cursor, so the panel kept opening on the "wrong"
-        monitor. The cursor is the anchor, full stop."""
+        This is the third anchor policy, and the reasoning matters because the
+        first two both shipped and both failed on a multi-monitor desk:
+
+        1. The CARET (v1.6.53). Chromium/Electron apps expose no caret via
+           GetGUIThreadInfo, so the anchor silently fell back towards (0,0)
+           and the popup landed on the primary display.
+        2. The raw MOUSE position. Dictation and refine are keyboard flows;
+           the mouse is routinely parked on a different screen from the app
+           being typed into, and the popup followed the mouse there.
+
+        The foreground window is, by definition, the app the dictation lands
+        in — "the screen the user is actually on". GetWindowRect works for
+        every app class (no accessibility involvement), so its centre is a
+        reliable point on the right monitor. The cursor remains only the
+        fallback for when there is no usable window rect."""
         u32 = ctypes.windll.user32
+        try:
+            if hwnd and not u32.IsIconic(hwnd):
+                r = ctypes.wintypes.RECT()
+                if u32.GetWindowRect(hwnd, ctypes.byref(r)) \
+                        and r.right > r.left and r.bottom > r.top:
+                    return ((r.left + r.right) // 2, (r.top + r.bottom) // 2)
+        except Exception:
+            pass
         pt = ctypes.wintypes.POINT()
         try:
             u32.GetCursorPos(ctypes.byref(pt))
@@ -2511,7 +2533,7 @@ class WhisperFlowApp:
             if hwnd and hwnd in self._popup_hwnds():
                 return
 
-            cx, cy = self._refine_anchor(hwnd)
+            cx, cy = self._popup_anchor(hwnd)
 
             self._focus_window(hwnd)
             time.sleep(0.05)

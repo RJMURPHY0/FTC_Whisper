@@ -2471,6 +2471,29 @@ class AppWindow:
         occupied, captured at open time so the page never changes size."""
         return int(getattr(self, "_impact_panel_h", _IMPACT_CARD_H))
 
+    @staticmethod
+    def _overall_typing_ratio(snap: dict) -> float:
+        """Typing-time ÷ app-time: the END-TO-END multiple, pauses and refine
+        time included. This is deliberately a different number from the
+        speech-rate multiple (avg_wpm / TYPING_WPM, e.g. 224/40 = 5.6×), which
+        excludes silence — quoting the speech ratio next to the time panel's
+        hours made the panels look inconsistent (14 hrs typing vs 4.2 hrs used
+        is 3.4×, not 5.6×). Both panels quote THIS figure for the end-to-end
+        claim, computed here once from the same snapshot fields the time
+        panel's 'Time using it' and 'Typing by hand' rows draw, so the two
+        can never disagree."""
+        import stats as stats_mod
+        words = int(snap.get("total_words", 0))
+        used_min = (float(snap.get("total_audio_seconds", 0.0))
+                    + float(snap.get("refine_seconds", 0.0))) / 60.0
+        if words <= 0 or used_min <= 0:
+            return 0.0
+        return (words / float(stats_mod.TYPING_WPM)) / used_min
+
+    @staticmethod
+    def _fmt_ratio(r: float) -> str:
+        return f"{r:.1f}×".replace(".0×", "×")
+
     def _layout_impact_detail(self) -> None:
         key = getattr(self, "_impact_open", None)
         cv = getattr(self, "_impact_detail", None)
@@ -2534,6 +2557,13 @@ class AppWindow:
             spent_note += f" + {self._fmt_span(used_min - spoke_min)} refining"
         spent_note += " · already deducted above"
 
+        # The end-to-end multiple, shared with the speed panel's footnote
+        # (_overall_typing_ratio) so the two panels quote the same figure.
+        overall = self._overall_typing_ratio(snap)
+        typing_note = f"{words:,} words at {stats_mod.TYPING_WPM} wpm"
+        if overall > 0:
+            typing_note += f" · {self._fmt_ratio(overall)} the time you spent"
+
         # Four rows, each with a leading icon: two savings (coloured), then the
         # cost and the typing-by-hand counterfactual (grey). One short line of
         # working each — the block is a fixed height and may not grow (_panel_h).
@@ -2544,7 +2574,7 @@ class AppWindow:
             ("clock", "Time using it", used_min, _PANEL_DIM, C["subtext"],
              spent_note),
             ("keyboard", "Typing by hand", typing_min, _PANEL_DIM, C["subtext"],
-             f"{words:,} words at {stats_mod.TYPING_WPM} wpm"),
+             typing_note),
         )
         top = 48
         step = max(38, (h - top - 34) // 3)
@@ -2570,7 +2600,6 @@ class AppWindow:
     def _draw_detail_speed(self, cv, w: int, snap: dict) -> None:
         import stats as stats_mod
         h = self._panel_h()
-        self._panel_head(cv, w, "speed", "DICTATION SPEED")
         pad = 20
         inner = w - pad * 2
         wpm = int(snap.get("avg_wpm", 0) or 0)
@@ -2578,11 +2607,17 @@ class AppWindow:
         shown = wpm or stats_mod.DICTATION_WPM
         ratio = shown / float(stats_mod.TYPING_WPM)
 
-        cv.create_text(pad, _PANEL_VALUE_Y, text=f"{shown} wpm", anchor="w",
-                       fill=C["text"], font=("Segoe UI", 16, "bold"))
-        cv.create_text(w - pad, _PANEL_VALUE_Y + 3,
-                       text=f"{ratio:.1f}× faster than typing".replace(".0×", "×"),
-                       anchor="e", fill=C["subtext"], font=("Segoe UI", 9))
+        # The figure rides the header row (icon + "224 wpm" + caption), the
+        # same shape as the time panel's header, and the speech-rate multiple
+        # takes the line the figure used to sit on. The multiple is shown
+        # right above the rows it is computed from (224 / 40), so the
+        # arithmetic checks at a glance.
+        self._panel_head(cv, w, "speed", "DICTATION SPEED",
+                         headline=f"{shown} wpm", headline_sub="dictation speed")
+        cv.create_text(pad, _PANEL_VALUE_Y,
+                       text=f"{self._fmt_ratio(ratio)} faster than typing",
+                       anchor="w", fill=C["text"],
+                       font=("Segoe UI", 12, "bold"))
 
         # Each row leads with an icon — you speaking, a keyboard, a pen — so the
         # three ways of getting words down read at a glance.
@@ -2610,9 +2645,15 @@ class AppWindow:
         voiced_w = int(snap.get("voiced_words", 0))
         voiced_m = float(snap.get("voiced_seconds", 0.0)) / 60.0
         if measured:
-            body = (f"Measured from {voiced_w:,} words over "
-                    f"{self._fmt_span(voiced_m)} of speech. Silence is left "
-                    f"out, so this is how fast you actually talk.")
+            # Reconcile with the time panel: this figure excludes silence, the
+            # time panel's hours do not, and the difference between 5.6× and
+            # 3.4× is exactly that. Say so where the user is looking.
+            body = (f"From {voiced_w:,} words over {self._fmt_span(voiced_m)} "
+                    f"of speech, silence left out.")
+            overall = self._overall_typing_ratio(snap)
+            if overall > 0:
+                body += (f" Pauses included: "
+                         f"{self._fmt_ratio(overall)} faster overall.")
         else:
             body = (f"Showing the nominal {stats_mod.DICTATION_WPM} wpm. "
                     f"Dictate 50 words ({voiced_w:,} so far) and this becomes "

@@ -86,14 +86,18 @@ class ClampSourceTests(unittest.TestCase):
         self.assertNotIn("winfo_screenwidth", src)
 
 
-class RefineAnchorTests(unittest.TestCase):
-    """The refine panel and the dictation pill open on the CURSOR's monitor.
+class PopupAnchorTests(unittest.TestCase):
+    """The pill and the refine panel open on the monitor of the WINDOW the
+    text goes into — the foreground window at the hotkey press.
 
-    The popup picks its monitor from the coordinates it is handed. The rule is
-    the mouse cursor, always: on a multi-monitor desk the caret (the text being
-    edited) is routinely on a different screen from the cursor, and anchoring to
-    it opened the panel on the wrong monitor. `_refine_anchor` therefore returns
-    the raw cursor position and never consults the caret or the window rect.
+    Third (and final) anchor policy; the first two both shipped and both put
+    the popup on the wrong screen. The caret is unreadable in Chromium and
+    Electron apps (fell back towards (0,0), i.e. the primary display); the raw
+    mouse is routinely parked on a different monitor from the app being typed
+    into, because dictation and refine are keyboard flows. The foreground
+    window IS the app receiving the dictation, so its centre is right by
+    definition; the cursor is only the fallback when the window rect is
+    unusable.
     """
 
     def setUp(self):
@@ -101,7 +105,7 @@ class RefineAnchorTests(unittest.TestCase):
         self.app_mod = app_mod
         self.whisper = app_mod.WhisperFlowApp.__new__(app_mod.WhisperFlowApp)
 
-    def _anchor(self, hwnd, *, mouse):
+    def _anchor(self, hwnd, *, mouse, rect=None, iconic=False):
         import app as app_mod
 
         class _FakeU32:
@@ -110,39 +114,85 @@ class RefineAnchorTests(unittest.TestCase):
                 ref._obj.x, ref._obj.y = mouse
                 return 1
 
+            @staticmethod
+            def IsIconic(_h):
+                return 1 if iconic else 0
+
+            @staticmethod
+            def GetWindowRect(_h, ref):
+                if rect is None:
+                    return 0
+                (ref._obj.left, ref._obj.top,
+                 ref._obj.right, ref._obj.bottom) = rect
+                return 1
+
         class _FakeWindll:
             user32 = _FakeU32
 
-        # A caret on a different monitor must NOT be able to pull the anchor
-        # off the cursor's screen — so make consulting it explode if it ever runs.
+        # The caret must never come back as an anchor source — consulting it
+        # explodes so a regression is loud.
         real_capture = app_mod._capture_focus_target
         def _boom(_h):
-            raise AssertionError("refine must not read the caret")
+            raise AssertionError("the popup anchor must not read the caret")
         app_mod._capture_focus_target = _boom
         real_windll = app_mod.ctypes.windll
         app_mod.ctypes.windll = _FakeWindll
         try:
-            return app_mod.WhisperFlowApp._refine_anchor(self.whisper, hwnd)
+            return app_mod.WhisperFlowApp._popup_anchor(self.whisper, hwnd)
         finally:
             app_mod._capture_focus_target = real_capture
             app_mod.ctypes.windll = real_windll
 
-    def test_the_cursor_wins_even_with_a_target_window(self):
-        # Mouse on the right monitor — the panel goes to the right monitor.
-        self.assertEqual((2600, 700), self._anchor(0x1234, mouse=(2600, 700)))
+    def test_the_window_wins_over_a_mouse_parked_elsewhere(self):
+        # The exact reported bug: typing into an app on the right monitor,
+        # mouse parked on another screen. The pill follows the window.
+        self.assertEqual(
+            (2600, 700),
+            self._anchor(0x1234, mouse=(-800, 400), rect=(2000, 200, 3200, 1200)))
 
-    def test_the_cursor_wins_on_the_left_monitor(self):
-        # Virtual-screen coords go negative on a left-hand display.
-        self.assertEqual((-1400, 500), self._anchor(0x1234, mouse=(-1400, 500)))
+    def test_a_window_on_a_negative_coordinate_monitor_wins_too(self):
+        # Virtual-screen coords go negative on a left/upper display.
+        self.assertEqual(
+            (-1400, -500),
+            self._anchor(0x1234, mouse=(900, 500), rect=(-2000, -900, -800, -100)))
 
-    def test_no_target_window_still_returns_the_cursor(self):
+    def test_no_target_window_falls_back_to_the_cursor(self):
         self.assertEqual((900, 500), self._anchor(0, mouse=(900, 500)))
 
+    def test_an_unreadable_window_rect_falls_back_to_the_cursor(self):
+        self.assertEqual((900, 500),
+                         self._anchor(0x1234, mouse=(900, 500), rect=None))
+
+    def test_a_minimised_window_falls_back_to_the_cursor(self):
+        # A minimised window's rect is the meaningless -32000 parking spot.
+        self.assertEqual(
+            (900, 500),
+            self._anchor(0x1234, mouse=(900, 500),
+                         rect=(-32000, -32000, -31840, -31972), iconic=True))
+
+    def test_an_empty_rect_falls_back_to_the_cursor(self):
+        self.assertEqual((900, 500),
+                         self._anchor(0x1234, mouse=(900, 500),
+                                      rect=(100, 100, 100, 100)))
+
     def test_source_has_no_caret_preference(self):
-        # Guard against a future refactor quietly reintroducing the caret anchor
-        # that caused the wrong-monitor regression.
-        src = inspect.getsource(self.app_mod.WhisperFlowApp._refine_anchor)
+        # Guard against a future refactor quietly reintroducing the caret
+        # anchor that caused the first wrong-monitor regression.
+        src = inspect.getsource(self.app_mod.WhisperFlowApp._popup_anchor)
         self.assertNotIn("_capture_focus_target", src)
+
+    def test_the_recording_pill_uses_the_window_anchor(self):
+        # The dictation pill's show_status must be handed the window anchor,
+        # never the raw mouse capture (which injection still needs for its
+        # same-cursor check — the two must stay separate).
+        src = inspect.getsource(self.app_mod.WhisperFlowApp._on_state_change)
+        self.assertIn("_popup_anchor", src)
+        self.assertIn("cursor_x=ax", src)
+        self.assertIn("_rec_anchor_x", src)
+
+    def test_refine_uses_the_window_anchor(self):
+        src = inspect.getsource(self.app_mod.WhisperFlowApp._on_refine_selection)
+        self.assertIn("_popup_anchor", src)
 
 
 if __name__ == "__main__":
