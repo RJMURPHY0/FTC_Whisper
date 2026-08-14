@@ -959,6 +959,12 @@ class AppWindow:
         # it so heavy imports/model loads never starve the UI build.
         self.first_paint = threading.Event()
 
+        # Custom Vocabulary / Snippets pages: per-kind UI state (query, which
+        # entry is open in the editor, the pane it renders into) and the count
+        # labels on the Settings rows that link to them.
+        self._lib = {}
+        self._lib_count_labels = {}
+
         # History is cache-first and refreshed without clearing the visible rows.
         self._hist_all = []
         self._history_loading = False
@@ -1365,15 +1371,21 @@ class AppWindow:
         self._hotkey_frame   = tk.Frame(self._dash_content, bg=C["bg"])
         self._history_frame  = tk.Frame(self._dash_content, bg=C["bg"])
         self._settings_frame = tk.Frame(self._dash_content, bg=C["bg"])
+        # Sub-pages of Settings, not tabs — no entry in the tab bar.
+        self._vocabulary_frame = tk.Frame(self._dash_content, bg=C["bg"])
+        self._snippets_frame   = tk.Frame(self._dash_content, bg=C["bg"])
 
         for f in (self._home_frame, self._hotkey_frame,
-                  self._history_frame, self._settings_frame):
+                  self._history_frame, self._settings_frame,
+                  self._vocabulary_frame, self._snippets_frame):
             f.grid(row=0, column=0, sticky="nsew")
 
         self._build_home_tab(self._home_frame)
         self._build_hotkey_tab(self._hotkey_frame)
         self._build_history_tab(self._history_frame)
         self._build_settings_tab(self._settings_frame)
+        self._build_library_page(self._vocabulary_frame, "vocabulary")
+        self._build_library_page(self._snippets_frame, "snippets")
 
         # Route wheel input exactly once. The previous local + bind_all Hotkey
         # bindings handled the same event twice when the pointer was over Canvas.
@@ -1426,7 +1438,17 @@ class AppWindow:
             "hotkey": self._hotkey_frame,
             "history": self._history_frame,
             "settings": self._settings_frame,
+            "vocabulary": self._vocabulary_frame,
+            "snippets": self._snippets_frame,
         }
+
+        # Arriving at a library page shows what is there NOW: a sync may have
+        # pulled entries in since it was last drawn, and an editor left open
+        # from a previous visit is not what you expect to come back to.
+        if name in self._LIB_SPECS:
+            st = self._lib_state(name)
+            st["editing"] = None
+            st["error"] = ""
 
         # Map/unmap, not just a z-order raise: an unmapped window has NO
         # pixels on screen, so a hidden tab structurally cannot bleed through
@@ -1487,6 +1509,9 @@ class AppWindow:
                     self._update_check_btn.configure(
                         text="Check for Updates", fg=C["accent"], cursor="hand2")
                     self._update_check_btn.bind("<Button-1>", self._do_update_check)
+            self._refresh_library_counts()
+        elif name in self._LIB_SPECS:
+            self._render_library(name)
 
     def _build_embedded_login(self) -> None:
         from login_window import LoginWindow
@@ -3676,76 +3701,16 @@ class AppWindow:
         self._ghost_btn(top, "✕ Clear",   self._confirm_clear_history).pack(side="right", padx=(0, 8))
 
         # Search bar — rounded (matches the history card), filters the fetched
-        # history client-side as you type.
+        # history client-side as you type. Shared control: Custom Vocabulary and
+        # Snippets use the same one.
         self._hist_query = ""
-        SEARCH_H = 34
-        search_cv = tk.Canvas(parent, height=SEARCH_H, bg=C["bg"],
-                              highlightthickness=0, bd=0)
-        search_cv.pack(fill="x", padx=20, pady=(0, 10))
-        search_inner = tk.Frame(search_cv, bg=C["input_bg"])
 
-        _mag = tk.Canvas(search_inner, width=18, height=18, bg=C["input_bg"],
-                         highlightthickness=0, bd=0)
-        _mag.create_oval(4, 4, 12, 12, outline=C["subtext"], width=1.5)
-        _mag.create_line(11.5, 11.5, 15.5, 15.5, fill=C["subtext"], width=1.5,
-                         capstyle="round")
-        _mag.pack(side="left", padx=(12, 6))
+        def _on_hist_query(query: str) -> None:
+            self._hist_query = query
+            self._apply_history_search()
 
-        _PLACEHOLDER = "Search transcriptions…"
-        self._hist_search = tk.Entry(
-            search_inner, bg=C["input_bg"], fg=C["subtext"], relief="flat", bd=0,
-            highlightthickness=0, insertbackground=C["text"], font=("Segoe UI", 9))
-        self._hist_search.insert(0, _PLACEHOLDER)
-        self._hist_search.pack(side="left", fill="x", expand=True, padx=(0, 12))
-
-        # Inner content is inset 2px so the Canvas-drawn rounded outline stays visible.
-        search_win = search_cv.create_window(2, SEARCH_H // 2, window=search_inner,
-                                             anchor="w")
-        _search_state = {"focus": False}
-
-        def _draw_search(_e=None):
-            w = search_cv.winfo_width()
-            if w <= 1:
-                return
-            search_cv.delete("bg")
-            outline = C["accent"] if _search_state["focus"] else C["border"]
-            _rr(search_cv, 1, 1, w - 1, SEARCH_H - 1, 8,
-                fill=C["input_bg"], outline=outline, width=1, tags="bg")
-            search_cv.tag_lower("bg")
-            search_cv.itemconfigure(search_win, width=w - 4)
-
-        search_cv.bind("<Configure>", _draw_search)
-
-        def _sf_in(_e):
-            if self._hist_search.get() == _PLACEHOLDER:
-                self._hist_search.delete(0, "end")
-                self._hist_search.configure(fg=C["text"])
-            _search_state["focus"] = True
-            _draw_search()
-
-        def _sf_out(_e):
-            _search_state["focus"] = False
-            _draw_search()
-            if not self._hist_search.get().strip():
-                self._hist_search.delete(0, "end")
-                self._hist_search.insert(0, _PLACEHOLDER)
-                self._hist_search.configure(fg=C["subtext"])
-
-        def _sf_key(_e):
-            v = self._hist_search.get()
-            self._hist_query = "" if v == _PLACEHOLDER else v.strip().lower()
-            old_job = getattr(self, "_hist_search_job", None)
-            if old_job is not None:
-                try:
-                    self._root.after_cancel(old_job)
-                except tk.TclError:
-                    pass
-            self._hist_search_job = self._root.after(90, self._apply_history_search)
-
-        self._hist_search.bind("<FocusIn>", _sf_in)
-        self._hist_search.bind("<FocusOut>", _sf_out)
-        self._hist_search.bind("<KeyRelease>", _sf_key)
-        search_cv.bind("<Button-1>", lambda _e: self._hist_search.focus_set())
+        self._hist_search = self._search_bar(
+            parent, "Search transcriptions…", _on_hist_query)
 
         # Middle row: the rounded card sits on the left and an external
         # scrollbar sits on the far right, OUTSIDE the card border (matching the
@@ -3995,7 +3960,6 @@ class AppWindow:
         )))
 
     def _apply_history_search(self) -> None:
-        self._hist_search_job = None
         if getattr(self, "_current_tab", "") == "history":
             self._render_history()
         else:
@@ -4122,7 +4086,6 @@ class AppWindow:
         return label
 
     def _render_history(self) -> None:
-        self._hist_search_job = None
         self._hist_clear_confirm = False
         cv = self._hist_cv
         width = cv.winfo_width()
@@ -5652,35 +5615,47 @@ class AppWindow:
 
         # ── Dictation ─────────────────────────────────────────────────────────
         _section("book", "Dictation")
-        vocab_card = self._card(parent, margin=(0, 4))
-        _vocab_title_row = tk.Frame(vocab_card, bg=C["surface"])
-        _vocab_title_row.pack(fill="x")
-        _card_icon(_vocab_title_row, "book")
-        tk.Label(_vocab_title_row, text="Custom Vocabulary",
-                 fg=C["text"], bg=C["surface"],
-                 font=("Segoe UI", 9), anchor="w").pack(side="left")
-        _vocab_desc = tk.Label(vocab_card,
-                 text="Comma-separated names, acronyms, or terms to boost (e.g. FTC, Salesforce, CRM)",
-                 fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 8), anchor="w", justify="left",
-                 wraplength=320)
-        _vocab_desc.pack(fill="x")
-        self._autowrap(_vocab_desc)
-        current_vocab = (cfg.custom_vocabulary if cfg else "") or ""
-        vocab_var = tk.StringVar(value=current_vocab)
-        vocab_entry = tk.Entry(vocab_card, textvariable=vocab_var,
-                               bg=C["input_bg"], fg=C["text"], insertbackground=C["text"],
-                               relief="flat", font=("Segoe UI", 9), bd=6)
-        vocab_entry.pack(fill="x", pady=(4, 0))
 
-        # Auto-save on blur/Enter (parity with the API-key fields) so the value
-        # isn't silently lost if the user edits it then closes the panel without
-        # clicking Save.
-        def _save_vocab(_e=None):
-            if self._on_settings_change:
-                self._on_settings_change("custom_vocabulary", vocab_var.get().strip())
-        vocab_entry.bind("<FocusOut>", _save_vocab)
-        vocab_entry.bind("<Return>", _save_vocab)
+        def _link_card(kind: str, title: str, subtext: str, icon: str):
+            """A settings row that opens a full page. The whole row is the hit
+            target, and it carries a live count so the page's contents are
+            visible without opening it."""
+            card = self._card(parent, margin=(0, 4))
+            row = tk.Frame(card, bg=C["surface"])
+            row.pack(fill="x")
+            _card_icon(row, icon)
+
+            chev = tk.Label(row, text="›", fg=C["subtext"], bg=C["surface"],
+                            font=("Segoe UI", 13))
+            chev.pack(side="right", padx=(8, 0))
+            count = tk.Label(row, text="", fg=C["subtext"], bg=C["surface"],
+                             font=("Segoe UI", 8))
+            count.pack(side="right")
+            self._lib_count_labels[kind] = count
+
+            col = tk.Frame(row, bg=C["surface"])
+            col.pack(side="left", fill="x", expand=True)
+            tk.Label(col, text=title, fg=C["text"], bg=C["surface"],
+                     font=("Segoe UI", 9), anchor="w").pack(anchor="w")
+            desc = tk.Label(col, text=subtext, fg=C["subtext"], bg=C["surface"],
+                            font=("Segoe UI", 8), anchor="w", justify="left",
+                            wraplength=260)
+            desc.pack(fill="x")
+            self._autowrap(desc)
+
+            def _open(_e=None):
+                self._switch_dash_tab(kind)
+
+            for w in (card, row, col, chev, count) + tuple(col.winfo_children()):
+                w.configure(cursor="hand2")
+                w.bind("<Button-1>", _open)
+
+        _link_card("vocabulary", "Custom Vocabulary",
+                   "Names, acronyms and jargon the app should always get "
+                   "right, plus what it tends to mishear them as", "book")
+        _link_card("snippets", "Snippets",
+                   "Say a short phrase and it expands into a full block of "
+                   "text: an address, a sign-off, a standard paragraph", "wand")
 
         _toggle_card("auto_punctuate", "Auto Punctuation",
                      "Add a trailing period when speech ends without ending punctuation",
@@ -5820,7 +5795,6 @@ class AppWindow:
                     "input_device",
                     "auto" if mic_val.startswith(_AUTO_PREFIX)
                     or mic_val == "Default" else mic_val)
-                self._on_settings_change("custom_vocabulary", vocab_var.get().strip())
                 self._on_settings_change("sound_feedback", sound_var.get())
             self._settings_status.configure(text="Saved ✓", fg=C["success"])
             if self._root:
@@ -5828,6 +5802,466 @@ class AppWindow:
 
         save_btn = self._surface_btn(save_wrap, "Save Settings", _save)
         save_btn.pack(side="right")
+
+    # ── Custom Vocabulary / Snippets pages ───────────────────────────────────
+    #
+    # Both are full pages rather than cards inside Settings: Settings is already
+    # a long scrolling page, and a list that grows to forty rows inside it
+    # buries every setting below. They join _dash_content's grid like the other
+    # pages, so the atomic swap, wheel routing and repaint healing all apply
+    # unchanged — no Toplevel, no modal.
+
+    _LIB_SPECS = {
+        "vocabulary": {
+            "title": "Custom Vocabulary",
+            "icon": "book",
+            "blurb": "Names, acronyms and jargon the app should always get "
+                     "right, plus the ways it tends to mishear them.",
+            "search": "Search words…",
+            "add": "+ Add word",
+            "empty": "No words added",
+            "empty_sub": "Add a word and it will be recognised every time.",
+            "unit": ("word", "words"),
+        },
+        "snippets": {
+            "title": "Snippets",
+            "icon": "wand",
+            "blurb": "Say a short phrase and it expands into a full block of "
+                     "text: an address, a sign-off, a standard paragraph.",
+            "search": "Search snippets…",
+            "add": "+ Add snippet",
+            "empty": "No snippets added",
+            "empty_sub": "Add a snippet to expand a phrase as you say it.",
+            "unit": ("snippet", "snippets"),
+        },
+    }
+
+    def _lib_state(self, kind: str) -> dict:
+        return self._lib.setdefault(kind, {"query": "", "editing": None,
+                                           "error": ""})
+
+    def _lib_entries(self, kind: str) -> list:
+        """This account's live entries, newest first. Never raises — a page that
+        throws while listing is worse than a page that shows nothing."""
+        try:
+            import vocab_store
+            rows = vocab_store.load(self._config, kind, self._account_email())
+        except Exception as exc:
+            print(f"[UI] {kind} load failed (non-fatal): {exc}")
+            return []
+        return sorted(rows, key=lambda e: str(e.get("updated_at") or ""),
+                      reverse=True)
+
+    def _account_email(self) -> str:
+        return (getattr(self._auth, "user_email", "") or "")
+
+    def _lib_matches(self, kind: str, entry: dict, query: str) -> bool:
+        if not query:
+            return True
+        if kind == "vocabulary":
+            hay = " ".join([entry.get("term") or ""]
+                           + list(entry.get("sounds_like") or []))
+        else:
+            hay = " ".join([entry.get("name") or "", entry.get("trigger") or "",
+                            entry.get("body") or ""])
+        return query in hay.lower()
+
+    def _build_library_page(self, parent: tk.Frame, kind: str) -> None:
+        spec = self._LIB_SPECS[kind]
+        state = self._lib_state(kind)
+
+        # Header: back arrow and title on the row the tab bar occupies
+        # elsewhere, so the page reads as a level down rather than a new tab.
+        head = tk.Frame(parent, bg=C["bg"])
+        head.pack(fill="x", padx=20, pady=(0, 4))
+
+        back = tk.Label(head, text="‹  Back", fg=C["subtext"], bg=C["bg"],
+                        font=("Segoe UI", 10), cursor="hand2")
+        back.pack(side="left")
+        back.bind("<Button-1>", lambda _e: self._switch_dash_tab("settings"))
+        back.bind("<Enter>", lambda _e: back.configure(fg=C["accent"]))
+        back.bind("<Leave>", lambda _e: back.configure(fg=C["subtext"]))
+
+        tk.Label(head, text=spec["title"], fg=C["text"], bg=C["bg"],
+                 font=("Segoe UI", 11, "bold")).pack(side="left", padx=(14, 0))
+
+        state["count_lbl"] = tk.Label(head, text="", fg=C["subtext"], bg=C["bg"],
+                                      font=("Segoe UI", 9))
+        state["count_lbl"].pack(side="right")
+
+        blurb = tk.Label(parent, text=spec["blurb"], fg=C["subtext"], bg=C["bg"],
+                         font=("Segoe UI", 8), anchor="w", justify="left")
+        blurb.pack(fill="x", padx=20, pady=(0, 8))
+        self._autowrap(blurb)
+
+        # Search + Add share a row: on a 400px-wide window they do not each
+        # deserve a line of their own.
+        tools = tk.Frame(parent, bg=C["bg"])
+        tools.pack(fill="x", padx=0, pady=(0, 2))
+
+        add_holder = tk.Frame(tools, bg=C["bg"])
+        add_holder.pack(side="right", padx=(0, 20))
+        add_btn = RoundedButton(
+            add_holder, text=spec["add"],
+            command=lambda: self._lib_start_add(kind),
+            fg=C["bg"], fill=C["accent"], font=("Segoe UI", 9, "bold"),
+            padx=12, pady=7, radius=8)
+        add_btn.pack()
+        add_btn.bind("<Enter>", lambda _e: add_btn.configure(bg=C["accent_hover"]))
+        add_btn.bind("<Leave>", lambda _e: add_btn.configure(bg=C["accent"]))
+
+        search_holder = tk.Frame(tools, bg=C["bg"])
+        search_holder.pack(side="left", fill="x", expand=True)
+
+        def _on_query(q: str) -> None:
+            state["query"] = q
+            self._render_library(kind)
+
+        state["search"] = self._search_bar(
+            search_holder, spec["search"], _on_query, padx=(20, 10), pady=(0, 8))
+
+        # ScrollPane, never a Canvas: canvas blit-scroll is what minted the
+        # ghost duplicates the v1.6.36 structural fix removed.
+        body = tk.Frame(parent, bg=C["bg"])
+        body.pack(fill="both", expand=True)
+        pane = ScrollPane(body, bg=C["bg"])
+        bar = ModernScrollbar(
+            body, command=lambda *a: self._scrollbar_command(pane, *a))
+        pane.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        pane.pack(side="left", fill="both", expand=True)
+
+        state["pane"] = pane
+        state["list"] = pane.content
+        self._render_library(kind)
+
+    # ── List rendering ───────────────────────────────────────────────────────
+
+    def _render_library(self, kind: str) -> None:
+        state = self._lib_state(kind)
+        holder = state.get("list")
+        if holder is None:
+            return
+        spec = self._LIB_SPECS[kind]
+
+        def _draw():
+            for child in holder.winfo_children():
+                child.destroy()
+
+            entries = self._lib_entries(kind)
+            singular, plural = spec["unit"]
+            n = len(entries)
+            if state.get("count_lbl") is not None:
+                state["count_lbl"].configure(
+                    text=f"{n} {singular if n == 1 else plural}")
+
+            editing = state.get("editing")
+            if editing == "new":
+                self._draw_library_editor(holder, kind, None)
+
+            shown = [e for e in entries
+                     if self._lib_matches(kind, e, state.get("query", ""))]
+
+            if not entries and editing != "new":
+                self._draw_library_empty(holder, kind)
+                return
+            if entries and not shown:
+                tk.Label(holder, text="No matches", fg=C["subtext"], bg=C["bg"],
+                         font=("Segoe UI", 9)).pack(pady=24)
+
+            for entry in shown:
+                if entry.get("id") == editing:
+                    self._draw_library_editor(holder, kind, entry)
+                else:
+                    self._draw_library_row(holder, kind, entry)
+
+        # One atomic present: destroying and rebuilding rows live is exactly
+        # the map/unmap churn that shows as a flicker.
+        self._atomic_ui(_draw)
+
+    def _draw_library_empty(self, holder: tk.Frame, kind: str) -> None:
+        spec = self._LIB_SPECS[kind]
+        wrap = tk.Frame(holder, bg=C["bg"])
+        wrap.pack(fill="x", pady=(40, 0))
+        try:
+            import ui_render
+            ph = ui_render.icon_glyph(wrap, spec["icon"], 34, C["border"],
+                                      bg=C["bg"])
+            if ph is not None:
+                lbl = tk.Label(wrap, image=ph, bg=C["bg"])
+                lbl.image = ph
+                lbl.pack(pady=(0, 10))
+        except Exception:
+            pass
+        tk.Label(wrap, text=spec["empty"], fg=C["text"], bg=C["bg"],
+                 font=("Segoe UI", 11, "bold")).pack()
+        sub = tk.Label(wrap, text=spec["empty_sub"], fg=C["subtext"], bg=C["bg"],
+                       font=("Segoe UI", 9), justify="center")
+        sub.pack(pady=(4, 14), padx=30, fill="x")
+        self._autowrap(sub)
+        btn = RoundedButton(
+            wrap, text=spec["add"], command=lambda: self._lib_start_add(kind),
+            fg=C["bg"], fill=C["accent"], font=("Segoe UI", 9, "bold"),
+            padx=14, pady=7, radius=8)
+        btn.pack()
+        btn.bind("<Enter>", lambda _e: btn.configure(bg=C["accent_hover"]))
+        btn.bind("<Leave>", lambda _e: btn.configure(bg=C["accent"]))
+
+    def _draw_library_row(self, holder: tk.Frame, kind: str,
+                          entry: dict) -> None:
+        card = self._card(holder, margin=(0, 4), inner_pad=(16, 12))
+        row = tk.Frame(card, bg=C["surface"])
+        row.pack(fill="x")
+
+        if kind == "vocabulary":
+            title = entry.get("term") or ""
+            variants = [v for v in (entry.get("sounds_like") or []) if v]
+            sub = ("sounds like: " + ", ".join(variants)) if variants else ""
+        else:
+            title = entry.get("name") or entry.get("trigger") or ""
+            sub = " ".join((entry.get("body") or "").split())
+
+        col = tk.Frame(row, bg=C["surface"])
+        col.pack(side="left", fill="x", expand=True)
+        tk.Label(col, text=title, fg=C["text"], bg=C["surface"],
+                 font=("Segoe UI", 10), anchor="w").pack(anchor="w")
+
+        if kind == "snippets":
+            trigger = entry.get("trigger") or ""
+            tk.Label(col, text=f'say "{trigger}"', fg=C["accent"],
+                     bg=C["surface"], font=("Segoe UI", 8),
+                     anchor="w").pack(anchor="w", pady=(1, 0))
+        if sub:
+            lbl = tk.Label(col, text=sub, fg=C["subtext"], bg=C["surface"],
+                           font=("Segoe UI", 8), anchor="w", justify="left")
+            lbl.pack(fill="x", pady=(1, 0))
+            self._autowrap(lbl)
+
+        chev = tk.Label(row, text="›", fg=C["subtext"], bg=C["surface"],
+                        font=("Segoe UI", 13))
+        chev.pack(side="right", padx=(8, 0))
+
+        # The whole row opens the editor — a 12px chevron is a miss waiting to
+        # happen, the same reason the impact panel's close strip is full width.
+        def _open(_e=None):
+            self._lib_state(kind)["editing"] = entry.get("id")
+            self._lib_state(kind)["error"] = ""
+            self._render_library(kind)
+
+        for w in (card, row, col, chev) + tuple(col.winfo_children()):
+            w.configure(cursor="hand2")
+            w.bind("<Button-1>", _open)
+
+    # ── Editor ───────────────────────────────────────────────────────────────
+
+    def _lib_start_add(self, kind: str) -> None:
+        state = self._lib_state(kind)
+        state["editing"] = "new"
+        state["error"] = ""
+        self._render_library(kind)
+
+    def _lib_close_editor(self, kind: str) -> None:
+        state = self._lib_state(kind)
+        state["editing"] = None
+        state["error"] = ""
+        self._render_library(kind)
+
+    def _draw_library_editor(self, holder: tk.Frame, kind: str,
+                             entry) -> None:
+        """Inline editor, in the row's own place. A dialog would be another
+        Toplevel, and every Toplevel in this app has cost a Z-order or DPI bug."""
+        state = self._lib_state(kind)
+        is_new = entry is None
+        entry = entry or {}
+        card = self._card(holder, margin=(0, 4), inner_pad=(16, 14))
+
+        def _field(label: str, value: str, *, multiline=False, height=4):
+            tk.Label(card, text=label, fg=C["subtext"], bg=C["surface"],
+                     font=("Segoe UI", 8), anchor="w").pack(fill="x",
+                                                            pady=(6, 2))
+            if multiline:
+                w = tk.Text(card, height=height, wrap="word", bg=C["input_bg"],
+                            fg=C["text"], insertbackground=C["text"],
+                            relief="flat", bd=6, highlightthickness=0,
+                            font=("Segoe UI", 9))
+                w.insert("1.0", value)
+            else:
+                w = tk.Entry(card, bg=C["input_bg"], fg=C["text"],
+                             insertbackground=C["text"], relief="flat",
+                             font=("Segoe UI", 9), bd=6)
+                w.insert(0, value)
+            w.pack(fill="x")
+            return w
+
+        if kind == "vocabulary":
+            f_term = _field("WORD OR PHRASE", entry.get("term") or "")
+            f_sounds = _field(
+                "SOUNDS LIKE  (one per line, optional)",
+                "\n".join(entry.get("sounds_like") or []),
+                multiline=True, height=3)
+            hint = ("Leave blank if it is already recognised. Add a line for "
+                    "each way it comes out wrong.")
+            fields = {"term": f_term, "sounds_like": f_sounds}
+        else:
+            f_name = _field("NAME", entry.get("name") or "")
+            f_trigger = _field("WHEN I SAY", entry.get("trigger") or "")
+            f_body = _field("INSERT THIS", entry.get("body") or "",
+                            multiline=True, height=4)
+            hint = ("The trigger is matched as a whole phrase, so it never "
+                    "fires inside another word.")
+            fields = {"name": f_name, "trigger": f_trigger, "body": f_body}
+
+        hint_lbl = tk.Label(card, text=hint, fg=C["subtext"], bg=C["surface"],
+                            font=("Segoe UI", 8), anchor="w", justify="left")
+        hint_lbl.pack(fill="x", pady=(6, 0))
+        self._autowrap(hint_lbl)
+
+        err = tk.Label(card, text=state.get("error", ""), fg=C["error"],
+                       bg=C["surface"], font=("Segoe UI", 8), anchor="w",
+                       justify="left")
+        err.pack(fill="x", pady=(4, 0))
+        self._autowrap(err)
+
+        actions = tk.Frame(card, bg=C["surface"])
+        actions.pack(fill="x", pady=(10, 0))
+
+        save = RoundedButton(
+            actions, text="Save",
+            command=lambda: self._lib_save(kind, entry, fields, err),
+            fg=C["bg"], fill=C["accent"], font=("Segoe UI", 9, "bold"),
+            padx=16, pady=7, radius=8)
+        save.pack(side="left")
+        save.bind("<Enter>", lambda _e: save.configure(bg=C["accent_hover"]))
+        save.bind("<Leave>", lambda _e: save.configure(bg=C["accent"]))
+
+        cancel = tk.Label(actions, text="Cancel", fg=C["subtext"],
+                          bg=C["surface"], font=("Segoe UI", 9), cursor="hand2")
+        cancel.pack(side="left", padx=(14, 0))
+        cancel.bind("<Button-1>", lambda _e: self._lib_close_editor(kind))
+        cancel.bind("<Enter>", lambda _e: cancel.configure(fg=C["text"]))
+        cancel.bind("<Leave>", lambda _e: cancel.configure(fg=C["subtext"]))
+
+        if not is_new:
+            delete = tk.Label(actions, text="Delete", fg=C["error"],
+                              bg=C["surface"], font=("Segoe UI", 9),
+                              cursor="hand2")
+            delete.pack(side="right")
+            delete.bind("<Button-1>",
+                        lambda _e: self._lib_delete(kind, entry.get("id")))
+            delete.bind("<Enter>", lambda _e: delete.configure(fg="#ff8888"))
+            delete.bind("<Leave>", lambda _e: delete.configure(fg=C["error"]))
+
+        first = fields.get("term") or fields.get("name")
+        if first is not None:
+            try:
+                first.focus_set()
+            except tk.TclError:
+                pass
+
+    @staticmethod
+    def _read_field(widget) -> str:
+        if isinstance(widget, tk.Text):
+            return widget.get("1.0", "end-1c")
+        return widget.get()
+
+    def _lib_save(self, kind: str, entry: dict, fields: dict, err) -> None:
+        from text_expansion import validate_sounds_like, validate_trigger
+        state = self._lib_state(kind)
+        payload = dict(entry)
+
+        def _fail(message: str) -> None:
+            state["error"] = message
+            try:
+                err.configure(text=message)
+            except tk.TclError:
+                pass
+
+        if kind == "vocabulary":
+            term = " ".join(self._read_field(fields["term"]).split())
+            if not term:
+                return _fail("Enter the word or phrase.")
+            variants = []
+            for line in self._read_field(fields["sounds_like"]).splitlines():
+                line = " ".join(line.split())
+                if not line:
+                    continue
+                ok, reason = validate_sounds_like(line, term)
+                if not ok:
+                    return _fail(f"“{line}” — {reason}")
+                variants.append(line)
+            payload.update(term=term, sounds_like=variants)
+        else:
+            name = " ".join(self._read_field(fields["name"]).split())
+            trigger = " ".join(self._read_field(fields["trigger"]).split())
+            body = self._read_field(fields["body"]).strip()
+            ok, reason = validate_trigger(trigger)
+            if not ok:
+                return _fail(reason)
+            if not body:
+                return _fail("Enter the text it should insert.")
+            payload.update(name=name or trigger, trigger=trigger, body=body)
+
+        try:
+            import vocab_store
+            vocab_store.upsert(self._config, kind, payload,
+                               self._account_email())
+        except Exception as exc:
+            return _fail(f"Couldn't save: {exc}")
+
+        state["editing"] = None
+        state["error"] = ""
+        self._render_library(kind)
+        self._sync_library(kind)
+        self._refresh_library_counts()
+
+    def _lib_delete(self, kind: str, entry_id) -> None:
+        try:
+            import vocab_store
+            vocab_store.soft_delete(self._config, kind, entry_id,
+                                    self._account_email())
+        except Exception as exc:
+            print(f"[UI] {kind} delete failed (non-fatal): {exc}")
+        self._lib_close_editor(kind)
+        self._sync_library(kind)
+        self._refresh_library_counts()
+
+    def _sync_library(self, kind: str) -> None:
+        """Push this account's entries to Supabase, fire-and-forget. The local
+        copy is already saved and already live, so a missing table or a dead
+        connection costs nothing."""
+        if self._db is None or not hasattr(self._db, "push_library"):
+            return
+
+        def _worker():
+            try:
+                import vocab_store
+                self._db.push_library(
+                    kind, vocab_store.load_all(self._config, kind,
+                                               self._account_email()))
+            except Exception as exc:
+                print(f"[UI] {kind} sync failed (non-fatal): {exc}")
+
+        threading.Thread(target=_worker, daemon=True,
+                         name=f"{kind}-sync").start()
+
+    def _refresh_library_counts(self) -> None:
+        """Update the Settings rows' "12 words" summaries after an edit."""
+        for kind, lbl in getattr(self, "_lib_count_labels", {}).items():
+            singular, plural = self._LIB_SPECS[kind]["unit"]
+            n = len(self._lib_entries(kind))
+            try:
+                lbl.configure(text=f"{n} {singular if n == 1 else plural}")
+            except tk.TclError:
+                pass
+
+    def refresh_libraries(self) -> None:
+        """Thread-safe redraw after a background sync pulled remote changes."""
+        def _apply():
+            self._refresh_library_counts()
+            for kind in self._LIB_SPECS:
+                if self._lib_state(kind).get("list") is not None:
+                    self._render_library(kind)
+        self._ui_after(0, _apply)
 
     # ── Update banner / toast ─────────────────────────────────────────────────
 
@@ -6181,6 +6615,83 @@ class AppWindow:
             self._pending_geometry = geo
             return
         self._root.geometry(geo)
+
+    # ── Rounded search bar ───────────────────────────────────────────────────
+
+    def _search_bar(self, parent: tk.Frame, placeholder: str, on_change,
+                    *, padx=20, pady=(0, 10), height: int = 34):
+        """Rounded search field with a magnifier, placeholder and accent focus
+        ring. `on_change(query_lower)` fires 90ms after the last keystroke.
+
+        One control for History, Custom Vocabulary and Snippets: three
+        hand-rolled copies would drift apart the first time one of them was
+        restyled. Returns the Entry so a caller can clear or focus it.
+        """
+        cv = tk.Canvas(parent, height=height, bg=C["bg"],
+                       highlightthickness=0, bd=0)
+        cv.pack(fill="x", padx=padx, pady=pady)
+        inner = tk.Frame(cv, bg=C["input_bg"])
+
+        mag = tk.Canvas(inner, width=18, height=18, bg=C["input_bg"],
+                        highlightthickness=0, bd=0)
+        mag.create_oval(4, 4, 12, 12, outline=C["subtext"], width=1.5)
+        mag.create_line(11.5, 11.5, 15.5, 15.5, fill=C["subtext"], width=1.5,
+                        capstyle="round")
+        mag.pack(side="left", padx=(12, 6))
+
+        entry = tk.Entry(inner, bg=C["input_bg"], fg=C["subtext"], relief="flat",
+                         bd=0, highlightthickness=0, insertbackground=C["text"],
+                         font=("Segoe UI", 9))
+        entry.insert(0, placeholder)
+        entry.pack(side="left", fill="x", expand=True, padx=(0, 12))
+
+        # Inset 2px so the Canvas-drawn rounded outline stays visible.
+        win = cv.create_window(2, height // 2, window=inner, anchor="w")
+        state = {"focus": False, "job": None}
+
+        def _draw(_e=None):
+            w = cv.winfo_width()
+            if w <= 1:
+                return
+            cv.delete("bg")
+            _rr(cv, 1, 1, w - 1, height - 1, 8, fill=C["input_bg"],
+                outline=C["accent"] if state["focus"] else C["border"],
+                width=1, tags="bg")
+            cv.tag_lower("bg")
+            cv.itemconfigure(win, width=w - 4)
+
+        cv.bind("<Configure>", _draw)
+
+        def _focus_in(_e):
+            if entry.get() == placeholder:
+                entry.delete(0, "end")
+                entry.configure(fg=C["text"])
+            state["focus"] = True
+            _draw()
+
+        def _focus_out(_e):
+            state["focus"] = False
+            _draw()
+            if not entry.get().strip():
+                entry.delete(0, "end")
+                entry.insert(0, placeholder)
+                entry.configure(fg=C["subtext"])
+
+        def _key(_e):
+            raw = entry.get()
+            query = "" if raw == placeholder else raw.strip().lower()
+            if state["job"] is not None:
+                try:
+                    self._root.after_cancel(state["job"])
+                except tk.TclError:
+                    pass
+            state["job"] = self._root.after(90, lambda: on_change(query))
+
+        entry.bind("<FocusIn>", _focus_in)
+        entry.bind("<FocusOut>", _focus_out)
+        entry.bind("<KeyRelease>", _key)
+        cv.bind("<Button-1>", lambda _e: entry.focus_set())
+        return entry
 
     # ── Rounded card ─────────────────────────────────────────────────────────
 

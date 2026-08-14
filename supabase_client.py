@@ -245,6 +245,87 @@ class SupabaseLogger:
                          name="supabase-error-log").start()
 
     # ------------------------------------------------------------------
+    # Custom vocabulary / snippets sync
+    # ------------------------------------------------------------------
+
+    _LIBRARY_TABLES = {"vocabulary": "user_vocabulary",
+                       "snippets": "user_snippets"}
+
+    def push_library(self, kind: str, entries) -> None:
+        """Upsert this account's entries, tombstones included.
+
+        Blocking (callers already run it on a background thread) and entirely
+        best-effort. The local copy in config.json is the source of truth at
+        dictation time, so a missing table, an RLS block or an outage costs the
+        user nothing — which matters here because this project has shipped
+        migrations that were never applied to the live project.
+        """
+        table = self._LIBRARY_TABLES.get(kind)
+        if not table or not self._enabled or not entries:
+            return
+        if not self._user_id or self._user_id == "local":
+            return
+        rows = []
+        for e in entries:
+            if not isinstance(e, dict) or not e.get("id"):
+                continue
+            row = {
+                "id": e["id"],
+                "user_id": self._user_id,
+                "updated_at": e.get("updated_at"),
+                "deleted": bool(e.get("deleted")),
+            }
+            if kind == "vocabulary":
+                row["term"] = e.get("term") or ""
+                row["sounds_like"] = list(e.get("sounds_like") or [])
+            else:
+                row["name"] = e.get("name") or ""
+                row["trigger"] = e.get("trigger") or ""
+                row["body"] = e.get("body") or ""
+            rows.append(row)
+        if not rows:
+            return
+        try:
+            self._get_client().table(table).upsert(rows).execute()
+            print(f"[Supabase] {table}: pushed {len(rows)} row(s)")
+        except Exception as e:
+            print(f"[Supabase] {table} push failed (non-fatal): {e}")
+
+    def fetch_library(self, kind: str) -> list:
+        """This account's entries from Supabase, tombstones included so a
+        delete made on another machine survives the merge. [] on any failure,
+        which is indistinguishable from "nothing synced yet" and is exactly
+        how it should behave."""
+        table = self._LIBRARY_TABLES.get(kind)
+        if not table or not self._enabled:
+            return []
+        if not self._user_id or self._user_id == "local":
+            return []
+        try:
+            rows = (self._get_client().table(table).select("*")
+                    .eq("user_id", self._user_id).execute().data or [])
+        except Exception as e:
+            print(f"[Supabase] {table} fetch failed (non-fatal): {e}")
+            return []
+        out = []
+        for r in rows:
+            entry = {
+                "id": r.get("id"),
+                "updated_at": r.get("updated_at") or "",
+                "deleted": bool(r.get("deleted")),
+            }
+            if kind == "vocabulary":
+                entry["term"] = r.get("term") or ""
+                entry["sounds_like"] = list(r.get("sounds_like") or [])
+            else:
+                entry["name"] = r.get("name") or ""
+                entry["trigger"] = r.get("trigger") or ""
+                entry["body"] = r.get("body") or ""
+            if entry["id"]:
+                out.append(entry)
+        return out
+
+    # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
@@ -269,6 +350,27 @@ class SupabaseLogger:
         t.start()
         t.join(timeout=8.0)
         return result[0]
+
+    def fetch_user_display_name(self) -> str:
+        """The signed-in user's name from their profile row (FTC Contacts shares
+        this Supabase project, so it's the same account the CRM knows them by).
+        Used to sign off Email refinements. Best-effort: returns "" when signed
+        out, offline, or the column/row isn't there. Called from a background
+        thread, so this blocks inline. RLS scopes the row to the current user."""
+        if not self._enabled or not self._user_id or self._user_id == "local":
+            return ""
+        try:
+            r = (self._get_client()
+                 .table("profiles")
+                 .select("full_name")
+                 .eq("id", self._user_id)
+                 .limit(1)
+                 .execute())
+            if r.data:
+                return (r.data[0].get("full_name") or "").strip()
+        except Exception as exc:
+            print(f"[Supabase] fetch_user_display_name failed (non-fatal): {exc}")
+        return ""
 
     def fetch_contact_vocab(self, limit: int = 500) -> list:
         """Contact and company names from the estate CRM (FTC Contacts shares

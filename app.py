@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.66"
+APP_VERSION = "1.6.67"
 
 
 class _RECT(ctypes.Structure):
@@ -527,6 +527,12 @@ class WhisperFlowApp:
 
         print(f"[App] Authenticated as {auth.user_email}")
 
+        # Vocabulary/snippets are per account. Anything typed while signed out
+        # belongs to whoever just signed in, and a pre-existing comma-separated
+        # custom_vocabulary becomes real entries. Both are local, cheap and
+        # idempotent, so they run inline before any sync can race them.
+        self._adopt_user_libraries(auth.user_email or "")
+
         # If no local API key, fetch from Supabase app_settings — in a daemon
         # thread: these are two sequential network calls and used to gate
         # hotkey registration, delaying time-to-first-dictation by seconds.
@@ -538,6 +544,15 @@ class WhisperFlowApp:
             # hotwords (needs the authenticated client for RLS).
             threading.Thread(
                 target=self._load_estate_vocab, daemon=True, name="estate-vocab"
+            ).start()
+            # Email refine sign-off: pull the user's real name from their FTC
+            # profile so it signs off with the name, not "[Sender's Name]".
+            threading.Thread(
+                target=self._load_sender_name, daemon=True, name="sender-name"
+            ).start()
+            # Custom vocabulary / snippets from the user's other machines.
+            threading.Thread(
+                target=self._sync_user_libraries, daemon=True, name="library-sync"
             ).start()
 
         if self.ai_refiner.is_available:
@@ -1493,6 +1508,12 @@ class WhisperFlowApp:
                 print(f"[App] Spoken symbols: '{transcribed_text}' -> '{_sc}'")
                 transcribed_text = _sc
 
+        # The user's own vocabulary corrections, then their snippets — same
+        # single post-processing point, for the same reason. Vocabulary first,
+        # so a corrected term can complete a snippet trigger ("pipe drive link"
+        # -> "Pipedrive link" -> the URL) but never the reverse.
+        transcribed_text = self._apply_user_libraries(transcribed_text)
+
         # ── Injection — isolated so a failure never prevents the popup ──────────
         # Whole block in try/finally: even if focus/release/inject/feedback throw,
         # set_idle() ALWAYS fires, so the "Transcribing…" pill is never orphaned
@@ -1914,12 +1935,96 @@ class WhisperFlowApp:
         with self._context_lock:
             self._context_deque.extend(text.split()[-30:])
 
+    def _account_email(self) -> str:
+        return (getattr(self._auth, "user_email", "") or "")
+
+    def _adopt_user_libraries(self, email: str) -> None:
+        """Claim signed-out entries for this account and migrate the legacy
+        comma-separated vocabulary field. Best-effort — a failure here must
+        never stop the app finishing sign-in."""
+        try:
+            import vocab_store
+            moved = vocab_store.adopt_local_entries(self.config, email)
+            migrated = vocab_store.migrate_legacy_vocabulary(self.config, email)
+            if moved or migrated:
+                print(f"[App] User libraries: adopted {moved}, "
+                      f"migrated {migrated} legacy term(s)")
+        except Exception as exc:
+            print(f"[App] User library setup failed (non-fatal): {exc}")
+
+    def _sync_user_libraries(self) -> None:
+        """Two-way merge of vocabulary and snippets with Supabase.
+
+        Pull, merge by `updated_at`, write the result back locally, then push
+        the merged set so the other machine converges too. Entirely optional:
+        if the tables do not exist the fetch returns [] and everything carries
+        on from the local copy, which is what actually drives dictation.
+        """
+        try:
+            import vocab_store
+        except Exception as exc:
+            print(f"[App] Library sync unavailable (non-fatal): {exc}")
+            return
+        email = self._account_email()
+        changed = False
+        for kind in ("vocabulary", "snippets"):
+            try:
+                remote = self.db.fetch_library(kind)
+                local = vocab_store.load_all(self.config, kind, email)
+                merged = vocab_store.merge(local, remote)
+                if merged != local:
+                    vocab_store.save(self.config, kind, merged, email)
+                    changed = True
+                # Push unconditionally: a first sync has nothing remote to
+                # merge, and the local rows still need to get up there.
+                self.db.push_library(kind, merged)
+            except Exception as exc:
+                print(f"[App] {kind} sync failed (non-fatal): {exc}")
+        if changed:
+            try:
+                self.app_window.refresh_libraries()
+            except Exception:
+                pass
+
+    def _user_entries(self, kind: str) -> list:
+        """This account's live vocabulary/snippet entries. Read straight from
+        the in-memory config — the dictation path must never wait on a network
+        call, so sync only ever writes here in the background."""
+        try:
+            import vocab_store
+            return vocab_store.load(self.config, kind, self._account_email())
+        except Exception as exc:
+            print(f"[App] {kind} load failed (non-fatal): {exc}")
+            return []
+
+    def _apply_user_libraries(self, text: str) -> str:
+        """Vocabulary corrections then snippet expansion. Never raises: a bad
+        entry must degrade to the raw transcript, never lose the dictation."""
+        if not text:
+            return text
+        try:
+            from text_expansion import apply_snippets, apply_vocabulary
+            fixed = apply_vocabulary(text, self._user_entries("vocabulary"))
+            fixed = apply_snippets(fixed, self._user_entries("snippets"))
+        except Exception as exc:
+            print(f"[App] User libraries failed (non-fatal): {exc}")
+            return text
+        if fixed != text:
+            print(f"[App] User libraries: '{text}' -> '{fixed}'")
+        return fixed
+
     def _get_hotwords(self) -> str:
         custom = (getattr(self.config, "custom_vocabulary", "") or "").strip()
         estate = getattr(self, "_estate_vocab", "") or ""
-        if custom and estate:
-            return f"{custom}, {estate}"
-        return custom or estate
+        # The user's vocabulary TERMS (never their mishearings) — boosting the
+        # term is what stops the engine producing the wrong form in the first
+        # place; the corrections above are only the safety net.
+        try:
+            from text_expansion import vocabulary_hotwords
+            own = vocabulary_hotwords(self._user_entries("vocabulary"))
+        except Exception:
+            own = ""
+        return ", ".join(p for p in (own, custom, estate) if p)
 
     def _load_estate_vocab(self) -> None:
         """Names the user actually dictates — their CRM contacts and companies
@@ -1952,6 +2057,19 @@ class WhisperFlowApp:
                     _json.dump(terms, f, ensure_ascii=False)
             except Exception:
                 pass
+
+    def _load_sender_name(self) -> None:
+        """Fetch the signed-in user's name from their FTC profile and hand it to
+        the popup, so Email refinements sign off with the real name instead of a
+        '[Sender's Name]' placeholder. Best-effort and non-blocking."""
+        try:
+            name = self.db.fetch_user_display_name()
+        except Exception as e:
+            print(f"[App] Sender-name fetch failed (non-fatal): {e}")
+            return
+        if name:
+            self.popup.set_sender_name(name)
+            print(f"[App] Email sign-off name: {name}")
 
     def _on_state_change(self, state: AppState) -> None:
         self.app_window.update_status(

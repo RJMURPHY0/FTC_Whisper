@@ -100,6 +100,12 @@ class Config:
     # "_default" holds the install-time default (super admin's pushed size,
     # read once from app_settings on a fresh install; never refetched).
     window_sizes: dict = field(default_factory=dict)
+    # Custom vocabulary and snippets, keyed by signed-in account email exactly
+    # like window_sizes above ("_local" while signed out) — two people sharing
+    # a machine must not inherit each other's word lists. Entries are dicts;
+    # see vocab_store.py for the shape and the sync/merge rules.
+    vocabulary: dict = field(default_factory=dict)
+    snippets: dict = field(default_factory=dict)
     supabase_url: str = ""  # Optional — enables transcription logging
     supabase_key: str = ""  # Publishable (anon) key
     supabase_email: str = ""  # Account email for silent background auth

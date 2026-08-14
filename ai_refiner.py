@@ -5,7 +5,14 @@ Requires ANTHROPIC_API_KEY environment variable or api_key in config.
 """
 
 import os
+import re
 from typing import Optional
+
+# A bracketed sign-off placeholder the model sometimes emits despite being told
+# not to (e.g. "[Sender's Name]", "[Your Name]", "[Name]", "[Signature]"). Post-
+# processing swaps it for the real name, or strips it when the name is unknown.
+_NAME_PLACEHOLDER = re.compile(
+    r"\[[^\]\n]*?(?:name|sender|sign[\s-]?off|signature)[^\]\n]*?\]", re.I)
 
 
 # Added to every prompt — prevents AI from adding bullet points, dashes, or markdown
@@ -200,7 +207,8 @@ class AIRefiner:
             )
         return self._client
 
-    def refine(self, text: str, mode: str = "punctuation", custom_prompt: Optional[str] = None) -> str:
+    def refine(self, text: str, mode: str = "punctuation", custom_prompt: Optional[str] = None,
+               sender_name: Optional[str] = None) -> str:
         """
         Refine text using Claude or OpenRouter.
 
@@ -208,6 +216,8 @@ class AIRefiner:
             text: The raw transcribed text to refine
             mode: One of "punctuation", "email", "formal", "casual", "concise"
             custom_prompt: Override the system prompt entirely
+            sender_name: The sender's real name (email mode) — signs the email off
+                with it instead of a "[Sender's Name]" placeholder.
 
         Returns:
             Refined text, or original text if API call fails
@@ -221,11 +231,23 @@ class AIRefiner:
 
         prompt = custom_prompt or REFINE_PROMPTS.get(mode, REFINE_PROMPTS["punctuation"])
 
+        # Email sign-off: hand the model the sender's real name so a bare
+        # sign-off ("Thanks,") gets a name and no placeholder is invented.
+        name = (sender_name or "").strip()
+        if mode == "email" and not custom_prompt and name:
+            prompt += (
+                f" The sender's name is '{name}'. If the speech ends with a sign-off "
+                f"phrase that has no name after it (for example 'Thanks,' or 'Cheers,'), "
+                f"put '{name}' on the next line as the signature. Never output a "
+                f"placeholder such as [Your Name] or [Sender's Name] — use the real name."
+            )
+
         # OpenRouter takes priority over Anthropic direct
         if self.openrouter_api_key:
             try:
                 result = self._refine_via_openrouter(text, prompt, mode)
                 if result:
+                    result = self._apply_sender_name(result, mode, name)
                     print(f"[AIRefiner] Refined via OpenRouter ({mode}): '{result}'")
                     return result
                 # Empty result (e.g. openai not installed) — fall through to Anthropic
@@ -253,12 +275,28 @@ class AIRefiner:
                 ],
             )
             result = message.content[0].text.strip()
+            result = self._apply_sender_name(result, mode, name)
             print(f"[AIRefiner] Refined via Anthropic ({mode}): '{result}'")
             return result
 
         except Exception as e:
             print(f"[AIRefiner] Error during refinement: {e}")
             return text
+
+    @staticmethod
+    def _apply_sender_name(text: str, mode: str, name: str) -> str:
+        """Email post-process: swap any '[Sender's Name]'-style placeholder for the
+        real name, or strip it when the name is unknown so the literal bracket text
+        never reaches the user. No-op for every other mode."""
+        if mode != "email" or not _NAME_PLACEHOLDER.search(text):
+            return text
+        out = _NAME_PLACEHOLDER.sub(name, text)
+        if not name:
+            # Removing the placeholder can leave a trailing space or an empty
+            # signature line ("Thanks, " / "Thanks,\n\n"); tidy both.
+            out = re.sub(r"[ \t]+(\n|$)", r"\1", out)
+            out = re.sub(r"\n{3,}", "\n\n", out).rstrip()
+        return out
 
     def context_fix(self, text: str) -> str:
         """Fix misheard words using sentence context. Rejects the result if word

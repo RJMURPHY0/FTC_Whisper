@@ -14,6 +14,7 @@ import os
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from typing import Callable, Optional
 
 
@@ -99,6 +100,10 @@ CP = {
     "divider": "#4a4a4a",
     "btn_bg": "#444444",
     "btn_hover": "#555555",
+    # The mic button rides INSIDE the Ask bar, so its circle has to read against
+    # btn_bg rather than against the panel background.
+    "mic_bg": "#555555",
+    "mic_hover": "#666666",
     "bar_idle": "#666666",  # waveform bar — not speaking
     "bar_active": "#f39200",  # waveform bar — speaking (FTC orange)
     "error": "#ff5555",
@@ -146,7 +151,7 @@ CAPTION_SCROLL_HOLDOFF = 4.0  # secs after a manual scroll before auto-tail resu
 # The Ask-AI instruction box grows downward as the typed text wraps past the
 # right edge, up to this many visible lines, then scrolls internally.
 ASK_MAX_LINES = 6
-ASK_PLACEHOLDER = "Ask AI — e.g. 'change language to French' or 'make this shorter'"
+ASK_PLACEHOLDER = "Ask AI, e.g. 'change language to French' or 'make this shorter'"
 
 # How long the post-transcription icon badge stays before auto-dismissing, so it
 # never lingers on screen indefinitely.
@@ -221,6 +226,33 @@ def _apply_popup_corners(hwnd: int) -> bool:
         return False
 
 
+def _display_lines(widget) -> int:
+    """How many wrapped rows a tk.Text actually occupies (minimum 1).
+
+    `count(..., "displaylines")` returns the number of display-line BOUNDARIES
+    between the two indices, not the number of lines: text occupying three
+    wrapped rows answers 2. Every caller here feeds the answer straight into
+    `configure(height=…)`, so taking it at face value renders one row short and
+    clips the last line — which is what cut the tail off long Ask instructions,
+    long captions and long AI results.
+    """
+    try:
+        widget.update_idletasks()
+        res = widget.count("1.0", "end-1c", "displaylines")
+        if isinstance(res, (tuple, list)):
+            n = int(res[0]) if res else 0
+        elif res is None:
+            n = 0
+        else:
+            n = int(res)
+        return max(1, n + 1)
+    except Exception:
+        try:
+            return max(1, int(widget.index("end-1c").split(".")[0]))
+        except Exception:
+            return 1
+
+
 class _RoundedField(tk.Canvas):
     """Hosts a square-cornered tk widget on a rounded-rect background.
 
@@ -247,28 +279,59 @@ class _RoundedField(tk.Canvas):
         self._on_resize = on_resize
         self._last_inner_w = None
         self._shape = None
+        self._shape_photo = None
         self._child = None
         self._win = None
         self._stretch = False
+        self._trailing = None
+        self._trailing_win = None
+        self._trailing_gap = 6
+        self._trailing_inset = 6
         self.bind("<Configure>", lambda _e: self._paint())
 
-    def host(self, child, *, stretch: bool = False):
+    def host(self, child, *, stretch: bool = False, trailing=None,
+             trailing_gap: int = 6, trailing_inset: int = 6):
         """Embed `child`. stretch=True fills the canvas width (for pack expand),
-        else the canvas takes its width from the child's own requested size."""
+        else the canvas takes its width from the child's own requested size.
+
+        `trailing` rides INSIDE the field, pinned to its right edge and centred
+        on the full height (chat-bar shape: text left, round button right). It is
+        inset by `trailing_inset` from the edge rather than by `pad`, so a button
+        taller than one text row still sits snugly in the curve, and the text's
+        usable width shrinks by the button plus `trailing_gap`.
+        """
         self._child = child
         self._stretch = stretch
+        self._trailing = trailing
+        self._trailing_gap = trailing_gap
+        self._trailing_inset = trailing_inset
         self._win = self.create_window(self._pad, self._pad, anchor="nw",
                                        window=child)
+        if trailing is not None:
+            self._trailing_win = self.create_window(0, 0, anchor="e",
+                                                    window=trailing)
         self.sync()
         return child
+
+    def _trailing_w(self) -> int:
+        if self._trailing is None:
+            return 0
+        return self._trailing.winfo_reqwidth() + self._trailing_gap \
+            + self._trailing_inset
 
     def sync(self) -> None:
         """Re-read the child's requested size and resize to wrap it."""
         if self._child is None:
             return
-        self.configure(height=self._child.winfo_reqheight() + self._pad * 2)
+        h = self._child.winfo_reqheight() + self._pad * 2
+        if self._trailing is not None:
+            # A trailing button taller than one text row must still fit.
+            h = max(h, self._trailing.winfo_reqheight()
+                    + self._trailing_inset * 2)
+        self.configure(height=h)
         if not self._stretch:
-            self.configure(width=self._child.winfo_reqwidth() + self._pad * 2)
+            self.configure(width=self._child.winfo_reqwidth()
+                           + self._pad * 2 + self._trailing_w())
         self._paint()
 
     def _paint(self) -> None:
@@ -277,12 +340,31 @@ class _RoundedField(tk.Canvas):
         w, h = self.winfo_width(), self.winfo_height()
         if w <= 1 or h <= 1:
             return
-        from app_window import _rr
         if self._shape is not None:
             self.delete(self._shape)
-        self._shape = _rr(self, 0, 0, w - 1, h - 1, self._radius, fill=self._fill)
+        # PIL first: Canvas polygons have no anti-aliasing, and the smooth=True
+        # spline _rr uses does not pass through its control points, so it draws
+        # roughly HALF the radius asked for — a bar that reads as barely rounded
+        # however high the number goes. round_rect is a true, cached radius.
+        photo = None
+        try:
+            import ui_render
+            photo = ui_render.round_rect(self, w, h, self._radius, self._fill,
+                                         bg=self.cget("bg"))
+        except Exception:
+            photo = None
+        if photo is not None:
+            self._shape_photo = photo  # keep a reference so Tk can't collect it
+            self._shape = self.create_image(0, 0, image=photo, anchor="nw")
+        else:
+            from app_window import _rr
+            self._shape = _rr(self, 0, 0, w - 1, h - 1, self._radius,
+                              fill=self._fill)
         self.tag_lower(self._shape)
-        inner_w = (w - self._pad * 2) if self._stretch else self._child.winfo_reqwidth()
+        if self._trailing_win is not None:
+            self.coords(self._trailing_win, w - self._trailing_inset, h // 2)
+        inner_w = ((w - self._pad * 2 - self._trailing_w()) if self._stretch
+                   else self._child.winfo_reqwidth())
         self.itemconfigure(self._win, width=max(1, inner_w),
                            height=max(1, h - self._pad * 2))
         if inner_w != self._last_inner_w:
@@ -291,6 +373,73 @@ class _RoundedField(tk.Canvas):
                 # after_idle so the child has actually re-wrapped at the new
                 # width before anything measures it.
                 self.after_idle(self._on_resize)
+
+
+class _CircleButton(tk.Canvas):
+    """A round icon button — a filled circle with a centred glyph.
+
+    Drop-in for the old tk.Label mic so its call sites keep working unchanged:
+    .configure(text=/fg=/bg=) maps to the glyph/colour/fill and redraws, and the
+    <Button-1>/<Enter>/<Leave> binds behave as before. `bg` == the circle fill,
+    matching RoundedButton's contract. Fixed diameter so it stays a true circle
+    (auto-sizing to the glyph would leave an oval).
+    """
+
+    def __init__(self, parent, text="", *, diameter=28, fill=None, fg=None,
+                 font=("Segoe UI", 11), command=None, **kw):
+        parent_bg = kw.pop("bg", None) or parent.cget("bg")
+        super().__init__(parent, width=diameter, height=diameter,
+                         bg=parent_bg, highlightthickness=0, bd=0,
+                         cursor=kw.pop("cursor", "hand2"), **kw)
+        fam = font[0]
+        size = font[1] if len(font) > 1 else 11
+        weight = "bold" if (len(font) > 2 and font[2] == "bold") else "normal"
+        self._font = tkfont.Font(family=fam, size=size, weight=weight)
+        self._d = diameter
+        self._text = text
+        self._fill = fill if fill is not None else CP["btn_bg"]
+        self._fg = fg if fg is not None else CP["subtext"]
+        self._photo = None
+        self._command = command
+        if command is not None:
+            self.bind("<Button-1>", lambda _e: self._command())
+        self._draw()
+
+    def _draw(self) -> None:
+        self.delete("all")
+        d = self._d
+        photo = None
+        try:
+            import ui_render
+            # A circle is a rounded rect whose corner radius is half its side.
+            photo = ui_render.round_rect(self, d, d, d // 2, self._fill,
+                                         bg=self.cget("bg"))
+        except Exception:
+            photo = None
+        if photo is not None:
+            self._photo = photo  # keep a reference so Tk can't collect it
+            self.create_image(0, 0, image=photo, anchor="nw")
+        else:
+            self.create_oval(1, 1, d - 1, d - 1, fill=self._fill, outline="")
+        # Nudge the glyph up a hair — emoji sit low on their baseline.
+        self.create_text(d // 2, d // 2 - 1, text=self._text,
+                         fill=self._fg, font=self._font)
+
+    def configure(self, cnf=None, **kw):
+        redraw = False
+        if "text" in kw:
+            self._text = kw.pop("text"); redraw = True
+        for k in ("bg", "background"):
+            if k in kw:
+                self._fill = kw.pop(k); redraw = True
+        for k in ("fg", "foreground"):
+            if k in kw:
+                self._fg = kw.pop(k); redraw = True
+        if cnf or kw:
+            super().configure(cnf, **kw)
+        if redraw:
+            self._draw()
+    config = configure
 
 
 class FloatingPopup:
@@ -313,6 +462,7 @@ class FloatingPopup:
         self._mic_recording: bool = False
         self._mic_pulse_on: bool = True
         self._original_text: str = ""
+        self._sender_name: str = ""  # the signed-in user's name, for email sign-offs
         self._current_result: Optional[str] = None
         self._inserted_ok: bool = True
         self._ai_busy: bool = False
@@ -360,6 +510,11 @@ class FloatingPopup:
 
     def set_ai_refiner(self, refiner) -> None:
         self._ai_refiner = refiner
+
+    def set_sender_name(self, name: str) -> None:
+        """The signed-in user's real name (from their FTC account profile), used
+        to sign off Email refinements instead of a '[Sender's Name]' placeholder."""
+        self._sender_name = (name or "").strip()
 
     def set_popup_height(self, value: str) -> None:
         """Vertical placement of the fixed popup: "low" (near the taskbar,
@@ -1208,7 +1363,7 @@ class FloatingPopup:
         insert_btn = RoundedButton(
             top, text="↓ Insert", command=self._do_insert,
             fg=CP["text"], fill=CP["btn_bg"],
-            font=("Segoe UI", 9, "bold"), padx=10, pady=4,
+            font=("Segoe UI", 9, "bold"), padx=10, pady=4, radius=3,
         )
         insert_btn.pack(side="left", padx=(0, 10))
         insert_btn.bind("<Enter>", lambda _e: insert_btn.configure(bg=CP["accent"], fg=CP["bg"]))
@@ -1245,7 +1400,10 @@ class FloatingPopup:
         # horizontally instead of expanding.
         self._ask_lines = 1
         self._ask_showing_placeholder = True
-        self._ask_box = _RoundedField(ask_row, fill=CP["btn_bg"], radius=6, pad=4,
+        # Radius bumped (and pad raised to match, so the square-cornered child
+        # never pokes past the wider curve) to sit closer to the rest of the
+        # estate's rounded input fields (FTC Contacts et al.).
+        self._ask_box = _RoundedField(ask_row, fill=CP["btn_bg"], radius=14, pad=8,
                                       on_resize=lambda: self._autosize_ask())
         self._ask_entry = tk.Text(
             self._ask_box,
@@ -1261,8 +1419,25 @@ class FloatingPopup:
             pady=4,
             highlightthickness=0,
         )
-        self._ask_box.host(self._ask_entry, stretch=True)
-        self._ask_box.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        # Round icon button INSIDE the bar, on its right edge — the shape every
+        # chat bar in the estate uses. Parented to the field (not the row) so it
+        # rides the rounded background, and given a lighter fill so the circle
+        # still reads against it.
+        self._mic_btn = _CircleButton(
+            self._ask_box,
+            text="🎙",
+            diameter=30,
+            bg=CP["btn_bg"],
+            fill=CP["mic_bg"],
+            fg=CP["subtext"],
+            font=("Segoe UI", 11),
+            command=self._on_mic_click,
+        )
+        self._mic_btn.bind("<Enter>", lambda _e: self._mic_btn.configure(fg=CP["text"], bg=CP["mic_hover"]) if not self._mic_recording else None)
+        self._mic_btn.bind("<Leave>", lambda _e: self._mic_btn.configure(fg=CP["subtext"], bg=CP["mic_bg"]) if not self._mic_recording else None)
+
+        self._ask_box.host(self._ask_entry, stretch=True, trailing=self._mic_btn)
+        self._ask_box.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self._ask_entry.insert("1.0", ASK_PLACEHOLDER)
 
         def _clear_placeholder(_e=None):
@@ -1292,25 +1467,10 @@ class FloatingPopup:
             "<KeyRelease>",
             lambda _e: (self._touch_panel_activity(), self._autosize_ask()))
 
-        self._mic_btn = tk.Label(
-            ask_row,
-            text="🎙",
-            fg=CP["subtext"],
-            bg=CP["btn_bg"],
-            font=("Segoe UI", 11),
-            padx=6,
-            pady=4,
-            cursor="hand2",
-        )
-        self._mic_btn.pack(side="left", padx=(0, 6))
-        self._mic_btn.bind("<Button-1>", lambda _e: self._on_mic_click())
-        self._mic_btn.bind("<Enter>", lambda _e: self._mic_btn.configure(fg=CP["text"]) if not self._mic_recording else None)
-        self._mic_btn.bind("<Leave>", lambda _e: self._mic_btn.configure(fg=CP["subtext"]) if not self._mic_recording else None)
-
         ask_btn = RoundedButton(
             ask_row, text="✦ Ask", command=self._run_ai_custom,
             fg=CP["bg"], fill=CP["accent"],
-            font=("Segoe UI", 10, "bold"), padx=12, pady=6,
+            font=("Segoe UI", 10, "bold"), padx=12, pady=6, radius=3,
         )
         ask_btn.pack(side="left")
         ask_btn.bind("<Enter>", lambda _e: ask_btn.configure(bg=CP["accent_hover"]))
@@ -1389,7 +1549,7 @@ class FloatingPopup:
         b = RoundedButton(
             parent, text=text, command=command,
             fg=CP["subtext"], fill=CP["btn_bg"],
-            font=("Segoe UI", 10), padx=11, pady=5,
+            font=("Segoe UI", 10), padx=11, pady=5, radius=3,
         )
         b.bind("<Enter>", lambda _e: b.configure(fg=CP["accent"], bg=CP["btn_hover"]))
         b.bind("<Leave>", lambda _e: b.configure(fg=CP["subtext"], bg=CP["btn_bg"]))
@@ -1491,14 +1651,7 @@ class FloatingPopup:
             # displaylines measurement below had to wait for it.
 
             # Height: measure wrapped display lines at this width.
-            self._caption_text.update_idletasks()
-            try:
-                lines = int(
-                    self._caption_text.count("1.0", "end-1c", "displaylines")[0]
-                )
-            except Exception:
-                lines = int(self._caption_text.index("end-1c").split(".")[0])
-            lines = max(1, lines)
+            lines = _display_lines(self._caption_text)
             shown = min(lines, CAPTION_MAX_LINES)
             self._caption_text.configure(height=shown, state="disabled")
             self._caption_box.sync()
@@ -1908,7 +2061,7 @@ class FloatingPopup:
         if self._mic_pulse_on:
             self._mic_btn.configure(fg=CP["bg"], bg=CP["accent"])
         else:
-            self._mic_btn.configure(fg=CP["accent"], bg=CP["btn_bg"])
+            self._mic_btn.configure(fg=CP["accent"], bg=CP["mic_bg"])
         self._mic_pulse_on = not self._mic_pulse_on
         self.root.after(500, self._mic_pulse_tick)
 
@@ -1926,18 +2079,7 @@ class FloatingPopup:
         newline-delimited lines. Repositions the panel when the height changes so
         it stays anchored to the bottom of the screen as it grows upward.
         """
-        try:
-            self._ask_entry.update_idletasks()
-            res = self._ask_entry.count("1.0", "end-1c", "displaylines")
-            if isinstance(res, (tuple, list)):
-                n = res[0] if res else 1
-            elif res is None:
-                n = 1
-            else:
-                n = int(res)
-            n = max(1, min(int(n), ASK_MAX_LINES))
-        except Exception:
-            n = 1
+        n = min(_display_lines(self._ask_entry), ASK_MAX_LINES)
         if n == self._ask_lines:
             return
         self._ask_lines = n
@@ -1953,13 +2095,13 @@ class FloatingPopup:
 
     def _finish_mic(self) -> None:
         self._mic_recording = False
-        self._mic_btn.configure(text="🎙", fg=CP["subtext"], bg=CP["btn_bg"])
+        self._mic_btn.configure(text="🎙", fg=CP["subtext"], bg=CP["mic_bg"])
         self._ai_status.configure(text="")
         self._ai_status.pack_forget()
 
     def _reset_mic_btn(self) -> None:
         self._mic_recording = False
-        self._mic_btn.configure(text="🎙", fg=CP["subtext"], bg=CP["btn_bg"])
+        self._mic_btn.configure(text="🎙", fg=CP["subtext"], bg=CP["mic_bg"])
 
     # ── AI refinement ──────────────────────────────────────────────────────────
 
@@ -1987,7 +2129,7 @@ class FloatingPopup:
         token = self._session_token
 
         def _worker():
-            result = self._ai_refiner.refine(text, mode)
+            result = self._ai_refiner.refine(text, mode, sender_name=self._sender_name)
             self.root.after(0, self._show_ai_result, result, token)
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -2058,13 +2200,7 @@ class FloatingPopup:
         # Auto-size height: count DISPLAY lines (wrapped), not logical newlines —
         # a single-paragraph result (the normal case) wraps to many display
         # lines but has line_count == 1, which clamped the box to 2 rows.
-        self._result_text.update_idletasks()
-        try:
-            line_count = int(
-                self._result_text.count("1.0", "end-1c", "displaylines")[0]
-            )
-        except Exception:
-            line_count = int(self._result_text.index("end-1c").split(".")[0])
+        line_count = _display_lines(self._result_text)
         self._result_text.configure(height=min(max(line_count, 2), 8))
 
         # Show scrollbar only when text exceeds visible area
