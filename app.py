@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.68"
+APP_VERSION = "1.6.69"
 
 
 class _RECT(ctypes.Structure):
@@ -201,6 +201,9 @@ class WhisperFlowApp:
             transcriber=None,
             version=APP_VERSION,
         )
+        # The vocab editor's "Suggest mishearings" button uses the refiner (same
+        # object throughout, so live key changes are picked up without re-setting).
+        self.app_window.set_ai_refiner(self.ai_refiner)
 
         self.feedback = Feedback(
             sound_enabled=config.sound_feedback,
@@ -2029,8 +2032,15 @@ class WhisperFlowApp:
         if not text:
             return text
         try:
-            from text_expansion import apply_snippets, apply_vocabulary
-            fixed = apply_vocabulary(text, self._user_entries("vocabulary"))
+            from text_expansion import (apply_snippets, apply_vocabulary,
+                                         apply_vocabulary_fuzzy)
+            vocab = self._user_entries("vocabulary")
+            fixed = apply_vocabulary(text, vocab)
+            # Phonetic safety net for close mishearings the user hasn't listed
+            # ("vercell" -> "Vercel"). Additive, bounded, off by nothing on the
+            # transcription/injection path; a kill switch in case it ever misfires.
+            if getattr(self.config, "vocab_fuzzy", True):
+                fixed = apply_vocabulary_fuzzy(fixed, vocab)
             fixed = apply_snippets(fixed, self._user_entries("snippets"))
         except Exception as exc:
             print(f"[App] User libraries failed (non-fatal): {exc}")

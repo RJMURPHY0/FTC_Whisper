@@ -23,19 +23,37 @@ _NO_FORMAT = (
 )
 
 REFINE_PROMPTS = {
+    # "Fix All" in the refine popup. A full grammar-checker pass in the Grammarly
+    # mould: every mechanical error is in scope, but the writer's words and voice
+    # are not. The explicit checklist beats a vague "proofread this" — the model
+    # reliably fixes what it is named and skips what it is not.
     "punctuation": (
-        "Proofread this dictated text like a professional copy editor. "
-        "Fix every punctuation, capitalisation, spacing, spelling, and grammar error: "
-        "full stops or commas dropped mid-sentence where the speaker paused, stray "
-        "sequences like ',.', run-on sentences, fragments, duplicated words and false "
-        "starts from dictation, wrong verb tense or agreement, and missing articles. "
-        "Rebuild sentence boundaries so every sentence reads as complete, correctly "
-        "punctuated English. Keep every word the speaker said, including casual "
-        "phrases and fillers like 'so yeah': this is a correction pass, not a "
-        "rewrite. The only words you may remove are immediate duplicates from "
-        "dictation stutters ('that that' becomes 'that'), and the only words you "
-        "may change are those grammar forces you to. Preserve the writer's regional "
-        "spelling. Return only the corrected text, nothing else." + _NO_FORMAT
+        "Act as a meticulous grammar and spelling checker, in the mould of "
+        "Grammarly, for text that was DICTATED rather than typed. Correct every "
+        "mechanical error you find:\n"
+        "- Spelling, including misspelt names of well-known products and companies\n"
+        "- Confused and misheard homophones: their/there/they're, your/you're, "
+        "its/it's, to/too, of/have, affect/effect, then/than\n"
+        "- Punctuation: missing or wrong full stops, commas, question marks, "
+        "apostrophes (especially possessives and contractions), quotation marks, "
+        "hyphens, colons and semicolons\n"
+        "- Stray dictation artefacts such as ',.' or a doubled full stop\n"
+        "- Sentence boundaries: a full stop dropped mid-sentence where the speaker "
+        "paused to think, a needless capital left after it, two sentences run "
+        "together with no punctuation, and sentence fragments\n"
+        "- Capitalisation: sentence starts, proper nouns, the pronoun 'I'\n"
+        "- Grammar: subject-verb agreement, verb tense consistency, plurals, "
+        "missing articles and wrong prepositions\n"
+        "- Immediate duplicated words from dictation stutters ('that that')\n\n"
+        "STRICT LIMITS - this is a correction pass, not a rewrite:\n"
+        "- Keep every word the speaker said, including casual phrasing and "
+        "fillers like 'so yeah'. Do not tighten, shorten or improve the style\n"
+        "- Do not reorder sentences, merge paragraphs, or add any new content\n"
+        "- The only words you may delete are immediate stutter duplicates; the "
+        "only words you may change are those grammar or spelling force you to\n"
+        "- Preserve British spelling and the writer's regional usage\n"
+        "- If a passage is already correct, leave it exactly as it is\n\n"
+        "Return only the corrected text, nothing else." + _NO_FORMAT
     ),
     "email": (
         "Restructure this dictated speech into a well-written email. "
@@ -282,6 +300,82 @@ class AIRefiner:
         except Exception as e:
             print(f"[AIRefiner] Error during refinement: {e}")
             return text
+
+    def _raw_chat(self, system: str, user: str, max_tokens: int = 256) -> str:
+        """A plain system+user chat turn, OpenRouter first then Anthropic, same
+        timeouts/fallbacks as refine(). Returns the reply text, or "" on no key or
+        error. Used off the dictation hot path only."""
+        if self.openrouter_api_key:
+            try:
+                import openai  # type: ignore
+                if self._openrouter_client is None:
+                    self._openrouter_client = openai.OpenAI(
+                        api_key=self.openrouter_api_key,
+                        base_url="https://openrouter.ai/api/v1",
+                        timeout=20.0, max_retries=1)
+                resp = self._openrouter_client.chat.completions.create(
+                    model=self.openrouter_model, max_tokens=max_tokens,
+                    temperature=0.2,
+                    messages=[{"role": "system", "content": system},
+                              {"role": "user", "content": user}],
+                    extra_body={"models": self.OPENROUTER_FALLBACK_MODELS})
+                out = (resp.choices[0].message.content or "").strip()
+                if out:
+                    return out
+            except Exception as e:
+                print(f"[AIRefiner] OpenRouter chat failed: {e}")
+                if not self.api_key:
+                    return ""
+        if not self.api_key:
+            return ""
+        try:
+            client = self._get_anthropic_client()
+            msg = client.messages.create(
+                model="claude-haiku-4-5-20251001", max_tokens=max_tokens,
+                system=system, messages=[{"role": "user", "content": user}])
+            return (msg.content[0].text or "").strip()
+        except Exception as e:
+            print(f"[AIRefiner] Anthropic chat failed: {e}")
+            return ""
+
+    def suggest_mishearings(self, term: str, limit: int = 8) -> list:
+        """How a speech-to-text system is likely to mangle `term`, most likely
+        first, lowercased. Best-effort: [] with no key, on error, or when nothing
+        usable comes back. This is how a term picks up its harder mishearings (a
+        brand like "Vercel" heard as "the cell") that a phonetic rule can't safely
+        guess — the user reviews the list before it is saved, so an odd suggestion
+        costs nothing. Never called on the dictation path."""
+        term = (term or "").strip()
+        if len(term) < 2 or not self.is_available:
+            return []
+        system = ("You list likely speech-to-text mishearings of a given word or "
+                  "phrase. Output only the mishearings, one per line, all lowercase, "
+                  "no numbering, quotes, or explanation.")
+        user = (f'An English speech-to-text system keeps mishearing the term '
+                f'"{term}". List up to {limit} ways it is most likely to be '
+                f'transcribed wrongly, most likely first. Include plausible splits '
+                f'into ordinary words (for example the brand "Vercel" often comes '
+                f'out as "the cell"). One per line, lowercase. Do not include the '
+                f'correct term "{term}" itself.')
+        raw = self._raw_chat(system, user, max_tokens=256)
+        if not raw:
+            return []
+        out, seen = [], set()
+        low_term = term.lower()
+        for line in raw.splitlines():
+            # Strip any bullet/number/quote formatting the model added anyway.
+            cand = re.sub(r'^[\s\-\*•\d\.\)\"\'`]+', "", line).strip().strip('"\'')
+            cand = " ".join(cand.split()).lower()
+            # Reject the term itself, blanks, overlong lines (a stray sentence),
+            # and near-duplicates. Length/validity is enforced again on save.
+            if (not cand or cand == low_term or cand in seen
+                    or len(cand) < 3 or len(cand.split()) > 5):
+                continue
+            seen.add(cand)
+            out.append(cand)
+            if len(out) >= limit:
+                break
+        return out
 
     @staticmethod
     def _apply_sender_name(text: str, mode: str, name: str) -> str:

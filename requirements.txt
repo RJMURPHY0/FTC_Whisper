@@ -10,3 +10,4 @@ openai>=1.0.0
 supabase>=2.0.0
 onnx-asr>=0.10.0
 onnxruntime>=1.20.0
+Metaphone>=0.6      # Double Metaphone for the custom-vocabulary phonetic safety net (pure Python)

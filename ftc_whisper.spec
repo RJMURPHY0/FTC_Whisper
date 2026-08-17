@@ -113,6 +113,10 @@ hiddenimports += [
     # Imported lazily inside functions (registration thread / --uninstall), so
     # spell it out rather than trusting bytecode scanning to find it.
     'app_install',
+    # Imported lazily inside text_expansion._dm() for the vocabulary phonetic
+    # net — bytecode scanning misses a function-level import, so name it here.
+    # (The feature degrades to a no-op if absent, but we want it in the build.)
+    'metaphone',
     'tkinter', 'tkinter.ttk', 'tkinter.messagebox', 'tkinter.simpledialog',
     'PIL._tkinter_finder',
     'numpy', 'numpy.core._multiarray_umath',

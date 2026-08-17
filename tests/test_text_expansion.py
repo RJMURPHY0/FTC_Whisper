@@ -232,6 +232,106 @@ class ValidationTests(unittest.TestCase):
             self.assertTrue(reason.strip())
 
 
+class FuzzyVocabularyTests(unittest.TestCase):
+    """The phonetic safety net. Split, like the module, into what it MUST fix and
+    the far longer list of what it must refuse to touch — a false positive here
+    puts a word in the user's mouth."""
+
+    def setUp(self):
+        from text_expansion import apply_vocabulary_fuzzy, _dm
+        self.fuzzy = apply_vocabulary_fuzzy
+        if _dm() is None:
+            self.skipTest("metaphone encoder unavailable")
+
+    # ── must correct (close mishearings the user never listed) ────────────────
+    def test_catches_close_mishearings_of_a_term(self):
+        entries = [vocab("Vercel")]
+        for said in ("vercell", "ver cell", "versel", "versaille", "Vercell"):
+            self.assertEqual(
+                "Deploy to Vercel now.",
+                self.fuzzy(f"Deploy to {said} now.", entries),
+                f"{said!r} should have been corrected to Vercel")
+
+    def test_catches_a_split_multiword_mishearing(self):
+        entries = [vocab("Pipedrive")]
+        self.assertEqual("Log it in Pipedrive.",
+                         self.fuzzy("Log it in pipe drife.", entries))
+
+    def test_corrected_term_keeps_its_casing(self):
+        entries = [vocab("Vercel")]
+        self.assertEqual("Use Vercel.", self.fuzzy("Use vercell.", entries))
+
+    def test_lowercase_term_capitalised_only_at_sentence_start(self):
+        entries = [vocab("kubectl")]
+        self.assertEqual("Kubectl applies it.",
+                         self.fuzzy("Kubecuttle applies it.", entries))
+
+    # ── must NOT touch (the false-positive firewall) ──────────────────────────
+    def test_leaves_ordinary_english_alone(self):
+        entries = [vocab("Vercel")]
+        for text in ("Click the cell to edit it.",
+                     "Open it in excel please.",
+                     "Ring the bell when ready.",
+                     "That is the sell side desk.",
+                     "My cell rang twice.",
+                     "We should sell the shares.",
+                     "A crate of parts arrived."):
+            self.assertEqual(text, self.fuzzy(text, entries),
+                             f"{text!r} should have been left untouched")
+
+    def test_unrelated_words_are_never_pulled_in(self):
+        entries = [vocab("Vercel")]
+        self.assertEqual("The parcel is at the front desk.",
+                         self.fuzzy("The parcel is at the front desk.", entries))
+
+    def test_short_terms_do_not_fuzzy_match(self):
+        # Under FUZZY_MIN_TERM_LEN: too collision-prone, exact path only.
+        entries = [vocab("AWS")]
+        self.assertEqual("It was a test.", self.fuzzy("It was a test.", entries))
+
+    def test_no_metaphone_is_a_clean_noop(self, ):
+        import text_expansion as te
+        orig = te._dm
+        te._dm = lambda: None
+        try:
+            self.assertEqual("Deploy to vercell now.",
+                             te.apply_vocabulary_fuzzy("Deploy to vercell now.",
+                                                       [vocab("Vercel")]))
+        finally:
+            te._dm = orig
+
+    def test_soft_deleted_and_empty_are_safe(self):
+        self.assertEqual("say vercell",
+                         self.fuzzy("say vercell", [vocab("Vercel", deleted=True)]))
+        self.assertEqual("", self.fuzzy("", [vocab("Vercel")]))
+        self.assertEqual("hi", self.fuzzy("hi", None))
+        self.assertEqual("hi", self.fuzzy("hi", [None, "x", {}]))
+
+    def test_no_cascade_single_pass(self):
+        # A span is replaced once; the inserted term is not re-scanned.
+        entries = [vocab("Vercel"), vocab("Marcel")]
+        # "vercell" -> Vercel, and Vercel must not then be pulled to Marcel.
+        self.assertEqual("Ship on Vercel.", self.fuzzy("Ship on vercell.", entries))
+
+    def test_bounded_cost_is_negligible(self):
+        # "Won't affect speed": prove the pass is sub-millisecond-ish even with a
+        # large vocabulary over a long transcript. Runs on the already-final text,
+        # never on the transcription/injection path.
+        import time
+        entries = [vocab(f"Term{i}word") for i in range(100)]
+        entries.append(vocab("Vercel"))
+        text = ("Deploy the build to vercell and then check the logs "
+                "carefully for any errors before we ship it out today. ") * 12
+        t0 = time.perf_counter()
+        for _ in range(5):
+            out = self.fuzzy(text, entries)
+        dt = (time.perf_counter() - t0) / 5.0
+        self.assertIn("Vercel", out)
+        # Generous ceiling; typical run is a fraction of this. A regression that
+        # made this heavy would trip here.
+        self.assertLess(dt, 0.05, f"fuzzy pass too slow: {dt*1000:.1f}ms")
+
+
 class PipelineOrderTests(unittest.TestCase):
     """Vocabulary runs before snippets (app.py applies them in that order), so a
     corrected term can complete a snippet trigger but never the reverse."""

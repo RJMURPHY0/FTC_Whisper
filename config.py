@@ -106,6 +106,7 @@ class Config:
     # see vocab_store.py for the shape and the sync/merge rules.
     vocabulary: dict = field(default_factory=dict)
     snippets: dict = field(default_factory=dict)
+    vocab_fuzzy: bool = True  # Phonetic safety net: auto-correct close mishearings of a vocabulary term ("vercell" -> "Vercel") the user hasn't listed. Kill switch only; the exact sounds_like path is unaffected when off
     supabase_url: str = ""  # Optional — enables transcription logging
     supabase_key: str = ""  # Publishable (anon) key
     supabase_email: str = ""  # Account email for silent background auth

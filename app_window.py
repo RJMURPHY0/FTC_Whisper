@@ -6066,6 +6066,86 @@ class AppWindow:
         state["error"] = ""
         self._render_library(kind)
 
+    def set_ai_refiner(self, refiner) -> None:
+        """The app hands over its AIRefiner so the vocab editor can offer AI
+        mishearing suggestions. Optional — the editor degrades gracefully to a
+        'add a key' message when it is absent or has no key."""
+        self._ai_refiner = refiner
+
+    def _lib_suggest_mishearings(self, f_term, f_sounds, link, err) -> None:
+        """Ask the AI for likely mishearings of the current term and MERGE them
+        into the sounds-like box for the user to review. Off the dictation path;
+        best-effort; the user still has to Save. Never overwrites what they typed."""
+        refiner = getattr(self, "_ai_refiner", None)
+        term = " ".join(self._read_field(f_term).split())
+
+        def _say(msg, colour=None):
+            try:
+                err.configure(text=msg, fg=colour or C["subtext"])
+            except tk.TclError:
+                pass
+
+        if not term:
+            return _say("Enter the word or phrase first.", C["error"])
+        if refiner is None or not getattr(refiner, "is_available", False):
+            return _say("Add an OpenRouter or Anthropic key in Settings to suggest.",
+                        C["error"])
+
+        try:
+            link.configure(text="✨  Suggesting…", cursor="")
+            link.unbind("<Button-1>")
+        except tk.TclError:
+            pass
+        _say("")
+
+        def _restore():
+            try:
+                link.configure(text="✨  Suggest mishearings", cursor="hand2")
+                link.bind("<Button-1>", lambda _e: self._lib_suggest_mishearings(
+                    f_term, f_sounds, link, err))
+            except tk.TclError:
+                pass
+
+        def _work():
+            try:
+                cands = refiner.suggest_mishearings(term)
+            except Exception as exc:
+                print(f"[AppWindow] suggest_mishearings failed: {exc}")
+                cands = []
+            self._ui_after(0, lambda: _done(cands))
+
+        def _done(cands):
+            _restore()
+            from text_expansion import validate_sounds_like
+            try:
+                existing = {l.strip().lower()
+                            for l in self._read_field(f_sounds).splitlines()
+                            if l.strip()}
+            except tk.TclError:
+                return
+            add = []
+            for c in cands:
+                if c.lower() in existing or c.lower() == term.lower():
+                    continue
+                ok, _r = validate_sounds_like(c, term)
+                if ok:
+                    add.append(c)
+                    existing.add(c.lower())
+            if not add:
+                return _say("No new suggestions — add any mishearings yourself.")
+            try:
+                cur = self._read_field(f_sounds).rstrip()
+                merged = (cur + "\n" if cur else "") + "\n".join(add)
+                f_sounds.delete("1.0", "end")
+                f_sounds.insert("1.0", merged)
+            except tk.TclError:
+                return
+            _say(f"Added {len(add)} suggestion{'' if len(add) == 1 else 's'} — "
+                 "review and Save.")
+
+        threading.Thread(target=_work, daemon=True,
+                         name="vocab-suggest").start()
+
     def _draw_library_editor(self, holder: tk.Frame, kind: str,
                              entry) -> None:
         """Inline editor, in the row's own place. A dialog would be another
@@ -6099,6 +6179,21 @@ class AppWindow:
                 "SOUNDS LIKE  (one per line, optional)",
                 "\n".join(entry.get("sounds_like") or []),
                 multiline=True, height=3)
+            # AI can propose how this term tends to be misheard — including the
+            # common-word splits ("Vercel" -> "the cell") the automatic phonetic
+            # net deliberately won't guess. Merged into the box for review, never
+            # saved without the user. `err` is late-bound (created below) and only
+            # read when the link is clicked, so referencing it here is safe.
+            suggest = tk.Label(card, text="✨  Suggest mishearings",
+                               fg=C["accent"], bg=C["surface"],
+                               font=("Segoe UI", 8, "bold"), cursor="hand2",
+                               anchor="w")
+            suggest.pack(fill="x", pady=(5, 0))
+            suggest.bind("<Enter>",
+                         lambda _e: suggest.configure(fg=C["accent_hover"]))
+            suggest.bind("<Leave>", lambda _e: suggest.configure(fg=C["accent"]))
+            suggest.bind("<Button-1>", lambda _e: self._lib_suggest_mishearings(
+                f_term, f_sounds, suggest, err))
             hint = ("Leave blank if it is already recognised. Add a line for "
                     "each way it comes out wrong.")
             fields = {"term": f_term, "sounds_like": f_sounds}

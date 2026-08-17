@@ -180,6 +180,257 @@ def apply_vocabulary(text: str, entries) -> str:
     return _substitute(text, pairs)
 
 
+# ── Fuzzy vocabulary (phonetic safety net) ────────────────────────────────────
+#
+# The exact `sounds_like` list above only catches mishearings the user has typed
+# out. This pass catches the CLOSE ones they haven't — "vercell", "ver cell",
+# "versel", "versaille" -> "Vercel" — automatically, without the user listing
+# every variant.
+#
+# It deliberately does NOT try to catch common-word mishearings like "the cell":
+# nothing in the TEXT distinguishes "click the cell" (keep) from a mis-heard
+# "Vercel" (fix), so an automatic rule loose enough to catch it would also rewrite
+# ordinary English. Those stay the job of an explicit `sounds_like` entry (which
+# the vocab editor can suggest). This is the same division of labour Wispr Flow /
+# Superwhisper use: automatic hints for the close cases, explicit rules for the rest.
+#
+# Speed: additive and bounded. Skips entirely when the account has no vocabulary,
+# computes each term's phonetic code once, and each transcript word position is
+# encoded at most three times — a fraction of a millisecond on a real dictation
+# (guarded by a timing test). It runs on the already-final transcript, never on
+# the transcription or injection path, so stop-to-text latency is untouched.
+#
+# Safety gate (all must hold, so it cannot put words in the user's mouth):
+#   * Double Metaphone code of the span matches the term's — the primary firewall
+#     (this is what rejects "excel"=AKSL and "the cell"=0SL against "Vercel"=FRSL).
+#   * Jaro-Winkler similarity >= FUZZY_JW.
+#   * Length ratio within FUZZY_LEN_LO..FUZZY_LEN_HI.
+#   * The span is NOT made up entirely of ordinary English words — a second
+#     firewall for the rare case a term's phonetic code collides with a stock phrase.
+#   * Term is at least FUZZY_MIN_TERM_LEN chars (shorter terms are collision-prone
+#     and stay with the exact path only).
+
+FUZZY_MIN_TERM_LEN = 4      # shorter terms rely on the exact sounds_like path
+FUZZY_JW = 0.70             # Jaro-Winkler floor (secondary to the metaphone gate)
+FUZZY_LEN_LO = 0.5          # span/term length ratio bounds
+FUZZY_LEN_HI = 1.7
+FUZZY_MAX_WINDOW = 3        # a mishearing spans at most this many words
+
+# Ordinary English words. A span made entirely of these is never rewritten, even
+# on a phonetic-code collision. Not exhaustive by design — the metaphone gate is
+# the primary firewall; this is the belt-and-braces list of words a fuzzy rule is
+# most likely to trip over (function words plus the short, common nouns/verbs that
+# collide most: "cell", "bell", "sell", "sale", "shares"…).
+_COMMON_WORDS = frozenset("""
+a about after all also am an and any are as at back be because been before being
+but by call came can come could day did do does doing done down each even every
+few first for from get give go going good got had has have he her here him his how
+i if in into is it its just keep know last less let like little long look made make
+man many may me might more most much must my never new next no not now of off on once
+one only or other our out over own put ran said same say see she should side so some
+such take than that the their them then there these they thing think this those
+through time to too two up us use very was way we well went were what when where which
+while who why will with would year you your
+cell cells bell bells sell sells sale sales share shares mail mails male sell seller
+tell well fell dwell shell smell spell swell dell hell fella
+""".split())
+
+
+def _jaro(s1: str, s2: str) -> float:
+    if s1 == s2:
+        return 1.0
+    l1, l2 = len(s1), len(s2)
+    if l1 == 0 or l2 == 0:
+        return 0.0
+    reach = max(l1, l2) // 2 - 1
+    if reach < 0:
+        reach = 0
+    m1 = [False] * l1
+    m2 = [False] * l2
+    matches = 0
+    for i in range(l1):
+        lo = max(0, i - reach)
+        hi = min(i + reach + 1, l2)
+        for j in range(lo, hi):
+            if m2[j] or s1[i] != s2[j]:
+                continue
+            m1[i] = m2[j] = True
+            matches += 1
+            break
+    if matches == 0:
+        return 0.0
+    t = 0
+    k = 0
+    for i in range(l1):
+        if not m1[i]:
+            continue
+        while not m2[k]:
+            k += 1
+        if s1[i] != s2[k]:
+            t += 1
+        k += 1
+    t /= 2
+    return (matches / l1 + matches / l2 + (matches - t) / matches) / 3.0
+
+
+def _jaro_winkler(s1: str, s2: str, scale: float = 0.1) -> float:
+    j = _jaro(s1, s2)
+    prefix = 0
+    for a, b in zip(s1, s2):
+        if a != b:
+            break
+        prefix += 1
+        if prefix == 4:
+            break
+    return j + prefix * scale * (1.0 - j)
+
+
+_WORD_RE = re.compile(r"[A-Za-z0-9']+")
+
+
+def _dm():
+    """The Double Metaphone encoder, or None if the (optional) package is absent.
+
+    A missing encoder makes the fuzzy pass a clean no-op — the exact path and every
+    other feature are unaffected — so this can never break a build or a dictation."""
+    try:
+        from metaphone import doublemetaphone
+        return doublemetaphone
+    except Exception:
+        return None
+
+
+def _phonetic_match(term_codes: tuple, cand_codes: tuple) -> bool:
+    """True when the term's primary code lines up with either candidate code, or
+    the candidate's primary matches the term's secondary. Empty codes never match."""
+    tp, ts = term_codes
+    cp, cs = cand_codes
+    if not tp:
+        return False
+    return tp == cp or tp == cs or (bool(cp) and cp == ts)
+
+
+def apply_vocabulary_fuzzy(text: str, entries) -> str:
+    """Phonetic safety net: rewrite spans that SOUND like a vocabulary term but
+    were not listed as an explicit mishearing. Conservative by construction (see
+    the gate above). No-op without a metaphone encoder, without vocabulary, or on
+    empty text."""
+    if not text:
+        return text
+    dm = _dm()
+    if dm is None:
+        return text
+
+    # Precompute each term's phonetic code once. Dedup case-insensitively; keep
+    # the user's casing for the replacement.
+    terms = []
+    seen = set()
+    for e in _live(entries):
+        term = (e.get("term") or "").strip()
+        low = term.lower()
+        if len(term) < FUZZY_MIN_TERM_LEN or low in seen:
+            continue
+        seen.add(low)
+        try:
+            codes = dm(term)
+        except Exception:
+            continue
+        if codes and codes[0]:
+            terms.append((term, low, codes))
+    if not terms:
+        return text
+
+    tokens = list(_WORD_RE.finditer(text))
+    if not tokens:
+        return text
+
+    # The costly part is Double Metaphone, so pay it once per word and prefilter
+    # cheaply. Every term's primary phoneme starts with one of these characters;
+    # a window whose first word does not can never match, so it skips the encode.
+    term_first = {c[0] for _t, _l, codes in terms for c in codes if c}
+    word_dm = []
+    for t in tokens:
+        try:
+            word_dm.append(dm(t.group(0)))
+        except Exception:
+            word_dm.append(("", ""))
+    word_low = [t.group(0).lower() for t in tokens]
+
+    # Collect non-overlapping replacements, longest window first so a 3-word
+    # mishearing wins over a 1-word sub-match, and left-to-right within a size.
+    replacements = []          # (start, end, replacement)
+    consumed = [False] * len(tokens)
+    for size in range(FUZZY_MAX_WINDOW, 0, -1):
+        for i in range(0, len(tokens) - size + 1):
+            # Cheap prefilter before any per-window work: the first word's
+            # phoneme must be able to begin a term.
+            wp = word_dm[i][0]
+            if not wp or wp[0] not in term_first:
+                continue
+            if any(consumed[i:i + size]):
+                continue
+            span_tokens = tokens[i:i + size]
+            # Words must be separated by whitespace only — never merge across
+            # punctuation ("ver. cell" / "ver, cell" are two clauses, not a word).
+            gaps_ok = all(
+                text[span_tokens[k].end():span_tokens[k + 1].start()].strip() == ""
+                for k in range(size - 1)
+            )
+            if not gaps_ok:
+                continue
+            # Never rewrite a span that is entirely ordinary English.
+            if all(word_low[k] in _COMMON_WORDS for k in range(i, i + size)):
+                continue
+            words = [t.group(0) for t in span_tokens]
+            cand = " ".join(words)
+            cand_low = cand.lower()
+            # Reuse the per-word code for a 1-word span; encode only multi-word
+            # spans that cleared the prefilter (a small minority).
+            if size == 1:
+                cand_codes = word_dm[i]
+            else:
+                try:
+                    cand_codes = dm(cand)
+                except Exception:
+                    continue
+            # Compare the collapsed letter sequences: metaphone already ignores
+            # word breaks, so "ver cell" should score against "vercel" exactly as
+            # "vercell" does — not be penalised for the space it was mis-split on.
+            cand_key = cand_low.replace(" ", "")
+            best = None
+            best_jw = 0.0
+            for term, low, codes in terms:
+                if cand_low == low:          # already correct — leave casing to others
+                    best = None
+                    break
+                if not _phonetic_match(codes, cand_codes):
+                    continue
+                term_key = low.replace(" ", "")
+                lr = len(cand_key) / float(len(term_key) or 1)
+                if not (FUZZY_LEN_LO <= lr <= FUZZY_LEN_HI):
+                    continue
+                jw = _jaro_winkler(cand_key, term_key)
+                if jw >= FUZZY_JW and jw > best_jw:
+                    best, best_jw = term, jw
+            if best is not None:
+                start, end = span_tokens[0].start(), span_tokens[-1].end()
+                replacements.append((start, end, _cased(best, text, start)))
+                for k in range(i, i + size):
+                    consumed[k] = True
+
+    if not replacements:
+        return text
+    replacements.sort()
+    out = []
+    pos = 0
+    for start, end, rep in replacements:
+        out.append(text[pos:start])
+        out.append(rep)
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
 # ── Snippets ─────────────────────────────────────────────────────────────────
 
 def apply_snippets(text: str, entries) -> str:

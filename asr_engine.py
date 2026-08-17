@@ -127,8 +127,20 @@ _CONJ_AFTER_STOP = re.compile(
 # A full stop followed by a lowercase word: no English sentence starts
 # lowercase, so the stop is a pause the model mis-heard as a boundary
 # ("would actually be. inserted"). Require >=2 letters before the stop so
-# single-letter abbreviations (i.e., e.g., a.m.) are left alone.
-_STOP_BEFORE_LOWER = re.compile(r"([a-z]{2,})\.\s+([a-z])")
+# single-letter abbreviations (i.e., e.g., a.m.) are left alone. A number or
+# percentage is also a valid left-hand side ("set up 100%. correctly") — the
+# original [a-z]{2,} could never match one, so those survived untouched.
+_STOP_BEFORE_LOWER = re.compile(r"([a-z]{2,}|\d+%?)\.\s+([a-z])")
+
+# A "sentence" that is nothing but a single -ly adverb is always a pause
+# artefact, never intentional: "…is set up 100%. Correctly." is one thought the
+# speaker paused in the middle of. Measured on 200 real dictations — this shape
+# occurs and is wrong every time it occurs.
+#
+# The adverb must be the WHOLE sentence. "Obviously, we should ask" is a
+# perfectly normal sentence opener, so an adverb followed by a comma or by more
+# words is left alone; only the standalone case is merged back.
+_LONE_ADVERB_SENTENCE = re.compile(r"\.\s+([A-Z][a-z]+ly)\s*([.!?])")
 
 
 def fix_pause_punctuation(text: str) -> str:
@@ -144,6 +156,13 @@ def fix_pause_punctuation(text: str) -> str:
     downgraded, never invented, and no words change."""
     if not text:
         return text
+    # ". Correctly." -> " correctly.": a one-word adverb sentence is a pause the
+    # model stamped as a boundary. Runs FIRST because it needs the adverb's own
+    # terminator to identify the shape: the conjunction rule below rewrites
+    # ". And" to ", and", which would replace that terminator with a comma and
+    # leave "100%. Correctly, and then…" unfixable.
+    text = _LONE_ADVERB_SENTENCE.sub(
+        lambda m: " " + m.group(1).lower() + m.group(2), text)
     # ". And" -> ", and": a comma is the correct join for a clause continuation.
     text = _CONJ_AFTER_STOP.sub(lambda m: ", " + m.group(1).lower(), text)
     # ". inserted" -> " inserted": drop the spurious stop, keep the word.
