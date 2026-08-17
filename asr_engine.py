@@ -24,6 +24,8 @@ from typing import Callable, Optional
 
 import numpy as np
 
+import hallucination
+
 _MODEL_SAMPLE_RATE = 16000
 
 # Model version: "v2" (English, shipped default) or "v3" (multilingual, lower
@@ -353,6 +355,16 @@ class ParakeetTranscriber:
             return ""
         if self._FILLER_ONLY.match(text):
             print(f"[ParakeetEngine] Filler-only result suppressed: '{text}'")
+            return ""
+
+        # Degenerate repetition ("no, no, no, no, …"). An RNN-T decoder can stay
+        # on one audio frame and emit the same token until its budget runs out;
+        # nothing above catches it, because the silence floor and the VAD gate
+        # only decide whether the model RUNS, never whether its output is sane.
+        # Runs here (not only in polish()) so a looped chunk is killed before it
+        # reaches the streaming session's committed list or a live caption.
+        text = hallucination.clean(text, source="parakeet")
+        if not text:
             return ""
 
         # Pure non-word fillers only — never strip real words. Swallow one

@@ -157,6 +157,23 @@ ASK_PLACEHOLDER = "Ask AI, e.g. 'change language to French' or 'make this shorte
 # never lingers on screen indefinitely.
 ICON_AUTO_DISMISS_SECS = 30.0
 
+# The badge gets out of the way the moment the user does anything: ANY key, or
+# switching to another app. Both are gated behind a short grace window, because
+# the badge appears the instant the text lands — without it, the keystroke the
+# user was already mid-way through typing (or the focus settling after
+# injection) kills the badge before they can register the ✓/⚠ at all, which
+# reads as a flicker rather than a confirmation.
+#
+# 1.2s was chosen over "a couple of seconds": long enough to see the badge and
+# for an in-flight keystroke to land harmlessly, short enough that it never
+# feels like the badge is ignoring you. The grace applies UNIFORMLY to every
+# key including Space and Enter — "any button" has to mean any button, and a
+# rule with exceptions is one the user has to learn.
+KEY_DISMISS_GRACE_SECS = 1.2
+# How often the badge re-checks whether the user has switched away from the app
+# the text was injected into. Matches the Dropdown foreground watcher.
+_FG_WATCH_INTERVAL_MS = 250
+
 # Z-order upkeep. SetWindowPos flags for "raise to the front of the topmost band
 # without touching position, size or focus".
 _HWND_TOP          = 0
@@ -1336,6 +1353,7 @@ class FloatingPopup:
             w.bind("<Leave>", lambda _e: self._icon_frame.configure(bg=CP["bg"]))
 
         self._dismiss_hooks = []
+        self._fg_watch_tick = None
 
     # ── Refinement frame ───────────────────────────────────────────────────────
 
@@ -1607,12 +1625,15 @@ class FloatingPopup:
             self._status_label.configure(text=text)
 
         self._status_frame.pack()
-        # Space/Enter dismiss belongs to the post-insert badge ALONE. Starting a
-        # new dictation while the previous badge is still up left its hook live,
+        # Key-dismiss belongs to the post-insert badge ALONE. Starting a new
+        # dictation while the previous badge is still up left its hook live,
         # so a space typed mid-recording hid the pill (and the badge's own
         # auto-dismiss timer bails on a mode change, so nothing ever took it
-        # down). Every entry into status mode clears it.
-        self._unregister_space_dismiss()
+        # down). Every entry into status mode clears it. Now that ANY key
+        # dismisses, an orphaned hook would kill the recording pill on the
+        # first character the user typed — so this matters more, not less.
+        self._unregister_key_dismiss()
+        self._stop_foreground_watch()
         self._mode = "status"
         self.root.update_idletasks()  # force canvas render before animation
         # Always position on the monitor where the cursor is
@@ -1723,9 +1744,13 @@ class FloatingPopup:
         self._reposition(self._status_cx, self._status_cy)
         self._show_no_activate()
         if self._inserted_ok:
-            self._register_space_dismiss()
+            self._register_key_dismiss()
+            # Only the success badge follows the user away: a "⚠ Not inserted"
+            # badge is the one thing they DO need to read after switching apps.
+            self._start_foreground_watch()
         else:
-            self._unregister_space_dismiss()
+            self._unregister_key_dismiss()
+            self._stop_foreground_watch()
         # Auto-dismiss the badge after a while so it never lingers on screen.
         # Stamp-guarded so a newer popup isn't killed by an old timer.
         self.root.after(
@@ -1740,9 +1765,9 @@ class FloatingPopup:
             return          # a NEWER badge owns the hook — never unhook that one
         # The badge this timer belonged to is gone (a new dictation started, or
         # the panel opened). Its keyboard hook must go with it: returning here
-        # without unhooking is what let a space-dismiss outlive its badge and
+        # without unhooking is what let a key-dismiss outlive its badge and
         # then hide a live recording.
-        self._unregister_space_dismiss()
+        self._unregister_key_dismiss()
 
     def _touch_panel_activity(self) -> None:
         self._panel_activity = time.time()
@@ -1769,9 +1794,12 @@ class FloatingPopup:
                         lambda s=stamp: self._idle_check_panel(s))
 
     def _expand_to_panel(self) -> None:
-        # Space should dismiss the small badge, but NOT the full refinement panel
-        # where the user may be typing in the Ask AI field.
-        self._unregister_space_dismiss()
+        # Keys dismiss the small badge, but NOT the full refinement panel where
+        # the user is typing into the Ask AI field. The foreground watch goes
+        # too: the panel deliberately TAKES focus, so a watch keyed to the
+        # target window would hide the panel the moment it opened.
+        self._unregister_key_dismiss()
+        self._stop_foreground_watch()
         # Remove WS_EX_NOACTIVATE so the Entry widget can receive keyboard focus
         self._set_no_activate(False)
         # Pack the panel FIRST (and refresh its status after), so a failure in
@@ -1825,30 +1853,41 @@ class FloatingPopup:
                 text="  ⚠ Not inserted  ", fg=CP["text"], bg=CP["error"]
             )
 
-    def _register_space_dismiss(self) -> None:
-        # In the post-insert icon badge, Space OR Enter dismisses it — the user
-        # carries on typing (space) or sends/newlines (enter) in the target app
-        # and the badge gets out of the way. suppress=False so the keypress still
-        # reaches the app. NOT active in the refinement panel, where Enter submits
-        # the Ask box (_expand_to_panel unhooks these first).
+    def _register_key_dismiss(self) -> None:
+        """In the post-insert icon badge, ANY key dismisses it once the grace
+        window has passed — the user has moved on, so the badge should get out
+        of the way without them having to aim at it.
+
+        A single global `keyboard.hook` rather than one per key: the previous
+        version bound Space and Enter only, which left the badge sitting there
+        through any other kind of typing. suppress=False so every keystroke
+        still reaches the app underneath — this only ever observes.
+
+        NOT active in the refinement panel, where the user is typing into the
+        Ask box and Enter submits it (_expand_to_panel unhooks first)."""
         try:
             import keyboard as kb
 
-            self._unregister_space_dismiss()
+            self._unregister_key_dismiss()
+            armed_at = self._icon_entered
 
-            def _on_dismiss_key(_e):
-                self._unregister_space_dismiss()
+            def _on_dismiss_key(event):
+                # Key DOWN only. The key-up of the hotkey that just stopped the
+                # dictation arrives after the badge appears; dismissing on it
+                # would make the badge vanish the instant it was drawn.
+                if getattr(event, "event_type", None) != "down":
+                    return
+                if time.time() - armed_at < KEY_DISMISS_GRACE_SECS:
+                    return
+                self._unregister_key_dismiss()
                 if self.root:
                     self.root.after(0, self._do_hide)
 
-            self._dismiss_hooks = [
-                kb.on_press_key("space", _on_dismiss_key, suppress=False),
-                kb.on_press_key("enter", _on_dismiss_key, suppress=False),
-            ]
+            self._dismiss_hooks = [kb.hook(_on_dismiss_key, suppress=False)]
         except Exception:
             pass
 
-    def _unregister_space_dismiss(self) -> None:
+    def _unregister_key_dismiss(self) -> None:
         if self._dismiss_hooks:
             try:
                 import keyboard as kb
@@ -1860,10 +1899,67 @@ class FloatingPopup:
                 pass
             self._dismiss_hooks = []
 
+    # ── Dismiss when the user switches away ─────────────────────────────────
+
+    def _foreground_is_target(self) -> bool:
+        """True while the foreground window is still the app the text was
+        injected into (or the popup itself).
+
+        Fails OPEN — a Win32 hiccup, or a target we never captured, must never
+        yank the badge away while the user is still looking at it. winfo_id()
+        is a CHILD window on Windows, so both handles go in the 'ours' set."""
+        if not self._target_hwnd:
+            return True
+        try:
+            fg = ctypes.windll.user32.GetForegroundWindow()
+        except Exception:
+            return True
+        if not fg:
+            return True
+        return fg in (self._target_hwnd, self._popup_hwnd, self._top_hwnd())
+
+    def _watch_target_foreground(self) -> None:
+        """Hide the badge once the user clicks into a different app. The badge
+        annotates one specific dictation in one specific window; carried over
+        to whatever the user switched to, it is just clutter pinned on top."""
+        self._fg_watch_tick = None
+        if not self.root or self._mode != "icon":
+            return
+        if not self._foreground_is_target():
+            self._do_hide()
+            return
+        try:
+            self._fg_watch_tick = self.root.after(
+                _FG_WATCH_INTERVAL_MS, self._watch_target_foreground)
+        except tk.TclError:
+            self._fg_watch_tick = None
+
+    def _start_foreground_watch(self) -> None:
+        """Armed only after the grace window: _show_no_activate hands focus back
+        to the previous foreground window as the badge appears, so polling
+        before that settles can read a transient value and self-dismiss."""
+        self._stop_foreground_watch()
+        if not self.root:
+            return
+        try:
+            self._fg_watch_tick = self.root.after(
+                int(KEY_DISMISS_GRACE_SECS * 1000), self._watch_target_foreground)
+        except tk.TclError:
+            self._fg_watch_tick = None
+
+    def _stop_foreground_watch(self) -> None:
+        if getattr(self, "_fg_watch_tick", None) is not None:
+            try:
+                self.root.after_cancel(self._fg_watch_tick)
+            except Exception:
+                pass
+            self._fg_watch_tick = None
+
     def _do_hide(self) -> None:
         self._set_no_activate(True)
         self._stop_waveform()
-        self._unregister_space_dismiss()
+        self._unregister_key_dismiss()
+        self._stop_foreground_watch()
         self._stop_keep_on_top()
         self._mode = None
         self._ai_busy = False

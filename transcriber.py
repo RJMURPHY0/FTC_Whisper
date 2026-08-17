@@ -9,6 +9,8 @@ import threading
 import numpy as np
 from typing import TYPE_CHECKING, Optional
 
+import hallucination
+
 if TYPE_CHECKING:
     from faster_whisper import WhisperModel
 
@@ -216,6 +218,12 @@ class Transcriber:
         # the surrounding words ("thought...maybe" -> "thoughtmaybe").
         text = text.replace("...", " ")
         text = self._CREDIT_RE.sub("", text.strip())
+        # Degenerate repetition. `repetition_penalty` in _run lowers the odds of
+        # an autoregressive loop but cannot remove them, and a loop that does
+        # escape is injected into the user's document verbatim.
+        text = hallucination.clean(text, source=f"whisper:{self.model_size}")
+        if not text:
+            return ""
         for artifact in self._PHRASE_ARTIFACTS:
             t = text.strip()
             if t == artifact:

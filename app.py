@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.67"
+APP_VERSION = "1.6.68"
 
 
 class _RECT(ctypes.Structure):
@@ -588,6 +588,12 @@ class WhisperFlowApp:
         # modal CreateDIBSection error box when the machine runs dry)
         self._start_memory_guard()
 
+        # Surface ASR decoder-loop hallucinations in the fleet error log. The
+        # guard itself is engine-side and independent of this; wiring it here
+        # only makes a loop that fires in the wild visible instead of dying in
+        # a console nobody reads.
+        self._wire_hallucination_reporter()
+
         # If this launch is the first run of a new version, toast it
         self._announce_update_if_any()
 
@@ -828,6 +834,26 @@ class WhisperFlowApp:
             )
         except Exception as e:
             print(f"[App] error-event log failed (non-fatal): {e}")
+
+    def _wire_hallucination_reporter(self) -> None:
+        """Route degenerate-repetition detections into the fleet error log.
+
+        Runs on the engines' transcription threads, so it must never raise and
+        never block — _log_error_event is already fire-and-forget. event_type
+        has no CHECK constraint on error_events, so "transcribe_repetition"
+        needs no migration."""
+        try:
+            import hallucination
+
+            def _report(event_type: str, detail: dict) -> None:
+                try:
+                    self._log_error_event(event_type, detail)
+                except Exception:
+                    pass
+
+            hallucination.set_reporter(_report)
+        except Exception as e:
+            print(f"[App] hallucination reporter wiring failed (non-fatal): {e}")
 
     def _handle_no_speech(self, reason: str, duration_s: float,
                           peak: float) -> bool:

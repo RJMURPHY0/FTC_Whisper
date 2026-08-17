@@ -8,10 +8,15 @@ Three shipped bugs, one file:
    the taskbar buried the pill behind it.
 2. tkinter's winfo_id() is a CHILD window on Windows; Z-order and repaint belong
    to its parent, so every Win32 call aimed at winfo_id() was a silent no-op.
-3. Space/Enter dismiss belongs to the post-insert badge alone, but starting a
-   new dictation while the badge was up left its keyboard hook live — and the
+3. Key-dismiss belongs to the post-insert badge alone, but starting a new
+   dictation while the badge was up left its keyboard hook live — and the
    badge's own auto-dismiss timer bails on a mode change, so nothing took it
-   down. A space typed while recording hid the pill.
+   down. A space typed while recording hid the pill. Now that ANY key
+   dismisses, an orphaned hook would kill the recording pill on the first
+   character typed, so the unhook-on-mode-change contract matters more.
+
+Plus the badge's dismiss behaviour itself: any key (after a short grace) and
+switching to another app both take it down.
 """
 import inspect
 import os
@@ -279,24 +284,26 @@ class RepaintOnMoveTests(unittest.TestCase):
         self.assertIn("RDW_ALLCHILDREN", src)
 
 
-class SpaceDismissTests(unittest.TestCase):
-    """Space dismisses the post-insert badge and NOTHING else."""
+class KeyDismissTests(unittest.TestCase):
+    """ANY key dismisses the post-insert badge — and NOTHING else."""
 
     def _popup(self):
         p = FloatingPopup.__new__(FloatingPopup)
         p._dismiss_hooks = []
+        p._fg_watch_tick = None
         p.unhooked = 0
 
         def _unreg():
             p.unhooked += 1
             p._dismiss_hooks = []
-        p._unregister_space_dismiss = _unreg
+        p._unregister_key_dismiss = _unreg
+        p._stop_foreground_watch = lambda: None
         return p
 
     def test_starting_a_recording_clears_a_badge_hook(self):
         src = inspect.getsource(FloatingPopup._enter_status_mode)
-        self.assertIn("_unregister_space_dismiss", src,
-                      "a space typed mid-dictation must not hide the pill")
+        self.assertIn("_unregister_key_dismiss", src,
+                      "a key typed mid-dictation must not hide the pill")
 
     def test_the_hook_is_dropped_when_its_badge_is_gone(self):
         p = self._popup()
@@ -323,16 +330,108 @@ class SpaceDismissTests(unittest.TestCase):
         self.assertEqual([True], hidden)
 
     def test_the_refinement_panel_never_carries_the_hook(self):
-        # Enter submits the Ask box there, and the user is typing spaces into it.
-        self.assertIn("_unregister_space_dismiss",
+        # Enter submits the Ask box there, and the user is typing into it.
+        self.assertIn("_unregister_key_dismiss",
                       inspect.getsource(FloatingPopup._expand_to_panel))
 
     def test_only_the_badge_registers_it(self):
         registers = [name for name, fn in vars(FloatingPopup).items()
                      if callable(fn) and not name.startswith("_register")
-                     and "_register_space_dismiss()" in (
+                     and "_register_key_dismiss()" in (
                          inspect.getsource(fn) if inspect.isfunction(fn) else "")]
         self.assertEqual(["_enter_icon_mode"], registers)
+
+    # ── any-key dismiss ──────────────────────────────────────────────────
+
+    def test_the_hook_is_global_not_two_named_keys(self):
+        # Binding only Space and Enter left the badge sitting there through
+        # every other kind of typing — the reported complaint.
+        src = inspect.getsource(FloatingPopup._register_key_dismiss)
+        self.assertIn("kb.hook(", src)
+        self.assertNotIn("on_press_key", src)
+
+    def test_the_keystroke_still_reaches_the_app(self):
+        # suppress=True would eat the user's typing to hide a badge.
+        self.assertIn("suppress=False",
+                      inspect.getsource(FloatingPopup._register_key_dismiss))
+
+    def test_key_up_never_dismisses(self):
+        # The hotkey's own key-up lands right after the badge appears.
+        src = inspect.getsource(FloatingPopup._register_key_dismiss)
+        self.assertIn('!= "down"', src)
+
+    def test_a_grace_window_guards_the_dismiss(self):
+        src = inspect.getsource(FloatingPopup._register_key_dismiss)
+        self.assertIn("KEY_DISMISS_GRACE_SECS", src)
+        self.assertLessEqual(popup_mod.KEY_DISMISS_GRACE_SECS, 2.0,
+                             "a long grace makes the badge feel unresponsive")
+        self.assertGreaterEqual(popup_mod.KEY_DISMISS_GRACE_SECS, 0.5,
+                                "too short and an in-flight keystroke eats it")
+
+    def test_the_grace_is_measured_from_the_badge_this_hook_belongs_to(self):
+        # Captured at registration, not read live: a newer badge must not
+        # extend an older hook's grace, and vice versa.
+        self.assertIn("armed_at = self._icon_entered",
+                      inspect.getsource(FloatingPopup._register_key_dismiss))
+
+    # ── switching apps dismisses ─────────────────────────────────────────
+
+    def test_switching_apps_hides_the_badge(self):
+        p = self._popup()
+        p._mode = "icon"
+        p.root = object()
+        hidden = []
+        p._do_hide = lambda: hidden.append(True)
+        p._foreground_is_target = lambda: False
+        FloatingPopup._watch_target_foreground(p)
+        self.assertEqual([True], hidden)
+
+    def test_staying_in_the_target_app_keeps_the_badge(self):
+        p = self._popup()
+        p._mode = "icon"
+        rearmed = []
+
+        class _Root:
+            def after(self, _ms, _fn):
+                rearmed.append(True)
+                return "tick"
+        p.root = _Root()
+        p._do_hide = lambda: self.fail("must not hide while still in the app")
+        p._foreground_is_target = lambda: True
+        FloatingPopup._watch_target_foreground(p)
+        self.assertEqual([True], rearmed)
+
+    def test_the_watch_stops_once_the_badge_is_gone(self):
+        p = self._popup()
+        p._mode = None
+        p.root = object()
+        p._do_hide = lambda: self.fail("nothing to hide")
+        p._foreground_is_target = lambda: False
+        FloatingPopup._watch_target_foreground(p)   # must simply return
+
+    def test_foreground_check_fails_open(self):
+        # A Win32 hiccup must never yank the badge away mid-read.
+        p = FloatingPopup.__new__(FloatingPopup)
+        p._target_hwnd = 0
+        self.assertTrue(FloatingPopup._foreground_is_target(p),
+                        "no captured target -> cannot judge -> keep showing")
+
+    def test_the_popups_own_window_counts_as_ours(self):
+        # winfo_id() is a CHILD window on Windows; both handles must be in the
+        # 'ours' set or clicking the badge would dismiss it.
+        src = inspect.getsource(FloatingPopup._foreground_is_target)
+        self.assertIn("self._popup_hwnd", src)
+        self.assertIn("self._top_hwnd()", src)
+
+    def test_hiding_stops_the_watch(self):
+        self.assertIn("_stop_foreground_watch",
+                      inspect.getsource(FloatingPopup._do_hide))
+
+    def test_a_failed_injection_badge_does_not_follow_the_user_away(self):
+        # "⚠ Not inserted" is the one badge worth reading after switching apps.
+        src = inspect.getsource(FloatingPopup._enter_icon_mode)
+        start = src.index("_inserted_ok")
+        self.assertIn("_stop_foreground_watch", src[start:])
 
 
 if __name__ == "__main__":
