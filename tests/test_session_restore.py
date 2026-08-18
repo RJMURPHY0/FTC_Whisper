@@ -269,10 +269,17 @@ class SplashRevealTests(unittest.TestCase):
         self.assertEqual([], w.calls)
         self.assertTrue(w._root.after_calls)
 
-    def test_idle_restore_reveals_the_form(self):
-        w = self._window(in_flight=False)
+    def test_idle_restore_keeps_the_splash(self):
+        # A saved session still on disk means a restore is still viable (the
+        # network is just slow/blackholed after a cold boot), so the splash
+        # stays up and the check reschedules — it must NOT reveal the login
+        # form. That flip is exactly what made a slow-network boot read as a
+        # forced re-sign-in. The "Sign in manually" escape on the splash is the
+        # deliberate way out for anyone who won't wait.
+        w = self._window(in_flight=False, saved=True)
         w._reveal_login_if_pending()
-        self.assertEqual(["reveal"], w.calls)
+        self.assertEqual([], w.calls)
+        self.assertTrue(w._root.after_calls)
 
     def test_authenticated_promotes_rather_than_returning(self):
         w = self._window(authenticated=True)
@@ -305,10 +312,18 @@ class SplashRevealTests(unittest.TestCase):
         src = inspect.getsource(AppWindow._session_restore_retry_loop)
         self.assertIn("while True", src)
         self.assertIn("_RESTORE_STEADY_GAP", src)
-        # The post-burst reveal must not end the loop — retries continue
-        # quietly behind the login form.
-        tail = src[src.index("attempt =="):]
-        self.assertNotIn("return", tail)
+        # The loop reveals the login form ONLY when the session file has been
+        # cleared (a definitive auth failure), and that branch returns. There
+        # is no attempt-count reveal that drops the user to the form while a
+        # valid session still exists — the splash stays up instead (see
+        # _reveal_login_if_pending), which is the whole point.
+        reveals = src.count("_reveal_login_now")
+        self.assertLessEqual(reveals, 1,
+                             "only the file-cleared branch may reveal the form")
+        if reveals:
+            after = src[src.index("_reveal_login_now"):]
+            self.assertIn("return", after[:80],
+                          "the file-cleared reveal must terminate the loop")
 
 
 if __name__ == "__main__":

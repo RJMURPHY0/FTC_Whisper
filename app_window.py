@@ -1726,28 +1726,35 @@ class AppWindow:
                 setattr(self, attr, None)
 
     def _reveal_login_if_pending(self) -> None:
-        """Grace window elapsed without a restored session. Only give up on the
-        splash when nothing is in flight — yanking the form up mid-attempt is
-        what made a reboot look like a forced re-sign-in, since the restore was
-        usually seconds from landing. The background retry keeps running either
-        way and still promotes if the network comes back."""
+        """Grace window elapsed without a restored session yet.
+
+        As long as a valid saved session still exists on disk, a restore is
+        still viable — the network is just slow or (on some docks/NICs)
+        blackholed for the first minute or so after a cold boot. Keep the
+        "Signing you in…" splash up and keep polling, rather than flipping the
+        user to a login form that reads as "you've been signed out": that flip
+        is exactly what made every reboot feel like a forced re-sign-in, and it
+        made people sign in by hand while a perfectly good restore was seconds
+        from landing. The background retry loop runs forever and promotes to the
+        dashboard the instant the network recovers; the "Sign in manually"
+        escape (shown a few seconds into the splash) is the deliberate way out
+        for anyone who would rather not wait. The form is only forced up when a
+        definitive auth failure has cleared the session file (see below)."""
         self._signing_in_reveal_job = None
         if self._auth.is_authenticated:
             self._promote_restored_session()
             return
         if not self._auth.has_saved_session():
+            # Definitive auth failure cleared the file — the login form is now
+            # the correct final state.
             self._reveal_login_now()
             return
-        if getattr(self._auth, "restore_in_flight", False):
-            # Still talking to the server — wait it out rather than flipping the
-            # user to a form they don't need.
-            try:
-                self._signing_in_reveal_job = self._root.after(
-                    2000, self._reveal_login_if_pending)
-            except tk.TclError:
-                pass
-            return
-        self._reveal_login_now()
+        # Saved session still present → keep the splash and keep polling.
+        try:
+            self._signing_in_reveal_job = self._root.after(
+                2000, self._reveal_login_if_pending)
+        except tk.TclError:
+            pass
 
     def _reveal_login_now(self) -> None:
         """Show the login form (no-op once signed in)."""
@@ -2172,10 +2179,10 @@ class AppWindow:
             "all":   "All time",
         }
         _RANGE_FROM_LABEL = {v: k for k, v in _RANGE_LABELS.items()}
-        _cur_range = (getattr(self._config, "impact_range", "today")
-                     if self._config else "today")
+        _cur_range = (getattr(self._config, "impact_range", "all")
+                     if self._config else "all")
         if _cur_range not in _RANGE_LABELS:
-            _cur_range = "today"
+            _cur_range = "all"
         self._impact_range = _cur_range
 
         self._impact_range_var = tk.StringVar(value=_RANGE_LABELS[_cur_range])
@@ -2538,6 +2545,13 @@ class AppWindow:
     def _fmt_ratio(r: float) -> str:
         return f"{r:.1f}×".replace(".0×", "×")
 
+    @staticmethod
+    def _range_phrase(snap: dict) -> str:
+        """'this week' / 'this month' … for the selected window, '' for 'all'.
+        Lets the breakdown panels say which period they are showing."""
+        return {"today": "today", "week": "this week", "month": "this month",
+                "year": "this year"}.get(snap.get("range", "all"), "")
+
     def _layout_impact_detail(self) -> None:
         key = getattr(self, "_impact_open", None)
         cv = getattr(self, "_impact_detail", None)
@@ -2548,7 +2562,10 @@ class AppWindow:
             return
         cv.delete("all")
         self._impact_detail_hits = []
-        snap = self._stats.snapshot() if self._stats else {}
+        # Same window as the cards, so clicking a card drills into that card's
+        # breakdown for the selected range.
+        rng = getattr(self, "_impact_range", "all")
+        snap = self._stats.snapshot(rng) if self._stats else {}
         if key == "time":
             self._draw_detail_time(cv, w, snap)
         elif key == "speed":
@@ -2579,8 +2596,11 @@ class AppWindow:
 
         # The headline rides the header row now (icon + figure + "saved so far"),
         # which frees the body for a fourth row — see _panel_head.
+        _phrase = self._range_phrase(snap)
         self._panel_head(cv, w, "time", "TIME SAVED",
-                         headline=self._fmt_span(total), headline_sub="saved so far")
+                         headline=self._fmt_span(total),
+                         headline_sub=f"saved {_phrase}".strip() if _phrase
+                         else "saved so far")
 
         pad = 20
         inner = w - pad * 2
@@ -2688,19 +2708,35 @@ class AppWindow:
             self._panel_bar(cv, pad, y + 11, inner, value / float(fastest), colour)
             y += step
 
+        win_wpm = int(snap.get("avg_wpm_window", 0) or 0)
         voiced_w = int(snap.get("voiced_words", 0))
         voiced_m = float(snap.get("voiced_seconds", 0.0)) / 60.0
-        if measured:
-            # Your real rate, measured over actual speech with silence left out.
-            # The time panel applies this same rate to your whole word count, so
-            # the multiple here and the "time you spent" figure there agree —
-            # no 5.6×-vs-3.4× reconciliation to explain any more.
-            body = (f"From {voiced_w:,} words over {self._fmt_span(voiced_m)} "
-                    f"of speech, silence left out.")
-        else:
+        life_w = int(snap.get("lifetime_voiced_words", 0))
+        life_m = float(snap.get("lifetime_voiced_seconds", 0.0)) / 60.0
+        _phrase = self._range_phrase(snap)
+        # Gate on the SAME `measured` flag that drives the shown figure (shown =
+        # avg_wpm or nominal): when nothing is measured we show the nominal
+        # number, so the body must be the unlock explainer — never a "measured
+        # over N words" line. Only inside a measured result do we distinguish a
+        # window rate from the lifetime fallback.
+        if not measured:
             body = (f"Showing the nominal {stats_mod.DICTATION_WPM} wpm. "
-                    f"Dictate 50 words ({voiced_w:,} so far) and this becomes "
+                    f"Dictate 50 words ({life_w:,} so far) and this becomes "
                     f"your own measured speed.")
+        elif win_wpm:
+            # Measured over actual speech in the selected window, silence left
+            # out. The time panel applies this same rate to the window's word
+            # count, so the multiple here and the "time you spent" figure there
+            # agree — no 5.6×-vs-3.4× reconciliation to explain any more.
+            _p = f" {_phrase}" if _phrase else ""
+            body = (f"From {voiced_w:,} words over {self._fmt_span(voiced_m)} "
+                    f"of speech{_p}, silence left out.")
+        else:
+            # Not enough speech in this window yet, so the card shows your
+            # lifetime rate rather than dropping to the nominal default.
+            _p = f" for {_phrase}" if _phrase else ""
+            body = (f"Your typical speed, from {life_w:,} words over "
+                    f"{self._fmt_span(life_m)} of speech — not enough{_p} yet.")
         cv.create_text(pad, min(y + 2, h - 30), anchor="nw", width=inner,
                        text=body, fill=C["subtext"], font=("Segoe UI", 8))
 
@@ -2716,9 +2752,16 @@ class AppWindow:
         days = int(snap.get("streak_days", 0))
         best = int(snap.get("best_streak", 0))
         active = set(snap.get("active_days", ()))
-        self._panel_head(
-            cv, w, "streak", "DAY STREAK",
-            right=f"{days} day{'' if days == 1 else 's'} · best {best}")
+        # Header matches the card face: a bounded window shows days-active-in-it,
+        # 'all' shows the running streak. The calendar below is always the whole
+        # picture (every burning day, navigable) regardless of the window.
+        _phrase = self._range_phrase(snap)
+        if _phrase:
+            _n = int(snap.get("active_in_range", 0))
+            _right = f"{_n} active · {_phrase}"
+        else:
+            _right = f"{days} day{'' if days == 1 else 's'} · best {best}"
+        self._panel_head(cv, w, "streak", "DAY STREAK", right=_right)
 
         pad = 18
         today = datetime.date.today()
@@ -2901,8 +2944,12 @@ class AppWindow:
         background callers must come through _ui_after."""
         if not getattr(self, "_stats", None) or not hasattr(self, "_impact_cards"):
             return
+        # All three cards follow the words-range dropdown: the snapshot is scoped
+        # to the selected window so time-saved / speed / streak read for that
+        # period, not lifetime (rng='all' is lifetime, the impressive default).
+        rng = getattr(self, "_impact_range", "all")
         try:
-            snap = self._stats.snapshot()
+            snap = self._stats.snapshot(rng)
         except Exception as e:
             print(f"[AppWindow] Impact refresh failed: {e}")
             return
@@ -2932,18 +2979,29 @@ class AppWindow:
         else:
             self._set_impact_card("speed", "160", "wpm", "4× faster than typing")
 
-        n = snap["streak_days"]
-        if n == 0:
-            sub = "Dictate today to begin"
-        elif snap["streak_active_today"]:
-            sub = "Keep it going"
-        elif snap.get("streak_weekend_grace"):
-            sub = "Safe over the weekend"
+        # The streak is a running lifetime concept, so 'all' shows the true
+        # streak; a bounded window instead shows how many days were dictated
+        # WITHIN it ("5 days · active this week") — the honest windowed reading
+        # of the same card, with the calendar breakdown still showing the whole
+        # picture when clicked.
+        if rng == "all":
+            n = snap["streak_days"]
+            if n == 0:
+                sub = "Dictate today to begin"
+            elif snap["streak_active_today"]:
+                sub = "Keep it going"
+            elif snap.get("streak_weekend_grace"):
+                sub = "Safe over the weekend"
+            else:
+                sub = "Dictate to keep it"
         else:
-            sub = "Dictate to keep it"
+            n = int(snap.get("active_in_range", 0))
+            _rlabel = {"today": "today", "week": "this week",
+                       "month": "this month", "year": "this year"}.get(rng, "")
+            sub = (f"active {_rlabel}".strip() if n
+                   else f"No days yet {_rlabel}".strip())
         self._set_impact_card("streak", str(n), "day" if n == 1 else "days", sub)
 
-        rng = getattr(self, "_impact_range", "today")
         words_map = snap.get("words") or {}
         tw = int(words_map.get(rng, snap.get("today_words", 0)))
         if hasattr(self, "_impact_today_lbl"):
@@ -6542,6 +6600,10 @@ class AppWindow:
 
     def _session_restore_retry_loop(self) -> None:
         import time
+        try:
+            self._auth.note("--- boot: returning user — restoring saved session ---")
+        except Exception:
+            pass
         # This loop IS the startup session restore (main() no longer blocks on
         # it — the network token refresh used to delay first paint by seconds).
         # First attempt fires immediately; the burst covers a slow reconnect
@@ -6582,17 +6644,23 @@ class AppWindow:
             except Exception:
                 pass
             attempt += 1
-            if attempt == self._RESTORE_BURST_ATTEMPTS \
-                    and not self._auth.is_authenticated:
-                # Burst spent: stop pretending and let the user act — but the
-                # loop keeps retrying quietly behind the login form.
-                self._ui_after(0, self._reveal_login_now)
+            # No burst-reveal any more: while a valid session file exists the
+            # splash stays up and this loop keeps trying (the "Sign in manually"
+            # escape on the splash is the way out for anyone who won't wait).
+            # The form is only forced up when a definitive auth failure clears
+            # the file — handled at the top of the loop and in
+            # _reveal_login_if_pending. This is what stops a slow-network boot
+            # from reading as a forced re-sign-in.
 
     def _promote_restored_session(self) -> None:
         """Main-thread: a background retry restored the session — switch to the
         dashboard and boot services, exactly as a startup restore would have."""
         if not self._auth.is_authenticated:
             return
+        try:
+            self._auth.note("promoted: auto sign-in succeeded → dashboard")
+        except Exception:
+            pass
         self._switch_to_dashboard()
         self._fire_authenticated()
 

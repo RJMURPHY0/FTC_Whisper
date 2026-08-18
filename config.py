@@ -89,7 +89,7 @@ class Config:
     popup_align: str = "centre"  # Horizontal placement of the fixed popup: "left" | "centre" (default) | "right"; the ◂ ▸ arrows on the recording pill move it and it sticks. This shipped default is the first-install position for every user
     show_pill_arrows: bool = True  # Show the ▴▾◂▸ nudge arrows on the recording pill; off = clean pill (the saved position still applies)
     hide_popup_in_screenshots: bool = False  # Exclude the pill/badge/refine panel from screenshots and screen recordings (SetWindowDisplayAffinity WDA_EXCLUDEFROMCAPTURE; needs Win10 2004+, silently stays visible on older builds)
-    impact_range: str = "today"  # Home footer words-dictated range: today|week|month|year|all
+    impact_range: str = "all"  # "Your impact" window (dropdown scopes ALL three cards + words): today|week|month|year|all. Default 'all' = lifetime, the impressive first-impression figure
     trim_silence: bool = True  # Drop fully-silent committed chunks (no words transcribed) from the stored clip to save local disk
     trailing_space: bool = False  # Append a space after each injection (useful when dictating mid-sentence)
     auto_enter: bool = False      # Press Enter after injection (useful for chat/search boxes)
@@ -300,7 +300,7 @@ class Config:
                 # anything else back to the default so a stray value never
                 # breaks the Home-tab dropdown.
                 if config.impact_range not in ("today", "week", "month", "year", "all"):
-                    config.impact_range = "today"
+                    config.impact_range = "all"
             except (json.JSONDecodeError, IOError) as e:
                 # Reset-to-defaults fallback (kept) — but never silently:
                 # preserve the bad file and flag the reset so app.py can show

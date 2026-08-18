@@ -7,7 +7,7 @@ class _Stats:
     def __init__(self, wpm):
         self.wpm = wpm
 
-    def snapshot(self):
+    def snapshot(self, rng="all"):
         return {
             "saved_minutes": 0,
             "avg_wpm": self.wpm,

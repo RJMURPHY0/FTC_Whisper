@@ -235,7 +235,8 @@ class TimePanelTests(unittest.TestCase):
         w._root = self.root
         w._config = types.SimpleNamespace(impact_range="today",
                                           save_async=lambda: None)
-        w._stats = types.SimpleNamespace(snapshot=lambda _s=base: dict(_s))
+        w._stats = types.SimpleNamespace(
+            snapshot=lambda _rng="all", _s=base: dict(_s))
         frame = tk.Frame(self.root, bg=C["bg"])
         frame.pack(fill="both", expand=True)
         self.addCleanup(frame.destroy)
@@ -347,7 +348,8 @@ class SpeedPanelTests(unittest.TestCase):
         w._root = self.root
         w._config = types.SimpleNamespace(impact_range="today",
                                           save_async=lambda: None)
-        w._stats = types.SimpleNamespace(snapshot=lambda _s=base: dict(_s))
+        w._stats = types.SimpleNamespace(
+            snapshot=lambda _rng="all", _s=base: dict(_s))
         frame = tk.Frame(self.root, bg=C["bg"])
         frame.pack(fill="both", expand=True)
         self.addCleanup(frame.destroy)

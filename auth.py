@@ -127,6 +127,52 @@ def _write_last_email(email: str) -> None:
         print(f"[Auth] Could not save last email: {e}")
 
 
+def _restore_log_path() -> str:
+    """auth-restore.log lives beside startup-error.log in %LOCALAPPDATA%\\FTC
+    Whisper (the app's diagnostics folder), falling back to %APPDATA% so it is
+    always writable."""
+    base = (os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+            or os.path.expanduser("~"))
+    folder = os.path.join(base, "FTC Whisper")
+    try:
+        os.makedirs(folder, exist_ok=True)
+    except OSError:
+        pass
+    return os.path.join(folder, "auth-restore.log")
+
+
+def _restore_log(msg: str) -> None:
+    """Append one line recording a session-restore outcome.
+
+    A windowed exe (console=False) discards stdout, so every
+    "[Auth] Session restore failed …" print vanished and the real reason a
+    reboot dropped the user back to the login form could never be diagnosed.
+    This makes the outcome durable and inspectable. Best-effort, size-capped
+    (~128 KB, keeping the tail), and never raises."""
+    try:
+        path = _restore_log_path()
+        try:
+            if os.path.getsize(path) > 128 * 1024:
+                with open(path, "rb") as f:
+                    f.seek(-64 * 1024, os.SEEK_END)
+                    tail = f.read()
+                with open(path, "wb") as f:
+                    f.write(b"...trimmed...\n" + tail)
+        except OSError:
+            pass
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"[{stamp}] {msg}\n")
+    except Exception:
+        pass
+
+
+def _short_err(e) -> str:
+    """A single-line, length-capped rendering of an exception for the log."""
+    s = " ".join(str(e).split())
+    return s[:240]
+
+
 # ---------------------------------------------------------------------------
 # AuthManager
 # ---------------------------------------------------------------------------
@@ -289,6 +335,8 @@ class AuthManager:
                 late = state["abandoned"]
             if late and ok:
                 print("[Auth] Session restored after the startup wait — promoting.")
+                _restore_log("OK (late): restored after the startup wait "
+                             "— promoting the dashboard")
                 self._fire_restore_listener()
 
         def _restore() -> None:
@@ -319,6 +367,7 @@ class AuthManager:
         """One restore attempt, run to completion. Returns True when the user
         is signed in. Never raises."""
         raw = b""
+        _restore_log("restore attempt: contacting Supabase")
         try:
             with open(path, "rb") as f:
                 raw = f.read()
@@ -338,6 +387,8 @@ class AuthManager:
                     # the session and silently sign the user out).
                     print("[Auth] Session file unreadable (decrypt/parse "
                           "failed) — keeping it; will retry next launch.")
+                    _restore_log("FAIL: session file unreadable "
+                                 "(decrypt/parse) — kept")
                     return False
 
             client = self._get_client()
@@ -361,11 +412,15 @@ class AuthManager:
                     )()
                 )
                 print(f"[Auth] Restored session for {self._user.email}")
+                _restore_log(f"OK: restored session for {self._user.email}")
                 return True
+            _restore_log("FAIL: set_session returned no user — kept")
             return False
         except Exception as e:
             if not _is_definitive_auth_error(str(e)):
                 print(f"[Auth] Session restore failed (network/other): {e}")
+                _restore_log(f"RETRY: network/other error — session kept: "
+                             f"{_short_err(e)}")
                 return False
             # A server verdict of "these tokens are dead" — but only act on it
             # if nothing else has already succeeded. Deleting a session that a
@@ -373,12 +428,18 @@ class AuthManager:
             # what signed the user out for real.
             if self._user is not None:
                 print(f"[Auth] Ignoring stale auth error (already signed in): {e}")
+                _restore_log(f"IGNORED stale auth error (already signed in): "
+                             f"{_short_err(e)}")
                 return False
             if self._session_bytes_changed(path, raw):
                 print(f"[Auth] Ignoring stale auth error (session file was "
                       f"refreshed meanwhile): {e}")
+                _restore_log(f"IGNORED stale auth error (file refreshed "
+                             f"meanwhile): {_short_err(e)}")
                 return False
             print(f"[Auth] Session restore failed (auth error): {e}")
+            _restore_log(f"DEFINITIVE auth failure — SESSION CLEARED: "
+                         f"{_short_err(e)}")
             self._clear_session()
             return False
 
@@ -425,6 +486,13 @@ class AuthManager:
     def try_restore_session(self, wait_seconds: float = 15.0) -> bool:
         """Called at startup — returns True if a valid saved session exists."""
         return self._load_saved_session(wait_seconds)
+
+    @staticmethod
+    def note(msg: str) -> None:
+        """Write a marker line to the restore diagnostics log — used by the UI
+        to bracket a boot / manual sign-in alongside the restore attempts, so
+        the log reads as a timeline."""
+        _restore_log(msg)
 
     @property
     def restore_in_flight(self) -> bool:
@@ -481,6 +549,8 @@ class AuthManager:
                     self._user = result.user
                     self._save_session(result.session)
                     _write_last_email(result.user.email or email)
+                    _restore_log(f"MANUAL sign-in succeeded for "
+                                 f"{result.user.email or email}")
                     return True, f"Welcome back, {result.user.email}"
                 return False, "Sign-in failed — please check your email and password."
             except Exception as e:

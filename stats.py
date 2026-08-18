@@ -318,8 +318,19 @@ class StatsStore:
         self._notify()
         self._schedule_push()
 
-    def snapshot(self) -> dict:
-        """Current metrics for the signed-in (or local) account."""
+    def snapshot(self, rng: str = "all") -> dict:
+        """Current metrics for the signed-in (or local) account.
+
+        ``rng`` scopes the time-saved, dictation-speed, words and active-days
+        figures to a window: 'today', 'week' (Monday-start), 'month', 'year',
+        or 'all' (default — lifetime, and the ONLY window that folds in the
+        collapsed ``carry`` totals from trimmed old days). The streak and the
+        calendar's ``active_days`` are always lifetime: a streak is a running
+        concept and the streak panel's calendar navigates months itself.
+
+        rng='all' reproduces the pre-windowing behaviour exactly (the window
+        then spans every stored day), so existing callers and tests are
+        unaffected."""
         with self._lock:
             u = self._user_blob()
             days = dict(u["days"])
@@ -328,16 +339,47 @@ class StatsStore:
         today = _today()
         today_words = int(days.get(today.isoformat(), {}).get("w", 0))
 
+        def _in_window(d: datetime.date) -> bool:
+            if rng == "today":
+                return d == today
+            if rng == "week":
+                return today - datetime.timedelta(days=today.weekday()) <= d <= today
+            if rng == "month":
+                return d.year == today.year and d.month == today.month and d <= today
+            if rng == "year":
+                return d.year == today.year and d <= today
+            return True  # 'all' (or any unknown value) = lifetime
+
+        # Carry (collapsed old days) has no date, so it belongs only to an
+        # UNBOUNDED window: 'all', or any unrecognised value (which _in_window
+        # also treats as lifetime). Only the four bounded windows exclude it.
+        windowed = rng in ("today", "week", "month", "year")
+
+        # Two accumulations in one pass: the selected window (drives the cards)
+        # and lifetime (streak, calendar, and the wpm fallback for thin windows).
         voiced_s = 0.0
         voiced_w = 0
-        total_words = carry_words
+        total_words = 0 if windowed else carry_words
         total_audio_s = 0.0
         refine_n = 0
         refine_s = 0.0
         refine_pw = 0
         refine_voice_n = 0
         refine_min = 0.0
-        for rec in days.values():
+        active_in_range = 0
+        life_voiced_s = 0.0
+        life_voiced_w = 0
+        for iso, rec in days.items():
+            life_voiced_s += float(rec.get("v", 0.0))
+            life_voiced_w += int(rec.get("vw", 0))
+            try:
+                d = datetime.date.fromisoformat(iso)
+            except Exception:
+                continue
+            if not _in_window(d):
+                continue
+            if int(rec.get("w", 0)) > 0:
+                active_in_range += 1
             voiced_s += float(rec.get("v", 0.0))
             voiced_w += int(rec.get("vw", 0))
             total_words += int(rec.get("w", 0))
@@ -352,11 +394,17 @@ class StatsStore:
                     n, float(rec.get("rs", 0.0)), int(rec.get("rp", 0)))
 
         # Real dictation speed: words per minute of actual speech. Shown only
-        # once there's enough data to be a measurement rather than noise;
-        # before that the maths uses the nominal 160 default.
-        avg_wpm = 0
-        if voiced_w >= 50 and voiced_s >= 30.0:
-            avg_wpm = int(round(voiced_w / (voiced_s / 60.0)))
+        # once there's enough data to be a measurement rather than noise.
+        # Within a thin window (a single day may not clear the bar) fall back to
+        # the lifetime rate — a personal speed that barely varies — so the speed
+        # card stays the user's own number instead of dropping to the nominal
+        # 160 for every short window. Nominal only when there is no data at all.
+        def _measured(w: int, s: float) -> int:
+            return int(round(w / (s / 60.0))) if (w >= 50 and s >= 30.0) else 0
+
+        avg_wpm_window = _measured(voiced_w, voiced_s)
+        lifetime_wpm = _measured(life_voiced_w, life_voiced_s)
+        avg_wpm = avg_wpm_window or lifetime_wpm
 
         # Time saved is a like-for-like speech-vs-typing comparison: both are
         # pure production rates with thinking pauses left OUT. The typing figure
@@ -417,6 +465,13 @@ class StatsStore:
             "carry_words": carry_words,
             "active_days": active_days,
             "best_streak": _best_streak(active_days),
+            # ── window scoping (the dropdown / card range) ────────────────
+            "range": rng,
+            "active_in_range": active_in_range,
+            "avg_wpm_window": avg_wpm_window,
+            "lifetime_wpm": lifetime_wpm,
+            "lifetime_voiced_seconds": life_voiced_s,
+            "lifetime_voiced_words": life_voiced_w,
         }
 
     # ── Local persistence ─────────────────────────────────────────────
