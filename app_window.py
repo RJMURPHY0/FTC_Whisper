@@ -5777,6 +5777,11 @@ class AppWindow:
                      "moving it. Off gives a clean pill; the saved position "
                      "still applies",
                      True, icon="wand")
+        _toggle_card("badge_dismiss_on_key", "Dismiss the Badge on Any Key",
+                     "The ✓ badge after a dictation gets out of the way as soon "
+                     "as you press a key — no need to click it. Off leaves it "
+                     "up until it times out or you switch app",
+                     True, icon="keyboard")
         _toggle_card("hide_popup_in_screenshots", "Hide Popup in Screenshots",
                      "Leave the recording pill and refine panel out of "
                      "screenshots and screen recordings (you still see them "

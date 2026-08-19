@@ -196,10 +196,29 @@ class PositionNudgeTests(unittest.TestCase):
         FloatingPopup._nudge_position(p, +1)
         self.assertEqual(30 + popup_mod._OFFSET_STEP, p._popup_offset)
 
-    def test_down_lowers_it_and_floors_at_the_baseline(self):
+    def test_down_keeps_going_past_the_baseline(self):
+        # Offset 0 used to be the floor, which put the pill just above the
+        # taskbar and no lower — and that is exactly where a user who still
+        # wants it further down runs out of arrow. Below 0 it moves into the
+        # taskbar strip; _reposition clamps that against the monitor edge.
         p = self._popup(popup_mod._OFFSET_STEP // 2)  # less than one step above 0
         FloatingPopup._nudge_position(p, -1)
-        self.assertEqual(0, p._popup_offset, "down never drops below the tier baseline")
+        self.assertLess(p._popup_offset, 0,
+                        "▾ must keep moving the pill down past the baseline")
+
+    def test_down_floors_at_the_bounded_minimum(self):
+        # Bounded, because a pill parked entirely off the bottom edge would be
+        # unrecoverable without going into Settings.
+        p = self._popup(popup_mod._OFFSET_MIN)
+        FloatingPopup._nudge_position(p, -1)
+        self.assertEqual(popup_mod._OFFSET_MIN, p._popup_offset)
+
+    def test_reposition_clamps_a_negative_offset_to_the_screen_not_the_work_area(self):
+        # Clamping a deliberately-negative offset to the work area would
+        # silently undo every press past 0 and the ▾ arrow would look broken.
+        src = inspect.getsource(FloatingPopup._reposition)
+        self.assertIn("_monitor_bottom", src)
+        self.assertIn("self._popup_offset < 0", src)
 
     def test_up_is_clamped_to_the_max(self):
         p = self._popup(popup_mod._OFFSET_MAX)
@@ -223,8 +242,13 @@ class PositionNudgeTests(unittest.TestCase):
         p = FloatingPopup.__new__(FloatingPopup)
         FloatingPopup.set_popup_offset(p, 99999)
         self.assertEqual(popup_mod._OFFSET_MAX, p._popup_offset)
+        FloatingPopup.set_popup_offset(p, -99999)
+        self.assertEqual(popup_mod._OFFSET_MIN, p._popup_offset,
+                         "a corrupt value must not park the pill off-screen")
         FloatingPopup.set_popup_offset(p, -5)
-        self.assertEqual(0, p._popup_offset)
+        self.assertEqual(-5, p._popup_offset,
+                         "a small negative offset is a real user choice, "
+                         "not a stray value to be coerced to 0")
         FloatingPopup.set_popup_offset(p, "nonsense")
         self.assertEqual(popup_mod._POPUP_OFFSET_DEFAULT, p._popup_offset)
 
@@ -363,10 +387,38 @@ class KeyDismissTests(unittest.TestCase):
     def test_a_grace_window_guards_the_dismiss(self):
         src = inspect.getsource(FloatingPopup._register_key_dismiss)
         self.assertIn("KEY_DISMISS_GRACE_SECS", src)
-        self.assertLessEqual(popup_mod.KEY_DISMISS_GRACE_SECS, 2.0,
-                             "a long grace makes the badge feel unresponsive")
-        self.assertGreaterEqual(popup_mod.KEY_DISMISS_GRACE_SECS, 0.5,
-                                "too short and an in-flight keystroke eats it")
+        self.assertLessEqual(
+            popup_mod.KEY_DISMISS_GRACE_SECS, 0.4,
+            "1.2s made the badge visibly ignore the first key the user pressed, "
+            "which reads as stuck rather than as a confirmation")
+        self.assertGreater(
+            popup_mod.KEY_DISMISS_GRACE_SECS, 0.0,
+            "some grace remains: our own injection's synthetic keystrokes are "
+            "still draining through the hook thread as the badge is armed")
+
+    def test_a_held_key_repeating_never_dismisses(self):
+        # The real reason the grace used to be over a second: the hotkey is
+        # still physically held when the badge appears, and Windows auto-repeats
+        # a held key as a stream of fresh key DOWNs. Filtering those by identity
+        # is what allows the short grace above.
+        src = inspect.getsource(FloatingPopup._register_key_dismiss)
+        self.assertIn("held", src)
+        self.assertIn("_pressed_events", src,
+                      "the already-held set must be seeded from what is down "
+                      "RIGHT NOW, or the hotkey's own key reads as a fresh press")
+
+    def test_a_modifier_alone_never_dismisses(self):
+        # Alt is down by definition at badge time for an Alt+V hotkey, and
+        # Shift held to capitalise is not the user dismissing anything.
+        self.assertIn("_MODIFIER_KEY_NAMES",
+                      inspect.getsource(FloatingPopup._register_key_dismiss))
+        for name in ("alt", "ctrl", "shift", "left windows"):
+            self.assertIn(name, popup_mod._MODIFIER_KEY_NAMES)
+
+    def test_the_dismiss_can_be_turned_off(self):
+        # Ryan asked for the behaviour AND a way to opt out of it.
+        self.assertIn("self._dismiss_on_key",
+                      inspect.getsource(FloatingPopup._enter_icon_mode))
 
     def test_the_grace_is_measured_from_the_badge_this_hook_belongs_to(self):
         # Captured at registration, not read live: a newer badge must not

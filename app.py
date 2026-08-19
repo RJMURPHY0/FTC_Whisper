@@ -46,7 +46,7 @@ from stats import StatsStore
 from auth import AuthManager
 from app_window import AppWindow
 
-APP_VERSION = "1.6.70"
+APP_VERSION = "1.6.71"
 
 
 class _RECT(ctypes.Structure):
@@ -219,6 +219,8 @@ class WhisperFlowApp:
         self.popup.set_popup_offset(getattr(self.config, "popup_offset", 30))
         self.popup.set_popup_align(getattr(self.config, "popup_align", "centre"))
         self.popup.set_pill_arrows(getattr(self.config, "show_pill_arrows", True))
+        self.popup.set_badge_dismiss_on_key(
+            getattr(self.config, "badge_dismiss_on_key", True))
         self.popup.set_capture_hidden(
             getattr(self.config, "hide_popup_in_screenshots", False))
         # The ▴▾ ◂ ▸ arrows on the pill save their nudge through the normal
@@ -1081,6 +1083,8 @@ class WhisperFlowApp:
             self.popup.set_popup_align(value)
         elif key == "show_pill_arrows":
             self.popup.set_pill_arrows(value)
+        elif key == "badge_dismiss_on_key":
+            self.popup.set_badge_dismiss_on_key(value)
         elif key == "hide_popup_in_screenshots":
             self.popup.set_capture_hidden(value)
         elif key == "openrouter_model":
@@ -1291,7 +1295,12 @@ class WhisperFlowApp:
             if _silent:
                 self.recorder.last_silence_recovery = None
                 self._log_error_event("mic_stream_silent", dict(_silent))
-            self.feedback.recording_started()
+            # Normally already played on the hotkey thread the moment the key
+            # went down (see _on_state_change). This is the cold/recovered path,
+            # where the cue waits until audio is proven to be flowing.
+            if not getattr(self, "_start_cue_played", False):
+                self.feedback.recording_started()
+            self._start_cue_played = False
             # The status pill went up as "Starting…" on the hotkey thread;
             # audio is now proven flowing, so flip it to "Recording".
             self.popup.set_status_text("Recording")
@@ -2112,6 +2121,27 @@ class WhisperFlowApp:
             state.value
         )  # "idle" / "recording" / "processing"
         if state == AppState.RECORDING:
+            # Start cue FIRST, before any Win32 capture work — this runs on the
+            # hotkey thread, microseconds after the key went down, where
+            # _on_start_recording is a spawned thread that only gets there after
+            # recorder.start() has waited for the next audio callback (measured
+            # 30-95 ms). That wait is what made the press feel like it lagged.
+            #
+            # Only when the warm stream is ALREADY carrying audio: the pre-roll
+            # ring then holds the moment of the press and everything for ~0.8 s
+            # before it, so "go" is true at the instant it is played. If the
+            # stream has to be opened or recovered, the cue stays where it was —
+            # after start() proves audio is flowing — because cueing someone to
+            # speak into a stream that is not up yet is how first words vanish.
+            # The sound itself is untouched; only when it fires has changed.
+            self._start_cue_played = False
+            try:
+                _rec = getattr(self, "recorder", None)
+                if _rec is not None and _rec.warm_capture_live:
+                    self.feedback.recording_started()
+                    self._start_cue_played = True
+            except Exception as e:
+                print(f"[App] Early start cue skipped (non-fatal): {e}")
             # Capture cursor and foreground window RIGHT NOW, synchronously on the
             # hotkey thread. _on_start_recording runs in a daemon thread and has
             # NOT fired yet — reading _rec_cursor_x/y or _recording_hwnd here

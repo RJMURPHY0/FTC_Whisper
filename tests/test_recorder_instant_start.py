@@ -198,3 +198,92 @@ class PressRecoveryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WarmCaptureLiveTests(unittest.TestCase):
+    """`warm_capture_live` is read on the HOTKEY thread to decide whether the
+    start cue can fire the instant the key goes down.
+
+    It answers one question only: is the mic already recording the room, so
+    that the pre-roll ring holds the moment of the press? If it lies in the
+    optimistic direction the user is cued to speak into a stream that is not up
+    yet — the exact way first words get lost — so every failure mode here must
+    fall to False.
+    """
+
+    def _recorder(self):
+        r = Recorder.__new__(Recorder)
+        r._warm_enabled = True
+        return r
+
+    def test_live_warm_stream_reads_as_live(self):
+        r = self._recorder()
+        r._stream_looks_alive = lambda: True
+        self.assertTrue(r.warm_capture_live)
+
+    def test_a_dead_stream_reads_as_not_live(self):
+        r = self._recorder()
+        r._stream_looks_alive = lambda: False
+        self.assertFalse(
+            r.warm_capture_live,
+            "a stream that has to be reopened has no pre-roll for the press")
+
+    def test_warm_mic_disabled_reads_as_not_live(self):
+        r = self._recorder()
+        r._warm_enabled = False
+        r._stream_looks_alive = lambda: True
+        self.assertFalse(r.warm_capture_live)
+
+    def test_it_fails_closed_on_any_error(self):
+        r = self._recorder()
+
+        def _boom():
+            raise RuntimeError("portaudio hiccup")
+
+        r._stream_looks_alive = _boom
+        self.assertFalse(r.warm_capture_live,
+                         "an unreadable stream must never be reported as live")
+
+    def test_it_never_blocks_the_press_path(self):
+        r = self._recorder()
+        r._stream_looks_alive = lambda: True
+        start = time.monotonic()
+        for _ in range(1000):
+            r.warm_capture_live
+        self.assertLess(time.monotonic() - start, 0.25,
+                        "this runs on the hotkey thread — it cannot be slow")
+
+
+class StartCueTimingTests(unittest.TestCase):
+    """The cue moved from after recorder.start() to the moment of the press.
+
+    start() waits for the next audio callback before returning (measured
+    30-95 ms on a warm stream), and the cue used to sit behind that wait, which
+    is what made the press feel like it lagged. The SOUND is unchanged — only
+    when it fires.
+    """
+
+    def _source(self):
+        import inspect
+
+        import app
+
+        return (inspect.getsource(app.WhisperFlowApp._on_state_change),
+                inspect.getsource(app.WhisperFlowApp._on_start_recording))
+
+    def test_the_cue_fires_on_the_hotkey_thread_when_the_mic_is_already_live(self):
+        state_src, _ = self._source()
+        self.assertIn("warm_capture_live", state_src)
+        self.assertIn("recording_started", state_src)
+
+    def test_the_cold_path_still_waits_for_proven_audio(self):
+        _, start_src = self._source()
+        self.assertIn("_start_cue_played", start_src,
+                      "a stream that had to be opened must still cue only "
+                      "after start() proves audio is flowing")
+
+    def test_the_cue_is_never_played_twice_for_one_press(self):
+        state_src, start_src = self._source()
+        self.assertIn("self._start_cue_played = False", state_src)
+        self.assertIn("if not getattr(self, \"_start_cue_played\", False):",
+                      start_src)

@@ -192,6 +192,26 @@ class Recorder:
             return self._recording
 
     @property
+    def warm_capture_live(self) -> bool:
+        """True when the warm stream is open and demonstrably carrying audio
+        RIGHT NOW, so the pre-roll ring already holds the moment of a keypress.
+
+        Read on the hotkey thread to decide whether the start cue can be played
+        immediately: when this is True the mic is not "about to" start, it is
+        already recording the room, so the cue is honest the instant the key
+        goes down. When it is False the press has to open or recover a stream
+        first, and the cue stays where it was — after start() proves audio is
+        flowing — because telling the user to speak into a stream that is not
+        up yet is exactly how first words get lost.
+
+        Cheap and non-blocking on purpose: it must never add latency to the
+        very path it exists to make instant."""
+        try:
+            return bool(self._warm_enabled and self._stream_looks_alive())
+        except Exception:
+            return False
+
+    @property
     def active_sample_rate(self) -> int:
         return int(self._active_sample_rate or self.sample_rate)
 

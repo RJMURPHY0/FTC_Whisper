@@ -85,9 +85,10 @@ class Config:
     parakeet_version: str = "v2"  # Parakeet model: "v2" (English) or "v3" (multilingual, lower WER); switching triggers a one-time ~660 MB download
     show_popup: bool = True  # Show the cursor-icon popup (Insert/Replace/Upgrade) after each dictation; off = text is injected silently with no popup
     popup_height: str = "low"  # Vertical position of the popup: "low" (near the taskbar, default — out of the way of chatbot input boxes), "medium" (mid-screen), or "high" (near the top, above a chatbot window)
-    popup_offset: int = 30  # Fine-nudge (px) that lifts the fixed popup ABOVE its popup_height baseline, so the pill clears the taskbar by default; the ▴▾ arrows on the recording pill adjust it live and it sticks. 0 = hug the baseline (old behaviour)
+    popup_offset: int = 30  # Fine-nudge (px) that lifts the fixed popup ABOVE its popup_height baseline, so the pill clears the taskbar by default; the ▴▾ arrows on the recording pill adjust it live and it sticks. 0 = hug the baseline, NEGATIVE = pushed down into the taskbar strip (clamped to the monitor edge, not the work area)
     popup_align: str = "centre"  # Horizontal placement of the fixed popup: "left" | "centre" (default) | "right"; the ◂ ▸ arrows on the recording pill move it and it sticks. This shipped default is the first-install position for every user
     show_pill_arrows: bool = True  # Show the ▴▾◂▸ nudge arrows on the recording pill; off = clean pill (the saved position still applies)
+    badge_dismiss_on_key: bool = True  # The post-dictation ✓ badge disappears the moment you press any key (modifiers and auto-repeat excluded); off = it stays until its timeout, the ✕, or you switch app
     hide_popup_in_screenshots: bool = False  # Exclude the pill/badge/refine panel from screenshots and screen recordings (SetWindowDisplayAffinity WDA_EXCLUDEFROMCAPTURE; needs Win10 2004+, silently stays visible on older builds)
     impact_range: str = "all"  # "Your impact" window (dropdown scopes ALL three cards + words): today|week|month|year|all. Default 'all' = lifetime, the impressive first-impression figure
     trim_silence: bool = True  # Drop fully-silent committed chunks (no words transcribed) from the stored clip to save local disk
@@ -287,9 +288,12 @@ class Config:
                     config.popup_height = "low"
                 # Popup fine-nudge must be a sane pixel count; clamp anything
                 # odd (a corrupt value or a config from a wider screen) so it can
-                # never shove the pill off the top of the work-area.
+                # never shove the pill off the top of the work-area. The lower
+                # bound is negative on purpose: ▾ can push the pill down into
+                # the taskbar strip past the baseline, and _reposition clamps
+                # that against the monitor edge so it stays on screen.
                 try:
-                    config.popup_offset = max(0, min(int(config.popup_offset), 400))
+                    config.popup_offset = max(-120, min(int(config.popup_offset), 400))
                 except (TypeError, ValueError):
                     config.popup_offset = 30
                 # Horizontal alignment must be a known token; coerce anything

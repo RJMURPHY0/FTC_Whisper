@@ -164,12 +164,34 @@ ICON_AUTO_DISMISS_SECS = 30.0
 # injection) kills the badge before they can register the ✓/⚠ at all, which
 # reads as a flicker rather than a confirmation.
 #
-# 1.2s was chosen over "a couple of seconds": long enough to see the badge and
-# for an in-flight keystroke to land harmlessly, short enough that it never
-# feels like the badge is ignoring you. The grace applies UNIFORMLY to every
-# key including Space and Enter — "any button" has to mean any button, and a
-# rule with exceptions is one the user has to learn.
-KEY_DISMISS_GRACE_SECS = 1.2
+# 0.25s, down from 1.2s (v1.6.71). At 1.2s the badge visibly ignored the first
+# thing the user did after dictating, which reads as the app being stuck rather
+# than as a confirmation — reported as "there's a delay where I can press any
+# button and it won't go away". The long window is no longer needed, because
+# the two things it was really absorbing are now filtered by identity instead
+# of by time:
+#
+#   * the hotkey's own modifier, still physically held as the badge appears
+#     (a held key auto-repeats, and every repeat is another key DOWN), and
+#   * the base key of the combo, held for the same reason.
+#
+# _MODIFIER_KEY_NAMES drops the first; the auto-repeat guard drops both. What
+# is left for the grace to cover is only synthetic input from OUR OWN injection
+# still draining through the hook thread, which is microseconds, not seconds.
+KEY_DISMISS_GRACE_SECS = 0.25
+
+# Keys that never count as "the user pressed a button". A modifier on its own
+# does nothing to the document, and the hotkey's modifier is by definition down
+# at the moment the badge appears — dismissing on it would kill the badge
+# before it could be read, which is the flicker the grace window used to exist
+# to prevent. Shift held to capitalise the next word is the same story.
+_MODIFIER_KEY_NAMES = frozenset({
+    "alt", "alt gr", "left alt", "right alt",
+    "ctrl", "left ctrl", "right ctrl",
+    "shift", "left shift", "right shift",
+    "windows", "left windows", "right windows",
+    "caps lock", "num lock", "scroll lock", "fn",
+})
 # How often the badge re-checks whether the user has switched away from the app
 # the text was injected into. Matches the Dropdown foreground watcher.
 _FG_WATCH_INTERVAL_MS = 250
@@ -196,6 +218,14 @@ _ONTOP_INTERVAL_MS = 500
 _POPUP_OFFSET_DEFAULT = 30
 _OFFSET_STEP          = 18
 _OFFSET_MAX           = 400
+# ▾ can now go BELOW the tier baseline (negative offset), because offset 0 was a
+# floor the user hit while still wanting the pill lower — the "low" baseline
+# sits just above the taskbar, so 0 is as far down as the work area goes. A
+# negative offset deliberately moves the pill into the taskbar strip, and
+# _reposition clamps those against the monitor's FULL rect rather than its work
+# area so it can still never leave the screen. Bounded, because a pill parked
+# entirely off the bottom edge would be unrecoverable without Settings.
+_OFFSET_MIN           = -120
 
 # Horizontal placement of the fixed popup. The ◂ ▸ arrows step through these in
 # order; each end is a hard stop. "centre" is the shipped default.
@@ -478,6 +508,14 @@ class FloatingPopup:
         self._voice_capture_stop = None
         self._mic_recording: bool = False
         self._mic_pulse_on: bool = True
+        # Voice-prompt bookkeeping — see _apply_voice_text. _voice_last is the
+        # exact string the mic last wrote into the Ask box (None = never
+        # written), so any other content means the user edited it by hand.
+        self._voice_token: int = 0
+        self._voice_base: str = ""
+        self._voice_drop: int = 0
+        self._voice_written_words: int = 0
+        self._voice_last: Optional[str] = None
         self._original_text: str = ""
         self._sender_name: str = ""  # the signed-in user's name, for email sign-offs
         self._current_result: Optional[str] = None
@@ -495,6 +533,7 @@ class FloatingPopup:
         self._popup_offset: int = _POPUP_OFFSET_DEFAULT  # px lifted above the popup_height baseline (set live by the pill's ▴▾ arrows)
         self._popup_align: str = "centre"  # "left" | "centre" | "right" — horizontal placement (set live by the pill's ◂ ▸ arrows)
         self._arrows_visible: bool = True   # show the ▴▾◂▸ nudge arrows on the pill (config.show_pill_arrows)
+        self._dismiss_on_key: bool = True   # the ✓ badge gets out of the way on any keypress (config.badge_dismiss_on_key)
         self._capture_hidden: bool = False  # exclude the popup from screenshots/recordings (config.hide_popup_in_screenshots)
         self._settings_saver = None  # fn(key, value) — persists a nudged position back to config
         self._upgrading: bool = False
@@ -544,7 +583,7 @@ class FloatingPopup:
         lifting the fixed popup clear of the taskbar. Clamped so a stray value
         can never park it off-screen. Applies to the next _reposition."""
         try:
-            self._popup_offset = max(0, min(int(value), _OFFSET_MAX))
+            self._popup_offset = max(_OFFSET_MIN, min(int(value), _OFFSET_MAX))
         except (TypeError, ValueError):
             self._popup_offset = _POPUP_OFFSET_DEFAULT
 
@@ -552,6 +591,14 @@ class FloatingPopup:
         """Horizontal placement of the fixed popup: "left" | "centre" | "right".
         Applies to the next _reposition."""
         self._popup_align = value if value in _ALIGN_ORDER else "centre"
+
+    def set_badge_dismiss_on_key(self, value) -> None:
+        """Whether the post-insert ✓ badge disappears the moment the user
+        presses any key. Off leaves it up until its own timeout, the ✕, or a
+        switch to another app. Applies to the NEXT badge; a badge already on
+        screen keeps the behaviour it was armed with, so the setting can never
+        change under a badge the user is currently looking at."""
+        self._dismiss_on_key = bool(value)
 
     def set_pill_arrows(self, value) -> None:
         """Show or hide the ▴▾◂▸ nudge arrows on the recording pill. Safe to
@@ -1191,10 +1238,14 @@ class FloatingPopup:
 
     def _nudge_position(self, direction: int):
         """Move the fixed popup up (+1) or down (-1) by one step and remember it.
-        Down floors at the tier baseline (offset 0 — the old hug-the-taskbar
-        spot); up is clamped so the pill can never be parked off the top of the
-        work-area. Repositions live and persists via the settings saver."""
-        new = max(0, min(self._popup_offset + direction * _OFFSET_STEP, _OFFSET_MAX))
+
+        Down no longer stops at the tier baseline: offset 0 puts the pill just
+        above the taskbar, and that was a floor users hit while still wanting it
+        lower. Below 0 the pill moves down into the taskbar strip, clamped by
+        _reposition against the monitor's full rect so it stays on screen.
+        Repositions live and persists via the settings saver."""
+        new = max(_OFFSET_MIN,
+                  min(self._popup_offset + direction * _OFFSET_STEP, _OFFSET_MAX))
         if new != self._popup_offset:
             self._popup_offset = new
             self._commit_position("popup_offset", new)
@@ -1744,7 +1795,10 @@ class FloatingPopup:
         self._reposition(self._status_cx, self._status_cy)
         self._show_no_activate()
         if self._inserted_ok:
-            self._register_key_dismiss()
+            if self._dismiss_on_key:
+                self._register_key_dismiss()
+            else:
+                self._unregister_key_dismiss()
             # Only the success badge follows the user away: a "⚠ Not inserted"
             # badge is the one thing they DO need to read after switching apps.
             self._start_foreground_watch()
@@ -1871,12 +1925,35 @@ class FloatingPopup:
             self._unregister_key_dismiss()
             armed_at = self._icon_entered
 
+            # Keys already down when the badge appeared. The hotkey that just
+            # ended the dictation is still physically held at this moment, and
+            # Windows auto-repeats a held key — every repeat arriving as another
+            # key DOWN. Seeding from what is pressed RIGHT NOW is what lets the
+            # grace window be a quarter of a second instead of well over a
+            # second: a repeat of a key the user was already holding is not them
+            # pressing anything, so it is ignored however long they hold it.
+            held: set = set()
+            try:
+                held = {e.scan_code for e in kb._pressed_events.values()}
+            except Exception:
+                pass
+
             def _on_dismiss_key(event):
+                etype = getattr(event, "event_type", None)
+                code = getattr(event, "scan_code", None)
+                if etype == "up":
+                    held.discard(code)
+                    return
                 # Key DOWN only. The key-up of the hotkey that just stopped the
                 # dictation arrives after the badge appears; dismissing on it
                 # would make the badge vanish the instant it was drawn.
-                if getattr(event, "event_type", None) != "down":
+                if etype != "down":
                     return
+                if code in held:
+                    return          # auto-repeat of a key the user already held
+                held.add(code)
+                if (getattr(event, "name", "") or "").lower() in _MODIFIER_KEY_NAMES:
+                    return          # a modifier alone is not "pressing a button"
                 if time.time() - armed_at < KEY_DISMISS_GRACE_SECS:
                     return
                 self._unregister_key_dismiss()
@@ -1965,7 +2042,7 @@ class FloatingPopup:
         self._ai_busy = False
         # Stop an in-flight voice-prompt recording — closing the panel must not
         # leave the mic stream open with a late transcription going nowhere.
-        self._mic_recording = False
+        self._stop_voice_capture()
         self._upgrading = False
         self._upgrade_result = None
         self._ai_status.configure(text="")
@@ -2076,6 +2153,14 @@ class FloatingPopup:
             return
 
         self._mic_recording = True
+        # Fresh dictation: forget the previous one's base/word bookkeeping. The
+        # token invalidates any write still in flight from an earlier capture.
+        self._voice_token += 1
+        token = self._voice_token
+        self._voice_base = ""
+        self._voice_drop = 0
+        self._voice_written_words = 0
+        self._voice_last = None
         self._mic_btn.configure(text="⏹", fg=CP["bg"], bg=CP["accent"])
         self._ai_status.configure(text="🔴  Recording…  click ⏹ to stop")
         self._ai_status.pack(anchor="w")
@@ -2105,7 +2190,9 @@ class FloatingPopup:
                             preview = self._voice_prompt_fn(snap, rate, blocking=False)
                             if preview and preview.strip():
                                 p = preview.strip()
-                                self.root.after(0, lambda p=p: self._set_ask_entry(p))
+                                self.root.after(
+                                    0,
+                                    lambda p=p: self._apply_voice_text(p, token))
             except Exception as exc:
                 err = str(exc)
                 try:
@@ -2137,7 +2224,7 @@ class FloatingPopup:
                 # The instruction was SPOKEN, not typed — doing this by hand in
                 # a chat window would have meant typing it (see stats).
                 self._refine_prompt_spoken = True
-                self.root.after(0, lambda t=t: self._set_ask_entry(t))
+                self.root.after(0, lambda t=t: self._apply_voice_text(t, token))
             else:
                 self.root.after(0, lambda: self._ai_status.configure(text="⚠  No speech detected"))
                 self.root.after(2000, self._finish_mic)
@@ -2160,6 +2247,39 @@ class FloatingPopup:
             self._mic_btn.configure(fg=CP["accent"], bg=CP["mic_bg"])
         self._mic_pulse_on = not self._mic_pulse_on
         self.root.after(500, self._mic_pulse_tick)
+
+    def _apply_voice_text(self, text: str, token: int = 0) -> None:
+        """Write a voice-prompt transcription into the Ask box WITHOUT undoing
+        the user's own edits.
+
+        The mic re-transcribes the whole buffer on every ~1.6s preview, so
+        writing that result straight in (what the raw _set_ask_entry call did)
+        restored every word the user had just deleted the moment they spoke
+        again. Anything in the box that we did not put there becomes the base
+        the dictation appends to, and the words spoken before that edit are
+        dropped — so a mid-sentence delete stays deleted and hand-typed text
+        survives. A stale token means the capture was cancelled (instruction
+        submitted, panel closed): the write is dropped rather than refilling a
+        box the user has already sent."""
+        if token and token != self._voice_token:
+            return
+        live = "" if self._ask_showing_placeholder else \
+            self._ask_entry.get("1.0", "end-1c")
+        if self._voice_last is None or live != self._voice_last:
+            # The field changed under us — a hand edit, or the first write of
+            # this capture. Adopt what is there now; everything dictated before
+            # that point belongs to the text the user has already dealt with.
+            self._voice_base = live.strip()
+            self._voice_drop = self._voice_written_words
+        words = text.split()
+        # Word-indexed, never a byte prefix: each pass re-transcribes the same
+        # audio and may re-word or re-punctuate what it produced last time.
+        spoken = " ".join(words[self._voice_drop:])
+        base = self._voice_base
+        out = f"{base} {spoken}".strip() if (base and spoken) else (spoken or base)
+        self._voice_written_words = len(words)
+        self._voice_last = out
+        self._set_ask_entry(out)
 
     def _set_ask_entry(self, text: str) -> None:
         self._ask_entry.delete("1.0", "end")
@@ -2198,6 +2318,20 @@ class FloatingPopup:
     def _reset_mic_btn(self) -> None:
         self._mic_recording = False
         self._mic_btn.configure(text="🎙", fg=CP["subtext"], bg=CP["mic_bg"])
+
+    def _stop_voice_capture(self) -> None:
+        """Turn the voice-prompt mic off and disown anything still in flight.
+
+        Submitting the instruction (Enter or ✦ Ask) ends the dictation: a mic
+        left listening would keep rewriting the Ask box after the instruction
+        had already gone to the model. Bumping the token drops the capture's
+        final transcription too, so a sent box never refills itself."""
+        if not self._mic_recording:
+            return
+        self._mic_recording = False   # the capture loop exits on its next pass
+        self._voice_token += 1
+        self._voice_last = None
+        self._reset_mic_btn()
 
     # ── AI refinement ──────────────────────────────────────────────────────────
 
@@ -2249,6 +2383,9 @@ class FloatingPopup:
             return
         if self._ai_busy:
             return
+        # Sending the instruction ends the dictation — the mic must not keep
+        # listening (and keep rewriting the box) after the ask has gone.
+        self._stop_voice_capture()
         if self._refine_started_at is None:
             self._refine_started_at = time.monotonic()
         self._refine_prompt_words = len(instruction.split())
@@ -2351,10 +2488,30 @@ class FloatingPopup:
             if hmon and u32.GetMonitorInfoW(hmon, ctypes.byref(info)):
                 r = info.rcWork
                 if r.right > r.left and r.bottom > r.top:
+                    self._last_monitor_bottom = int(info.rcMonitor.bottom)
                     return r.left, r.top, r.right, r.bottom
         except Exception:
             pass
+        self._last_monitor_bottom = None
         return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+
+    def _monitor_bottom(self, x: int = 0, y: int = 0) -> int:
+        """Physical bottom edge of the monitor the popup is being placed on —
+        the FULL rect, taskbar included, not the work area.
+
+        Only used for a deliberately negative popup_offset (the user pressing ▾
+        past the baseline to sit the pill in the taskbar strip). Read from the
+        same GetMonitorInfoW call the work-area lookup already makes, so it
+        cannot disagree with it about which monitor is in play. Raises when
+        unavailable, and the caller falls back to the work area — being clamped
+        a little high is a lot better than a pill placed off-screen."""
+        bottom = getattr(self, "_last_monitor_bottom", None)
+        if bottom is None:
+            self._get_monitor_workarea(x, y)
+            bottom = getattr(self, "_last_monitor_bottom", None)
+        if bottom is None:
+            raise RuntimeError("monitor rect unavailable")
+        return bottom
 
     def _dpi_scale(self) -> tuple[float, float]:
         """
@@ -2430,8 +2587,21 @@ class FloatingPopup:
         # First-order guard: keep the whole popup inside the work-area in Tk
         # coordinates, so a stale width or an odd monitor origin can never push
         # the fixed popup off an edge (the cut-off refine panel).
+        #
+        # A NEGATIVE popup_offset is the user deliberately pushing the pill down
+        # into the taskbar strip with the ▾ arrow, so the bottom clamp for that
+        # case is the monitor's full rect, not its work area — clamping to the
+        # work area would silently undo every press past 0 and the arrow would
+        # look broken. The screen edge is still a hard stop.
+        bottom_limit = bottom
+        if not near_cursor and self._popup_offset < 0:
+            try:
+                mb_p = self._monitor_bottom(cx, cy)
+                bottom_limit = max(bottom, round(mb_p * sy))
+            except Exception:
+                bottom_limit = bottom
         x = max(left, min(x, right - w))
-        y = max(top, min(y, bottom - h))
+        y = max(top, min(y, bottom_limit - h))
 
         pos_log(f"place mode={self._mode} in=({cx},{cy}) "
                 f"hwnd={self._target_hwnd:#x} "

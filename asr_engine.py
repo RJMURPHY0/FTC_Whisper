@@ -301,6 +301,30 @@ class ParakeetTranscriber:
     _VAD_OPTS = dict(threshold=0.40, min_speech_duration_ms=50,
                      min_silence_duration_ms=400, speech_pad_ms=200)
     _VAD_JOIN_GAP = 0.15      # silence re-inserted between spliced speech chunks
+    # Never let the gate eat the START or the END of what the user said. Silero
+    # decides where speech BEGINS from its own confidence curve, and a quiet
+    # first word ("Can you…", "I…") routinely falls under threshold 0.40 — so
+    # the gate cut it out and the model never saw it. Measured on Ryan's own
+    # stored dictations: with the gate on, "Can you give me a prompt…" came back
+    # as "Give me a prompt…" and "I haven't had…" as "Haven't had…"; with the
+    # gate off both were complete. speech_pad_ms=200 does not help, because it
+    # pads a region Silero has already placed after the missed word.
+    #
+    # So the first region is extended BACK and the last region FORWARD by this
+    # much before splicing. The gate keeps doing its real job — a clip with no
+    # speech anywhere still returns None, and long noise-only stretches in the
+    # MIDDLE are still cut out — but the edges, which is exactly where the
+    # user's own words live, are never trimmed.
+    #
+    # 3.0s, not 1.0s: measured against a real far-field dictation of Ryan's that
+    # peaks at 0.030, where Silero placed its first region 1.9s after he
+    # actually started talking. A 1.0s margin still cut "I haven't had" off the
+    # front there and the clip came back as "Contacts that scraped this week".
+    # The bound only ever costs the transducer a few seconds of the room the
+    # user was already sitting in, and the gate's real protections are
+    # untouched: a clip with no speech at all still returns None, so a
+    # noise-only recording can never reach the model through this path.
+    _VAD_EDGE_KEEP = 3.0
 
     def _vad_clip(self, audio: np.ndarray) -> Optional[np.ndarray]:
         """Return only the speech regions of 16 kHz `audio`; None when Silero
@@ -316,6 +340,21 @@ class ParakeetTranscriber:
             return audio
         if not chunks:
             return None
+        # Widen the outer edges, then merge anything that now overlaps (a short
+        # clip can collapse to a single region, which is the desired outcome:
+        # no splice at all, natural timing preserved).
+        edge = int(self._VAD_EDGE_KEEP * _MODEL_SAMPLE_RATE)
+        spans: list[dict] = []
+        for i, c in enumerate(chunks):
+            start = int(c["start"]) - (edge if i == 0 else 0)
+            end = int(c["end"]) + (edge if i == len(chunks) - 1 else 0)
+            start = max(0, start)
+            end = min(len(audio), end)
+            if spans and start <= spans[-1]["end"]:
+                spans[-1]["end"] = max(spans[-1]["end"], end)
+            else:
+                spans.append({"start": start, "end": end})
+        chunks = spans
         kept = sum(c["end"] - c["start"] for c in chunks)
         if kept >= 0.9 * len(audio):
             return audio  # nearly all speech — keep natural timing, skip the splice
