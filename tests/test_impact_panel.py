@@ -11,6 +11,7 @@ import datetime
 import inspect
 import os
 import sys
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -81,6 +82,11 @@ def tearDownModule():
 
 def _shared_root():
     """One Tk root for the whole module, kept alive to the end of the process.
+
+    Per MODULE, not per session: these modules set different geometries on
+    their root and the panel tests measure wrapped text against that width,
+    so sharing one root makes each module's numbers depend on which other
+    module ran last.
 
     Destroying it and making another breaks the next one: ui_render's photo
     cache holds ImageTk objects bound to the dead interpreter, and their
@@ -158,6 +164,9 @@ class PanelClickTests(unittest.TestCase):
         # A bounced or double click lands on the panel the first click just
         # opened; closing on it reads as a flicker, not as a toggle.
         self._open(settled=False)
+        # Stamp the guard as of NOW: the point is that a click INSIDE the
+        # window is ignored, not that this machine got here inside 250ms.
+        self.w._impact_opened_at = time.monotonic()
         self.w._on_impact_detail_click(self._click(200, 120))
         self.w._on_click_outside_impact()
         self.assertEqual("streak", self.w._impact_open)

@@ -2983,6 +2983,7 @@ class WhisperFlowApp:
                 hwnd=hwnd,
                 cursor_x=cx,
                 cursor_y=cy,
+                direct_panel=True,
             )
 
         except Exception as e:

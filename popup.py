@@ -748,6 +748,7 @@ class FloatingPopup:
         upgrading: bool = False,
         session: int = 0,
         on_insert_result: Callable[[str], None] = None,
+        direct_panel: bool = False,
     ) -> None:
         self._on_insert = on_insert
         self._on_replace = on_replace
@@ -774,7 +775,14 @@ class FloatingPopup:
         else:
             self._cursor_x, self._cursor_y = self._get_cursor_pos()
         if self.root:
-            self.root.after(0, self._enter_icon_mode)
+            # direct_panel skips the badge and lands straight on the refine
+            # panel. It is the REFINE-SELECTION path only: the user already
+            # selected text and pressed the key, so the badge is a step that
+            # only asks them to click again. The post-dictation popup keeps
+            # its badge -- there the text is already in the document and the
+            # panel is the optional second act, not the request.
+            self.root.after(
+                0, self._expand_to_panel if direct_panel else self._enter_icon_mode)
 
     def update_mic_level(self, level: float) -> None:
         """Called from the audio thread with RMS level (0.0–1.0)."""

@@ -10,6 +10,7 @@ import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
+import ui_render
 from datetime import datetime, timedelta
 from typing import Callable, Optional
 import ctypes
@@ -43,7 +44,10 @@ C = {
 }
 
 WINDOW_W = 420
-DASH_H   = 640
+# 680, not 640: the Hotkey tab's keycaps and its stacked Change/Save pairs no
+# longer fit 640 without scrolling, and shrinking them back is undoing the
+# design rather than fixing the window. Everything else simply gets more room.
+DASH_H   = 680
 
 # Resizable-window bounds. Content reflows down to MIN_W; anything narrower
 # would clip the impact cards and the hotkey pills.
@@ -889,6 +893,600 @@ class RoundedButton(tk.Canvas):
     config = configure
 
 
+# The CRM's dark `--muted-foreground` (hsl 0 0% 55%) -- the resting ink on a
+# glass button. C["subtext"] is the app's hint grey and reads too dim here.
+_GLASS_MUTED = "#8c8c8c"
+
+
+class HelpDot(tk.Canvas):
+    """A small "?" bubble that explains a control on hover.
+
+    The tip is an overrideredirect Toplevel, built the same way the Dropdown
+    list is (topmost, DWM-rounded, never takes focus) because every Toplevel
+    in this app that went its own way has cost a Z-order or DPI bug. It also
+    follows the same rule as the dropdown list: close as soon as the app stops
+    being the foreground window, or a -topmost tip floats over whatever the
+    user switched to.
+    """
+
+    _SIZE       = 15
+    _DELAY_MS   = 220         # long enough that sweeping past does not flash
+    _TIP_W      = 260
+
+    def __init__(self, parent, text: str, **kw):
+        bg = kw.pop("bg", None) or parent.cget("bg")
+        super().__init__(parent, bg=bg, highlightthickness=0, bd=0,
+                         width=self._SIZE, height=self._SIZE,
+                         cursor="hand2", **kw)
+        self._tip_text = text
+        self._tip = None
+        self._job = None
+        self._hover = False
+        self._photos = []
+        self._draw()
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        # Touch/click opens it too — a hover-only affordance is unreachable
+        # for anyone driving this by keyboard-and-click.
+        self.bind("<Button-1>", lambda _e: self._show())
+        self.bind("<Destroy>", lambda _e: self._hide())
+
+    # -- the dot -------------------------------------------------------------
+
+    def _draw(self):
+        self.delete("all")
+        self._photos = []
+        sz = self._SIZE
+        ink = C["accent"] if self._hover else C["subtext"]
+        ph = None
+        try:
+            ph = ui_render.help_dot(self, sz, ink, bg=self.cget("bg"),
+                                    filled=self._hover)
+        except Exception:
+            ph = None
+        if ph is not None:
+            self._photos.append(ph)
+            self.create_image(0, 0, image=ph, anchor="nw")
+        else:
+            self.create_oval(1, 1, sz - 1, sz - 1, outline=ink)
+            self.create_text(sz // 2, sz // 2, text="?", fill=ink,
+                             font=("Segoe UI", 7, "bold"))
+
+    # -- hover ---------------------------------------------------------------
+
+    def _on_enter(self, _e=None):
+        self._hover = True
+        self._draw()
+        self._cancel()
+        try:
+            self._job = self.after(self._DELAY_MS, self._show)
+        except tk.TclError:
+            pass
+
+    def _on_leave(self, _e=None):
+        self._hover = False
+        self._draw()
+        self._cancel()
+        self._hide()
+
+    def _cancel(self):
+        if self._job is not None:
+            try:
+                self.after_cancel(self._job)
+            except (tk.TclError, ValueError):
+                pass
+            self._job = None
+
+    # -- the tip -------------------------------------------------------------
+
+    def _show(self):
+        self._job = None
+        if self._tip is not None or not self.winfo_exists():
+            return
+        pad = 10
+        font = tkfont.Font(family="Segoe UI", size=9)
+        # Measure the wrapped text so the tip is exactly as tall as it needs
+        # to be — a fixed height either clips a long line or leaves a gap.
+        probe = tk.Label(self, text=self._tip_text, font=font,
+                         wraplength=self._TIP_W - 2 * pad, justify="left")
+        probe.update_idletasks()
+        tw = min(self._TIP_W - 2 * pad, probe.winfo_reqwidth())
+        th = probe.winfo_reqheight()
+        probe.destroy()
+        w, h = tw + 2 * pad, th + 2 * pad
+
+        mon_l, mon_t, mon_r, mon_b = _monitor_work_area(self)
+        x = self.winfo_rootx() + self._SIZE // 2 - w // 2
+        y = self.winfo_rooty() + self._SIZE + 6
+        if y + h > mon_b - 8:                       # flip above when tight
+            y = self.winfo_rooty() - h - 6
+        x = max(mon_l + 8, min(x, mon_r - w - 8))
+        y = max(mon_t + 8, min(y, mon_b - h - 8))
+
+        top = tk.Toplevel(self)
+        top.overrideredirect(True)
+        top.configure(bg=C["surface_hover"])
+        try:
+            top.attributes("-topmost", True)
+            top.attributes("-toolwindow", True)
+        except tk.TclError:
+            pass
+        top.geometry("%dx%d+%d+%d" % (w, h, x, y))
+        tk.Label(top, text=self._tip_text, bg=C["surface_hover"],
+                 fg=C["text"], font=font, wraplength=tw, justify="left",
+                 anchor="w").place(x=pad, y=pad, width=tw, height=th)
+        self._tip = top
+        try:
+            from popup import _apply_popup_corners
+            top.update_idletasks()
+            _apply_popup_corners(top.winfo_id())
+        except Exception:
+            pass
+
+    def _hide(self):
+        tip, self._tip = self._tip, None
+        if tip is not None:
+            try:
+                tip.destroy()
+            except tk.TclError:
+                pass
+
+
+class KeyCapRow(tk.Canvas):
+    """A shortcut drawn as real keyboard keys: ALT + V, each in its own cap.
+
+    A drop-in for the tk.Label it replaces -- the recorder drives it with
+    .configure(text=..., fg=...) from a dozen places and none of them had to
+    change. The LAST segment is the key you press and takes the accent; the
+    modifiers before it stay white, which is what makes "ALT + V" read as one
+    chord rather than as three equal tokens.
+
+    Anything that is not a chord (a placeholder like "..." mid-capture, or
+    "Not set") falls back to plain text: a cap drawn round an ellipsis reads
+    as a key called "...".
+    """
+
+    # Size tiers, widest first: (font, cap pad each side, cap min width,
+    # gap, "+" column). The row renders at the largest tier that FITS the
+    # width it has been given -- CTRL+SHIFT+R at full size is 188px and the
+    # hotkey column is 155, so a fixed size either clips a real bind or
+    # makes every ordinary two-key chord needlessly small.
+    _TIERS = ((14, 12, 42, 6, 13),
+              (12, 10, 37, 5, 12),
+              (11, 8,  32, 5, 11),
+              (10, 6,  27, 4, 9),
+              (9,  5,  23, 3, 8),
+              (8,  4,  20, 2, 7))
+    # Cap HEIGHT is deliberately constant across tiers: a chord that changed
+    # the row height would shift everything under it when the user rebinds.
+    _CAP_H   = 38
+    _ROW_PAD = 4          # breathing room for the cap's own drop shadow
+
+    def __init__(self, parent, text="", *, accent=None, ink=None,
+                 font=("Segoe UI", 14, "bold"), **kw):
+        bg = kw.pop("bg", None) or parent.cget("bg")
+        super().__init__(parent, bg=bg, highlightthickness=0, bd=0, **kw)
+        self._family = font[0]
+        self._fonts = {}
+        self._flat_font = tkfont.Font(
+            family=self._family,
+            size=(font[1] if len(font) > 1 else 12) + 4, weight="bold")
+        self._text = text
+        self._accent = accent or C["accent"]
+        # Every cap in the chord is the accent: ALT is as much part of the
+        # shortcut as V is, and a white modifier read as a label rather than
+        # as a key you press.
+        self._ink = ink or self._accent
+        self._photos = []          # cap images must outlive the draw call
+        self._drawn_for = (None, 0)
+        self.configure(height=self._CAP_H + self._ROW_PAD)
+        self.bind("<Configure>", self._on_configure, add="+")
+        self._render()
+
+    def _tier_fonts(self, size):
+        got = self._fonts.get(size)
+        if got is None:
+            got = (tkfont.Font(family=self._family, size=size, weight="bold"),
+                   tkfont.Font(family=self._family, size=max(8, size - 2)))
+            self._fonts[size] = got
+        return got
+
+    def _on_configure(self, e):
+        # Re-tier when the column actually changes width (the window is
+        # resizable), not on every echo of our own redraw.
+        if e.width > 10 and e.width != self._drawn_for[1]:
+            self._render()
+
+    # -- parsing -------------------------------------------------------------
+
+    @staticmethod
+    def _segments(text: str):
+        """Split a chord into cap labels, or return None for a placeholder."""
+        raw = (text or "").strip()
+        if not raw:
+            return None
+        parts = [p.strip().upper() for p in raw.split("+") if p.strip()]
+        if not parts:
+            return None
+        # A chord always has a modifier. A lone token is a cap only if it looks
+        # like a key (F9, ESC, HOME) -- never for a dash, an ellipsis or a
+        # sentence like "Not set".
+        if len(parts) == 1:
+            tok = parts[0]
+            if len(tok) > 5 or not tok.replace("_", "").isalnum():
+                return None
+        return parts
+
+    # -- drawing -------------------------------------------------------------
+
+    def _measure(self, segs, tier):
+        """Total drawn width of `segs` at one size tier."""
+        size, pad, cap_min, gap, plus_w = tier
+        cap_font = self._tier_fonts(size)[0]
+        total = 0
+        for i, label in enumerate(segs):
+            if i:
+                total += plus_w + 2 * gap
+            total += max(cap_min, cap_font.measure(label) + 2 * pad)
+        return total
+
+    def _pick_tier(self, segs, avail):
+        """The largest tier that fits, or None when even the smallest cannot.
+
+        Four-modifier chords (CTRL+ALT+SHIFT+F12 is a legal bind) are wider
+        than the column at any cap size worth drawing, and a row of caps too
+        small to read is worse than plain text — so the caller degrades
+        instead of squeezing."""
+        if avail <= 10:
+            return self._TIERS[0]      # not laid out yet; <Configure> re-tiers
+        for tier in self._TIERS:
+            if self._measure(segs, tier) <= avail:
+                return tier
+        return None
+
+    def _draw_flat(self, text, avail):
+        """Fallback: the chord as plain accent text, sized to fit."""
+        for size in range(16, 7, -1):
+            f = tkfont.Font(family=self._family, size=size, weight="bold")
+            if avail <= 10 or f.measure(text) <= avail:
+                break
+        self.create_text(0, (self._CAP_H + self._ROW_PAD) // 2, anchor="w", text=text,
+                         fill=self._accent, font=f)
+        self._flat_fallback = f
+
+    def _render(self):
+        avail = self.winfo_width()
+        self.delete("all")
+        self._photos = []
+        segs = self._segments(self._text)
+        self._drawn_for = (self._text, avail)
+        self.configure(height=self._CAP_H + self._ROW_PAD)
+        if segs is None:
+            self.create_text(0, (self._CAP_H + self._ROW_PAD) // 2, anchor="w",
+                             text=self._text or "", fill=self._accent,
+                             font=self._flat_font)
+            return
+
+        tier = self._pick_tier(segs, avail)
+        if tier is None:
+            self._draw_flat(" + ".join(segs), avail)
+            return
+        size, pad, cap_min, gap, plus_w = tier
+        cap_font, plus_font = self._tier_fonts(size)
+        h, y, x = self._CAP_H, self._ROW_PAD // 2, 0
+        for i, label in enumerate(segs):
+            if i:
+                self.create_text(x + gap + plus_w // 2, y + h // 2,
+                                 text="+", fill=_GLASS_MUTED, font=plus_font)
+                x += plus_w + 2 * gap
+            cw = max(cap_min, cap_font.measure(label) + 2 * pad)
+            ph = None
+            try:
+                ph = ui_render.keycap(self, cw, h, 7, face=C["surface_hover"],
+                                      border=C["border"], bg=self.cget("bg"))
+            except Exception:
+                ph = None
+            if ph is not None:
+                self._photos.append(ph)
+                self.create_image(x, y, image=ph, anchor="nw")
+            else:
+                _rr(self, x, y, x + cw, y + h, 7,
+                    fill=C["surface_hover"], outline="")
+            last = (i == len(segs) - 1)
+            self.create_text(x + cw // 2, y + h // 2 - 1, text=label,
+                             fill=self._accent if last else self._ink,
+                             font=cap_font)
+            x += cw
+        self.configure(height=h + self._ROW_PAD)
+
+    # -- Label-compatible options -------------------------------------------
+
+    def configure(self, cnf=None, **kw):
+        redraw = False
+        if "text" in kw:
+            self._text = kw.pop("text"); redraw = True
+        for k in ("fg", "foreground"):
+            if k in kw:
+                # The recorder recolours the whole display to say "unset" or
+                # "capturing"; every cap follows it.
+                self._accent = self._ink = kw.pop(k); redraw = True
+        if cnf or kw:
+            super().configure(cnf, **kw)
+        if redraw:
+            self._render()
+    config = configure
+
+
+class GlassButton(tk.Canvas):
+    """The CRM's raised "glass" button, ported to tkinter.
+
+    A straight port of Brightlink's `.glass-button` (its `src/index.css`) so
+    the two apps' buttons are the same control: card-gradient face, hairline
+    border a shade lighter than the card, soft drop shadow, inset top
+    highlight, and on hover a 1.5px lift with a brighter face, a deeper
+    shadow and a specular band that sweeps across. Click presses it flush.
+
+    Deliberately a drop-in for `RoundedButton`: the same `.configure(text=,
+    bg=, fg=, cursor=)` calls keep working. `bg` is read as the SELECTED
+    accent (the CSS `[data-active="true"]` state), not as a flat fill -- the
+    hotkey recorder's "Cancel" state passes C["error"] and gets the
+    pressed-in red chip look rather than a red slab.
+
+    Every surface is a cached PIL render, so a hover is an image swap: no
+    relayout, and the sweep animation costs one itemconfigure per frame.
+    """
+
+    _SHEEN_FRAMES = 12
+    _SHEEN_MS     = 50            # 12 x 50ms == the CSS 0.6s sweep
+
+    _ICON_GAP = 6
+
+    def __init__(self, parent, text="", command=None, *,
+                 fg=None, subfg=None, card=None, font=("Segoe UI", 10),
+                 icon="", icon_size=14, icon_color=None,
+                 radius=8, padx=16, pady=8, **kw):
+        parent_bg = kw.pop("bg", None) or parent.cget("bg")
+        super().__init__(parent, bg=parent_bg, highlightthickness=0, bd=0,
+                         cursor=kw.pop("cursor", "hand2"), **kw)
+        fam = font[0]
+        size = font[1] if len(font) > 1 else 10
+        weight = "bold" if (len(font) > 2 and font[2] == "bold") else "normal"
+        self._font   = tkfont.Font(family=fam, size=size, weight=weight)
+        self._text   = text
+        self._fg     = fg or C["text"]          # hover / active ink
+        self._subfg  = subfg or C["subtext"]    # resting ink (CSS muted-fg)
+        # The face has to sit ABOVE whatever it is on, so a button on a card
+        # takes the hover tone as its base -- a card-coloured face on a
+        # card-coloured surface is invisible however good the shadow is.
+        self._card   = card or (C["surface_hover"]
+                                if parent_bg == C["surface"] else C["surface"])
+        # A leading glyph is painted into the surface (see ui_render), so the
+        # widget only has to reserve room for it and shift the text right.
+        self._icon = icon
+        self._icon_size = icon_size
+        self._icon_fg = icon_color            # None == follow the text ink
+        self._radius = radius
+        self._padx, self._pady = padx, pady
+        self._command = command
+        self._accent  = ""                      # "" == unselected
+        self._state   = "rest"
+        self._sheen   = -1.0
+        self._sweep_job = None
+        self._photo = None
+        self._stretch = False     # set by stretch(): follow the parent width
+
+        self.bind("<Enter>",           self._on_enter)
+        self.bind("<Leave>",           self._on_leave)
+        self.bind("<Button-1>",        self._on_press)
+        self.bind("<ButtonRelease-1>", self._on_release)
+        self.bind("<Destroy>",         lambda _e: self._stop_sweep())
+        self._resize_and_draw()
+
+    # -- geometry ------------------------------------------------------------
+
+    def _content_w(self):
+        probe = self.create_text(0, 0, text=self._text or " ",
+                                 font=self._font, anchor="nw")
+        bx1, _by1, bx2, _by2 = self.bbox(probe)
+        self.delete(probe)
+        tw = max(self._font.measure(self._text), bx2 - bx1)
+        if self._icon:
+            tw += self._icon_size + self._ICON_GAP
+        return tw
+
+    def _resize_and_draw(self):
+        probe = self.create_text(0, 0, text=self._text or " ",
+                                 font=self._font, anchor="nw")
+        _bx1, by1, _bx2, by2 = self.bbox(probe)
+        self.delete(probe)
+        line_h = self._font.metrics("linespace")
+        w = self._content_w() + 2 * self._padx + 2 * ui_render.GLASS_PAD_X
+        h = (max(line_h, by2 - by1) + 2 * self._pady
+             + ui_render.GLASS_PAD_T + ui_render.GLASS_PAD_B)
+        if self._stretch:
+            # Never shrink a stretched button back to its text width when the
+            # label changes (Saved -> Save): the column owns the width.
+            live = self.winfo_width()
+            super().configure(height=h)
+            self._draw(live if live > 4 else w, h)
+        else:
+            super().configure(width=w, height=h)
+            self._draw(w, h)
+
+    def _face_centre(self, w, h):
+        """Centre of the button FACE, not of the canvas -- the canvas carries
+        shadow padding at the bottom, so a plain centre sits the text low."""
+        lift = ui_render._GLASS_LIFT if (
+            self._state == "hover" and not self._accent) else 0
+        top = ui_render.GLASS_PAD_T - lift
+        bot = h - ui_render.GLASS_PAD_B - lift
+        return w // 2, (top + bot) // 2
+
+    def _icon_ink(self, ink):
+        """Glyph colour. An explicit icon_color wins (the green Save tick keeps
+        its colour when the button is resting); otherwise it follows the text."""
+        if self._icon_fg:
+            return self._icon_fg
+        return ink
+
+    def _draw(self, w=None, h=None):
+        if w is None:
+            live = self.winfo_width()
+            w = live if (self._stretch and live > 4) else int(self["width"])
+        h = int(self["height"]) if h is None else h
+        self.delete("all")
+        self._photo = None
+        ink = (self._accent or self._fg) if self._state != "rest" else self._subfg
+        try:
+            self._photo = ui_render.glass_button(
+                self, w, h, self._state, self._radius,
+                card=self._card, border=C["border"], accent=self._accent,
+                sheen=self._sheen, bg=self.cget("bg"),
+                glyph=self._icon, glyph_size=self._icon_size,
+                glyph_color=self._icon_ink(ink),
+                glyph_x=max(0, (w - self._content_w()) // 2))
+        except Exception:
+            self._photo = None
+        if self._photo is not None:
+            self.create_image(0, 0, image=self._photo, anchor="nw")
+        else:
+            _rr(self, 1, 1, w - 1, h - 1, self._radius,
+                fill=self._accent or C["surface_hover"], outline="")
+        ink = (self._accent or self._fg) if self._state != "rest" else self._subfg
+        cx, cy = self._face_centre(w, h)
+        if self._icon:
+            # The glyph is baked into the surface above, so its x has to be the
+            # same one the render was asked for — compute the group once.
+            gap = self._ICON_GAP
+            left = cx - self._content_w() // 2
+            self.create_text(left + self._icon_size + gap, cy,
+                             text=self._text, fill=ink, font=self._font,
+                             anchor="w")
+        else:
+            self.create_text(cx, cy, text=self._text, fill=ink,
+                             font=self._font)
+
+    def stretch(self):
+        """Fill the width the parent gives us instead of hugging the text.
+
+        pack(fill="x") already overrides the REQUESTED width, so the surface
+        has to be re-rendered at the width Tk actually settled on — otherwise
+        the image stays text-width and the button paints short of its own
+        right edge."""
+        self._stretch = True
+
+        def _on_cfg(e):
+            if e.width > 4 and e.width != getattr(self, "_drawn_w", 0):
+                self._drawn_w = e.width
+                self._draw(e.width, int(self["height"]))
+
+        self.bind("<Configure>", _on_cfg, add="+")
+        return self
+
+    # -- states --------------------------------------------------------------
+
+    def _on_enter(self, _e=None):
+        # No command == not clickable (a disarmed Save), so no hover: a lift
+        # on a dead button reads as an invitation the click won't honour.
+        if self._command is None:
+            return
+        self._state = "hover"
+        self._start_sweep()
+
+    def _on_leave(self, _e=None):
+        self._state = "rest"
+        self._stop_sweep()
+        self._sheen = -1.0
+        self._draw()
+
+    def _on_press(self, _e=None):
+        if self._command is None:
+            return
+        self._state = "press"
+        self._stop_sweep()
+        self._sheen = -1.0
+        self._draw()
+
+    def _on_release(self, _e=None):
+        # Fire on release, not press, so dragging off the button cancels it --
+        # and so the pressed frame is actually seen.
+        inside = False
+        try:
+            x = self.winfo_pointerx() - self.winfo_rootx()
+            y = self.winfo_pointery() - self.winfo_rooty()
+            inside = (0 <= x <= self.winfo_width()
+                      and 0 <= y <= self.winfo_height())
+        except tk.TclError:
+            pass
+        self._state = "hover" if inside else "rest"
+        self._draw()
+        if inside and self._command is not None:
+            self._command()
+
+    # -- sheen sweep ---------------------------------------------------------
+
+    def _start_sweep(self):
+        self._stop_sweep()
+        self._sheen = 0.0
+        self._step_sweep(0)
+
+    def _step_sweep(self, i):
+        self._sweep_job = None
+        if self._state != "hover":
+            return
+        self._sheen = i / float(self._SHEEN_FRAMES - 1)
+        self._draw()
+        if i + 1 < self._SHEEN_FRAMES:
+            try:
+                self._sweep_job = self.after(
+                    self._SHEEN_MS, lambda n=i + 1: self._step_sweep(n))
+            except tk.TclError:
+                pass
+        else:
+            # Park with no band so the settled hover surface stays clean.
+            self._sheen = -1.0
+            self._draw()
+
+    def _stop_sweep(self):
+        if self._sweep_job is not None:
+            try:
+                self.after_cancel(self._sweep_job)
+            except (tk.TclError, ValueError):
+                pass
+            self._sweep_job = None
+
+    # -- RoundedButton-compatible options ------------------------------------
+
+    def configure(self, cnf=None, **kw):
+        resize = redraw = False
+        if "text" in kw:
+            self._text = kw.pop("text"); resize = True
+        if "command" in kw:
+            self._command = kw.pop("command")
+        for k in ("bg", "background"):
+            if k in kw:
+                v = kw.pop(k)
+                # The surface tones mean "unselected"; anything else is the
+                # accent this button tints toward when selected.
+                self._accent = "" if v in (C["surface"], C["surface_hover"],
+                                           C["border"], C["bg"]) else v
+                redraw = True
+        for k in ("fg", "foreground"):
+            if k in kw:
+                self._fg = kw.pop(k); redraw = True
+        if "icon" in kw:
+            self._icon = kw.pop("icon"); resize = True
+        if "icon_color" in kw:
+            self._icon_fg = kw.pop("icon_color"); redraw = True
+        if cnf or kw:
+            super().configure(cnf, **kw)
+        if resize:
+            self._resize_and_draw()
+        elif redraw:
+            self._draw()
+    config = configure
+
+
 class AppWindow:
     _STATUS = {
         "idle":       ("● Ready",         C["success"]),
@@ -1340,20 +1938,38 @@ class AppWindow:
 
         self._dash_tabs = {}
         self._tab_indicators = {}
+        # Two glyph renders per tab (muted / accent) so switching a tab is an
+        # image swap, not a re-render: ui_render bakes the colour into the
+        # glyph, and one PhotoImage per state costs nothing to keep.
+        self._tab_icons = {}
 
-        for name, label in [("home", "Home"), ("hotkey", "Hotkey"), ("history", "History")]:
+        for name, label, glyph in [("home", "Home", "home"),
+                                   ("hotkey", "Hotkey", "keyboard"),
+                                   ("history", "History", "history")]:
             col = tk.Frame(tab_bar, bg=C["bg"])
             col.pack(side="left", expand=True, fill="x")
+
+            icons = {}
+            for key, colour in (("off", C["subtext"]), ("hover", C["text"]),
+                                ("on", C["accent"])):
+                try:
+                    icons[key] = ui_render.icon_glyph(col, glyph, 16, colour,
+                                                      bg=C["bg"])
+                except Exception:
+                    icons[key] = None
+            self._tab_icons[name] = icons
 
             btn = tk.Label(
                 col, text=label,
                 fg=C["subtext"], bg=C["bg"],
                 font=("Segoe UI", 10), pady=8, cursor="hand2",
             )
+            if icons.get("off") is not None:
+                btn.configure(image=icons["off"], compound="left", padx=6)
             btn.pack(fill="x")
             btn.bind("<Button-1>", lambda _e, n=name: self._switch_dash_tab(n))
-            btn.bind("<Enter>",    lambda _e, b=btn: b.configure(fg=C["text"]) if b.cget("fg") != C["accent"] else None)
-            btn.bind("<Leave>",    lambda _e, b=btn, n=name: b.configure(fg=C["accent"] if self._dash_tabs.get(n) and b.cget("fg") == C["text"] else b.cget("fg")))
+            btn.bind("<Enter>",    lambda _e, n=name: self._tab_hover(n, True))
+            btn.bind("<Leave>",    lambda _e, n=name: self._tab_hover(n, False))
 
             ind = tk.Frame(col, bg=C["bg"], height=2)
             ind.pack(fill="x")
@@ -1421,6 +2037,27 @@ class AppWindow:
 
         self._switch_dash_tab("home")
 
+    def _paint_tab(self, name: str, key: str) -> None:
+        """Set one tab's ink and glyph together. They are one state, and the
+        old code tracked it by READING the label's fg back — which broke the
+        moment a third colour (hover) existed."""
+        btn = self._dash_tabs.get(name)
+        if btn is None:
+            return
+        colour = {"on": C["accent"], "hover": C["text"]}.get(key, C["subtext"])
+        try:
+            btn.configure(fg=colour)
+            ph = self._tab_icons.get(name, {}).get(key)
+            if ph is not None:
+                btn.configure(image=ph)
+        except tk.TclError:
+            pass
+
+    def _tab_hover(self, name: str, entering: bool) -> None:
+        if getattr(self, "_current_tab", None) == name:
+            return          # the active tab already reads as active
+        self._paint_tab(name, "hover" if entering else "off")
+
     def _switch_dash_tab(self, name: str) -> None:
         previous = getattr(self, "_current_tab", None)
         self._current_tab = name
@@ -1485,7 +2122,7 @@ class AppWindow:
         for n in tab_frames:
             if n in self._dash_tabs:
                 active = (n == name)
-                self._dash_tabs[n].configure(fg=C["accent"] if active else C["subtext"])
+                self._paint_tab(n, "on" if active else "off")
                 self._tab_indicators[n].configure(bg=C["accent"] if active else C["bg"])
 
         # Gear icon highlight
@@ -3036,6 +3673,39 @@ class AppWindow:
 
     # ── Hotkey tab ────────────────────────────────────────────────────────────
 
+    _HELP_HANDS_FREE = (
+        "Tap the keys once and Whisper starts listening. Tap them again "
+        "and it stops, then types what you said into whatever you were "
+        "already working in — no need to hold anything down.\n\n"
+        "Press Change Hotkey to set your own. Any single key (F9, for "
+        "instance) or any combination of two works."
+    )
+    _HELP_PTT = (
+        "Hold the keys down while you talk and let go when you are done — "
+        "the way a walkie-talkie works. Whisper types what you said the "
+        "moment you release. Best when you want short bursts and nothing "
+        "left listening by accident.\n\n"
+        "Press Change Hotkey to set your own. Any single key (F9, for "
+        "instance) or any combination of two works."
+    )
+    _HELP_REFINE = (
+        "Highlight some text anywhere — an email, a document, a chat box — "
+        "then press these keys. Whisper reads what you selected and offers "
+        "a tidier version you can drop straight back in its place.\n\n"
+        "Press Change Hotkey to set your own. Any single key (F9, for "
+        "instance) or any combination of two works."
+    )
+
+    def _micro_label(self, parent, text: str, help_text: str) -> tk.Frame:
+        """A small-caps section label with a "?" beside it. The row is its own
+        frame so the dot sits ON the baseline rather than stretching the
+        label, which is what a plain side-by-side pack does to a filled one."""
+        row = tk.Frame(parent, bg=C["surface"])
+        tk.Label(row, text=" ".join(text), fg=C["subtext"], bg=C["surface"],
+                 font=("Segoe UI", 7, "bold"), anchor="w").pack(side="left")
+        HelpDot(row, help_text, bg=C["surface"]).pack(side="left", padx=(5, 0))
+        return row
+
     def _build_hotkey_tab(self, parent: tk.Frame) -> None:
         # Scrollable container — ScrollPane, not a Canvas: cards are child
         # HWNDs and canvas blit-scroll is what minted the ghost duplicates.
@@ -3048,25 +3718,52 @@ class AppWindow:
         _hk_cv.pack(side="left", fill="both", expand=True)
         parent = _hk_cv.content
 
-        def _card_title(card, icon: str, title: str) -> None:
+        def _card_title(card, icon: str, title: str, subtitle: str = "",
+                        help_text: str = "") -> None:
+            # Glyph in a tinted rounded-square badge, title and one-line
+            # subtitle stacked beside it. The badge is 34px and the two text
+            # lines together are ~31px, so the header costs 8px more than the
+            # bare glyph did -- paid for below by dropping the refine card's
+            # divider and tightening the card padding, because this tab has
+            # to keep fitting on one page without scrolling.
             row = tk.Frame(card, bg=C["surface"])
             row.pack(fill="x")
             ph = None
             try:
-                import ui_render
-                ph = ui_render.icon_glyph(row, icon, 26, C["accent"],
-                                          bg=C["surface"])
+                ph = ui_render.icon_badge(
+                    row, icon, glyph=20, box=34, color=C["accent"],
+                    badge=ui_render.mix(C["surface"], C["accent"], 0.10),
+                    ring=0.62, bg=C["surface"])
             except Exception:
                 ph = None
             if ph is not None:
-                tk.Label(row, image=ph, bg=C["surface"]).pack(
-                    side="left", padx=(0, 8))
-            tk.Label(row, text=title, fg=C["text"], bg=C["surface"],
+                lbl = tk.Label(row, image=ph, bg=C["surface"])
+                lbl.image = ph          # the cache owns it, but be explicit
+                lbl.pack(side="left", padx=(0, 10))
+            stack = tk.Frame(row, bg=C["surface"])
+            stack.pack(side="left", fill="x", expand=True)
+            title_row = tk.Frame(stack, bg=C["surface"])
+            title_row.pack(fill="x")
+            tk.Label(title_row, text=title, fg=C["text"], bg=C["surface"],
                      font=("Segoe UI", 10, "bold"), anchor="w").pack(side="left")
+            if help_text:
+                HelpDot(title_row, help_text, bg=C["surface"]).pack(
+                    side="left", padx=(6, 0))
+            if subtitle:
+                sub = tk.Label(stack, text=subtitle, fg=C["subtext"],
+                               bg=C["surface"], font=("Segoe UI", 8),
+                               anchor="w", justify="left")
+                sub.pack(fill="x", pady=(1, 0))
+                self._autowrap(sub)
+            # Hairline under the header, so the badge + strapline read as a
+            # header rather than as the first item in the list below it.
+            tk.Frame(card, bg=C["border"], height=1).pack(fill="x",
+                                                          pady=(7, 0))
 
         # ── Dictation hotkeys ────────────────────────────────────────────────
-        card1 = self._card(parent, margin=(0, 8))
-        _card_title(card1, "mic", "Dictation")
+        card1 = self._card(parent, inner_pad=(18, 8), margin=(0, 4))
+        _card_title(card1, "mic", "Dictation",
+                    "Control your dictation with ease.")
 
         # Mode state must exist before the description below — its wording
         # depends on hold vs toggle (legacy hold configs keep hold semantics
@@ -3077,28 +3774,24 @@ class AppWindow:
 
         # Hands-free and push-to-talk sit side by side so the refine card
         # below stays on screen without scrolling. Buttons stack vertically
-        # inside each column because two columns at MIN_W leave ~150px each.
+        # inside each column because two columns at MIN_W leave ~155px each.
         cols = tk.Frame(card1, bg=C["surface"])
-        cols.pack(fill="x", pady=(10, 0))
+        cols.pack(fill="x", pady=(4, 0))
         cols.columnconfigure(0, weight=1, uniform="hk")
         cols.columnconfigure(2, weight=1, uniform="hk")
 
         col_hf = tk.Frame(cols, bg=C["surface"])
-        col_hf.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        col_hf.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         tk.Frame(cols, bg=C["border"], width=1).grid(row=0, column=1, sticky="ns")
         col_ptt = tk.Frame(cols, bg=C["surface"])
-        col_ptt.grid(row=0, column=2, sticky="nsew", padx=(10, 0))
+        col_ptt.grid(row=0, column=2, sticky="nsew", padx=(6, 0))
 
-        tk.Label(col_hf, text=" ".join("HANDS-FREE"),
-                 fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 7, "bold"), anchor="w").pack(fill="x")
+        self._micro_label(col_hf, "HANDS-FREE",
+                          self._HELP_HANDS_FREE).pack(fill="x")
 
-        self._hotkey_display_lbl = tk.Label(
-            col_hf, text=self._hotkey or "ALT+V",
-            fg=C["accent"], bg=C["surface"],
-            font=("Segoe UI", 18, "bold"), anchor="w",
-        )
-        self._hotkey_display_lbl.pack(fill="x", pady=(0, 2))
+        self._hotkey_display_lbl = KeyCapRow(
+            col_hf, text=self._hotkey or "ALT+V", bg=C["surface"])
+        self._hotkey_display_lbl.pack(fill="x", pady=(0, 0))
 
         self._hotkey_record_msg = tk.Label(
             col_hf,
@@ -3106,31 +3799,30 @@ class AppWindow:
             fg=C["subtext"], bg=C["surface"],
             font=("Segoe UI", 9), justify="left", anchor="w", wraplength=150,
         )
-        self._hotkey_record_msg.pack(fill="x", pady=(0, 6))
+        self._hotkey_record_msg.pack(fill="x", pady=(0, 3))
         self._autowrap(self._hotkey_record_msg)
 
-        self._record_btn = self._surface_btn(
-            col_hf, "Change Shortcut", self._toggle_hotkey_recording)
-        self._record_btn.pack(anchor="w")
+        # Full width, stacked. "Change Hotkey" spelt out does not fit beside
+        # a Save button in a ~155px column at any font this UI uses, and the
+        # label is worth more than the row.
+        self._record_btn = self._hotkey_btn(
+            col_hf, "Change Hotkey", self._toggle_hotkey_recording,
+            icon="pen", icon_color=C["accent"])
+        self._record_btn.pack(fill="x")
 
-        self._save_btn = RoundedButton(
-            col_hf, text="Save",
-            fg=C["subtext"], fill=C["border"],
-            font=("Segoe UI", 10, "bold"), padx=16, pady=8,
-        )
-        self._save_btn.pack(anchor="w", pady=(6, 0))
+        # No command until a new combo is captured -- a GlassButton with no
+        # command is inert and doesn't offer a hover, which is the whole
+        # disarmed state.
+        self._save_btn = self._save_btn_new(col_hf)
+        self._save_btn.pack(fill="x", pady=(1, 0))
 
-        tk.Label(col_ptt, text=" ".join("PUSH-TO-TALK"),
-                 fg=C["subtext"], bg=C["surface"],
-                 font=("Segoe UI", 7, "bold"), anchor="w").pack(fill="x")
+        self._micro_label(col_ptt, "PUSH-TO-TALK",
+                          self._HELP_PTT).pack(fill="x")
 
-        self._ptt_display_lbl = tk.Label(
-            col_ptt, text=self._ptt_hotkey or "Not set",
-            fg=C["accent"] if self._ptt_hotkey else C["subtext"],
-            bg=C["surface"],
-            font=("Segoe UI", 18, "bold"), anchor="w",
-        )
-        self._ptt_display_lbl.pack(fill="x", pady=(0, 2))
+        self._ptt_display_lbl = KeyCapRow(
+            col_ptt, text=self._ptt_hotkey or "Not set", bg=C["surface"],
+            accent=C["accent"] if self._ptt_hotkey else C["subtext"])
+        self._ptt_display_lbl.pack(fill="x", pady=(0, 0))
 
         self._ptt_record_msg = tk.Label(
             col_ptt,
@@ -3138,33 +3830,30 @@ class AppWindow:
             fg=C["subtext"], bg=C["surface"],
             font=("Segoe UI", 9), justify="left", anchor="w", wraplength=150,
         )
-        self._ptt_record_msg.pack(fill="x", pady=(0, 6))
+        self._ptt_record_msg.pack(fill="x", pady=(0, 3))
         self._autowrap(self._ptt_record_msg)
 
-        self._ptt_record_btn = self._surface_btn(
-            col_ptt, "Change Shortcut" if self._ptt_hotkey else "Set Shortcut",
-            self._toggle_ptt_recording)
-        self._ptt_record_btn.pack(anchor="w")
+        self._ptt_record_btn = self._hotkey_btn(
+            col_ptt, "Change Hotkey" if self._ptt_hotkey else "Set Hotkey",
+            self._toggle_ptt_recording, icon="pen", icon_color=C["accent"])
+        self._ptt_record_btn.pack(fill="x")
 
-        self._ptt_save_btn = RoundedButton(
-            col_ptt, text="Save",
-            fg=C["subtext"], fill=C["border"],
-            font=("Segoe UI", 10, "bold"), padx=16, pady=8,
-        )
-        self._ptt_save_btn.pack(anchor="w", pady=(6, 0))
+        self._ptt_save_btn = self._save_btn_new(col_ptt)
+        self._ptt_save_btn.pack(fill="x", pady=(1, 0))
 
         # ── Refine selection hotkey ───────────────────────────────────────────────
-        card2 = self._card(parent, margin=(0, 8))
-        _card_title(card2, "wand", "Refine selection")
+        card2 = self._card(parent, inner_pad=(18, 8), margin=(0, 4))
+        _card_title(card2, "wand", "Refine selection",
+                    "Improve any selected text instantly.",
+                    help_text=self._HELP_REFINE)
 
-        self._refine_hotkey_display_lbl = tk.Label(
-            card2, text=self._refine_hotkey or "ALT+R",
-            fg=C["accent"], bg=C["surface"],
-            font=("Segoe UI", 18, "bold"), anchor="w",
-        )
-        self._refine_hotkey_display_lbl.pack(fill="x", pady=(2, 8))
+        self._refine_hotkey_display_lbl = KeyCapRow(
+            card2, text=self._refine_hotkey or "ALT+R", bg=C["surface"])
+        self._refine_hotkey_display_lbl.pack(fill="x", pady=(2, 1))
 
-        tk.Frame(card2, bg=C["border"], height=1).pack(fill="x", pady=(0, 10))
+        # The divider that used to sit here is gone: the header subtitle now
+        # separates the two halves, and its 11px is part of what pays for the
+        # taller header (this tab must not start scrolling).
 
         self._refine_record_msg = tk.Label(
             card2,
@@ -3172,35 +3861,43 @@ class AppWindow:
             fg=C["subtext"], bg=C["surface"],
             font=("Segoe UI", 9), justify="left", anchor="w", wraplength=340,
         )
-        self._refine_record_msg.pack(fill="x", pady=(0, 8))
+        self._refine_record_msg.pack(fill="x", pady=(0, 3))
         self._autowrap(self._refine_record_msg)
 
+        # The refine card is full width, so its pair sits side by side --
+        # two stacked full-width buttons across a 344px card would read as a
+        # form, not as a control.
         btn_row2 = tk.Frame(card2, bg=C["surface"])
         btn_row2.pack(fill="x")
+        btn_row2.columnconfigure(0, weight=1, uniform="rb")
+        btn_row2.columnconfigure(1, weight=1, uniform="rb")
 
-        self._refine_record_btn = self._surface_btn(
-            btn_row2, "Change Shortcut", self._toggle_refine_hotkey_recording)
-        self._refine_record_btn.pack(side="left", padx=(0, 8))
+        self._refine_record_btn = self._hotkey_btn(
+            btn_row2, "Change Hotkey", self._toggle_refine_hotkey_recording,
+            icon="pen", icon_color=C["accent"])
+        self._refine_record_btn.grid(row=0, column=0, sticky="ew",
+                                     padx=(0, 3))
 
-        self._refine_save_btn = RoundedButton(
-            btn_row2, text="Save",
-            fg=C["subtext"], fill=C["border"],
-            font=("Segoe UI", 10, "bold"), padx=16, pady=8,
-        )
-        self._refine_save_btn.pack(side="left")
+        self._refine_save_btn = self._save_btn_new(btn_row2)
+        self._refine_save_btn.grid(row=0, column=1, sticky="ew", padx=(3, 0))
 
     # Help text is one short line of plain words. It is the first thing a new
     # user reads, so it says what the key does and stops there.
 
+    @staticmethod
+    def _spaced(combo: str) -> str:
+        """ALT+V -> "ALT + V", so the sentence reads like the caps above it."""
+        return " + ".join(p.strip() for p in (combo or "").split("+") if p.strip())
+
     def _hotkey_help_text(self) -> str:
-        hk = (self._hotkey or "ALT+V").upper()
+        hk = self._spaced((self._hotkey or "ALT+V").upper())
         if getattr(self, "_mode_toggle_on", True):
             return f"Tap {hk} to start, tap again to stop."
         return f"Hold {hk} to talk, let go to type."
 
     def _ptt_help_text(self) -> str:
         if self._ptt_hotkey:
-            return f"Hold {self._ptt_hotkey} to talk, let go to type."
+            return f"Hold {self._spaced(self._ptt_hotkey)} to talk, let go to type."
         return "Set a key to hold while talking."
 
     def _update_home_ptt_row(self) -> None:
@@ -3235,7 +3932,8 @@ class AppWindow:
         self._recording_hotkey = True
         self._pending_hotkey = None
         self._suspend_global_hotkeys()
-        self._record_btn.configure(text="Cancel", bg=C["error"], fg=C["text"])
+        self._record_btn.configure(text="Cancel", bg=C["error"], fg=C["text"],
+                                   icon="", icon_color=None)
         self._hotkey_record_msg.configure(
             text="Press your new key or combination… (Escape to cancel)",
             fg=C["accent"],
@@ -3434,32 +4132,30 @@ class AppWindow:
         self._root.unbind("<KeyPress>")
         self._root.unbind("<KeyRelease>")
         self._resume_global_hotkeys()
-        self._record_btn.configure(text="Change Shortcut",
-                                   bg=C["surface"], fg=C["text"], cursor="hand2")
+        self._record_btn.configure(text="Change Hotkey", bg=C["surface"],
+                                   fg=C["text"], cursor="hand2",
+                                   icon="pen", icon_color=C["accent"])
 
         conflict = self._combo_conflict(self._pending_hotkey or "", "main")
         if conflict and not cancelled:
             self._pending_hotkey = None
             self._hotkey_display_lbl.configure(text=self._hotkey or "—")
             self._hotkey_record_msg.configure(text=conflict, fg=C["error"])
-            self._save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
+            self._disarm_save(self._save_btn)
             return
 
         if cancelled or not self._pending_hotkey:
             self._hotkey_display_lbl.configure(text=self._hotkey or "—")
             self._hotkey_record_msg.configure(
                 text=self._hotkey_help_text(), fg=C["subtext"])
-            self._save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
+            self._disarm_save(self._save_btn)
         else:
             self._hotkey_display_lbl.configure(text=self._pending_hotkey.upper())
             self._hotkey_record_msg.configure(
                 text=f"New shortcut: {self._pending_hotkey.upper()} — Click Save to apply.",
                 fg=C["success"],
             )
-            self._save_btn.configure(bg=C["accent"], cursor="hand2", fg=C["text"])
-            self._save_btn.bind("<Button-1>", lambda _e: self._save_hotkey())
-            self._save_btn.bind("<Enter>",    lambda _e: self._save_btn.configure(bg=C["accent_hover"]))
-            self._save_btn.bind("<Leave>",    lambda _e: self._save_btn.configure(bg=C["accent"]))
+            self._arm_save(self._save_btn, self._save_hotkey)
 
     def _save_hotkey(self) -> None:
         if not self._pending_hotkey:
@@ -3470,8 +4166,7 @@ class AppWindow:
         if hasattr(self, "_home_hotkey_lbl"):
             self._home_hotkey_lbl.configure(text=self._hotkey or "—")
         self._pending_hotkey = None
-        self._save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
-        self._save_btn.unbind("<Button-1>")
+        self._disarm_save(self._save_btn)
         self._hotkey_record_msg.configure(
             text=f"Shortcut updated to {self._hotkey}.",
             fg=C["success"],
@@ -3535,7 +4230,9 @@ class AppWindow:
         self._recording_ptt_hotkey = True
         self._pending_ptt_hotkey = None
         self._suspend_global_hotkeys()
-        self._ptt_record_btn.configure(text="Cancel", bg=C["error"], fg=C["text"])
+        self._ptt_record_btn.configure(text="Cancel", bg=C["error"],
+                                       fg=C["text"], icon="",
+                                       icon_color=None)
         self._ptt_record_msg.configure(
             text="Press your new key or combination… (Escape to cancel)",
             fg=C["accent"],
@@ -3567,8 +4264,9 @@ class AppWindow:
         self._root.unbind("<KeyRelease>")
         self._resume_global_hotkeys()
         self._ptt_record_btn.configure(
-            text="Change Shortcut" if self._ptt_hotkey else "Set Shortcut",
-            bg=C["surface"], fg=C["text"], cursor="hand2")
+            text="Change Hotkey" if self._ptt_hotkey else "Set Hotkey",
+            bg=C["surface"], fg=C["text"], cursor="hand2",
+            icon="pen", icon_color=C["accent"])
 
         conflict = self._combo_conflict(self._pending_ptt_hotkey or "", "ptt")
         if conflict and not cancelled:
@@ -3577,7 +4275,7 @@ class AppWindow:
                 text=self._ptt_hotkey or "Not set",
                 fg=C["accent"] if self._ptt_hotkey else C["subtext"])
             self._ptt_record_msg.configure(text=conflict, fg=C["error"])
-            self._ptt_save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
+            self._disarm_save(self._ptt_save_btn)
             return
 
         if cancelled or not self._pending_ptt_hotkey:
@@ -3586,7 +4284,7 @@ class AppWindow:
                 fg=C["accent"] if self._ptt_hotkey else C["subtext"])
             self._ptt_record_msg.configure(
                 text=self._ptt_help_text(), fg=C["subtext"])
-            self._ptt_save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
+            self._disarm_save(self._ptt_save_btn)
         else:
             self._ptt_display_lbl.configure(
                 text=self._pending_ptt_hotkey.upper(), fg=C["accent"])
@@ -3594,10 +4292,7 @@ class AppWindow:
                 text=f"New shortcut: {self._pending_ptt_hotkey.upper()} — Click Save to apply.",
                 fg=C["success"],
             )
-            self._ptt_save_btn.configure(bg=C["accent"], cursor="hand2", fg=C["text"])
-            self._ptt_save_btn.bind("<Button-1>", lambda _e: self._save_ptt_hotkey())
-            self._ptt_save_btn.bind("<Enter>",    lambda _e: self._ptt_save_btn.configure(bg=C["accent_hover"]))
-            self._ptt_save_btn.bind("<Leave>",    lambda _e: self._ptt_save_btn.configure(bg=C["accent"]))
+            self._arm_save(self._ptt_save_btn, self._save_ptt_hotkey)
 
     def _save_ptt_hotkey(self) -> None:
         if not self._pending_ptt_hotkey:
@@ -3606,9 +4301,8 @@ class AppWindow:
         self._ptt_hotkey = new_hotkey.upper()
         self._pending_ptt_hotkey = None
         self._ptt_display_lbl.configure(text=self._ptt_hotkey, fg=C["accent"])
-        self._ptt_record_btn.configure(text="Change Shortcut")
-        self._ptt_save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
-        self._ptt_save_btn.unbind("<Button-1>")
+        self._ptt_record_btn.configure(text="Change Hotkey")
+        self._disarm_save(self._ptt_save_btn)
         self._ptt_record_msg.configure(
             text=f"Shortcut updated to {self._ptt_hotkey}.", fg=C["success"])
 
@@ -3653,7 +4347,9 @@ class AppWindow:
         self._recording_refine_hotkey = True
         self._pending_refine_hotkey = None
         self._suspend_global_hotkeys()
-        self._refine_record_btn.configure(text="Cancel", bg=C["error"], fg=C["text"])
+        self._refine_record_btn.configure(text="Cancel", bg=C["error"],
+                                          fg=C["text"], icon="",
+                                          icon_color=None)
         self._refine_record_msg.configure(
             text="Press your new key or combination… (Escape to cancel)",
             fg=C["accent"],
@@ -3685,15 +4381,15 @@ class AppWindow:
         self._root.unbind("<KeyRelease>")
         self._resume_global_hotkeys()
         self._refine_record_btn.configure(
-            text="Change Shortcut", bg=C["surface"], fg=C["text"], cursor="hand2")
+            text="Change Hotkey", bg=C["surface"], fg=C["text"],
+            cursor="hand2", icon="pen", icon_color=C["accent"])
 
         conflict = self._combo_conflict(self._pending_refine_hotkey or "", "refine")
         if conflict and not cancelled:
             self._pending_refine_hotkey = None
             self._refine_hotkey_display_lbl.configure(text=self._refine_hotkey or "—")
             self._refine_record_msg.configure(text=conflict, fg=C["error"])
-            self._refine_save_btn.configure(
-                bg=C["border"], cursor="", fg=C["subtext"])
+            self._disarm_save(self._refine_save_btn)
             return
 
         if cancelled or not self._pending_refine_hotkey:
@@ -3702,17 +4398,14 @@ class AppWindow:
                 text="Select text, then press it. AI improves the wording.",
                 fg=C["subtext"],
             )
-            self._refine_save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
+            self._disarm_save(self._refine_save_btn)
         else:
             self._refine_hotkey_display_lbl.configure(text=self._pending_refine_hotkey.upper())
             self._refine_record_msg.configure(
                 text=f"New shortcut: {self._pending_refine_hotkey.upper()} — Click Save to apply.",
                 fg=C["success"],
             )
-            self._refine_save_btn.configure(bg=C["accent"], cursor="hand2", fg=C["text"])
-            self._refine_save_btn.bind("<Button-1>", lambda _e: self._save_refine_hotkey())
-            self._refine_save_btn.bind("<Enter>",    lambda _e: self._refine_save_btn.configure(bg=C["accent_hover"]))
-            self._refine_save_btn.bind("<Leave>",    lambda _e: self._refine_save_btn.configure(bg=C["accent"]))
+            self._arm_save(self._refine_save_btn, self._save_refine_hotkey)
 
     def _save_refine_hotkey(self) -> None:
         if not self._pending_refine_hotkey:
@@ -3722,8 +4415,7 @@ class AppWindow:
         self._refine_hotkey_display_lbl.configure(text=self._refine_hotkey or "—")
         self._home_refine_hotkey_lbl.configure(text=self._refine_hotkey or "—")
         self._pending_refine_hotkey = None
-        self._refine_save_btn.configure(bg=C["border"], cursor="", fg=C["subtext"])
-        self._refine_save_btn.unbind("<Button-1>")
+        self._disarm_save(self._refine_save_btn)
         self._refine_record_msg.configure(
             text=f"Shortcut updated to {self._refine_hotkey}.",
             fg=C["success"],
@@ -7045,6 +7737,56 @@ class AppWindow:
         btn.bind("<Enter>", lambda _e: btn.configure(bg=C["accent"], fg=C["text"]))
         btn.bind("<Leave>", lambda _e: btn.configure(bg=C["surface_hover"], fg=C["text"]))
         return btn
+
+    def _hotkey_btn(self, parent, text, cmd=None, icon="",
+                    icon_color=None, **kw) -> GlassButton:
+        """A full-width shortcut button. The pair stacks rather than sharing a
+        row: the label has to say "Change Hotkey" in full, and two labelled
+        buttons side by side do not fit a hotkey column at this window width.
+        """
+        btn = self._glass_btn(parent, text, cmd, icon=icon,
+                              icon_color=icon_color, **kw)
+        btn.stretch()
+        return btn
+
+    def _glass_btn(self, parent, text, cmd=None, icon="",
+                   icon_color=None, **kw) -> GlassButton:
+        """The CRM's glass button. Hover, lift, sheen and press all live in
+        the widget, so call sites never bind <Enter>/<Leave> on one -- a
+        widget-level bind REPLACES the widget's own handler and would kill
+        the hover."""
+        kw.setdefault("fg", C["text"])
+        kw.setdefault("subfg", _GLASS_MUTED)
+        kw.setdefault("font", ("Segoe UI", 9))
+        kw.setdefault("padx", 5)
+        kw.setdefault("pady", 5)
+        return GlassButton(parent, text=text, command=cmd, icon=icon,
+                           icon_size=13, icon_color=icon_color, **kw)
+
+    # The Save button has two faces. Disarmed it is a statement of fact --
+    # a grey tick reading "Saved" -- because there is nothing to save; armed
+    # it is a green "Save" you can press. Same widget, so the row never
+    # reflows between them.
+    SAVE_IDLE  = ("Saved", "check")
+    SAVE_ARMED = ("Save", "save")
+
+    def _save_btn_new(self, parent) -> GlassButton:
+        btn = self._glass_btn(parent, self.SAVE_IDLE[0], icon=self.SAVE_IDLE[1],
+                              icon_color=_GLASS_MUTED,
+                              fg=C["success"], subfg=_GLASS_MUTED,
+                              font=("Segoe UI", 9, "bold"))
+        btn.stretch()
+        return btn
+
+    def _arm_save(self, btn, cmd) -> None:
+        btn.configure(text=self.SAVE_ARMED[0], icon=self.SAVE_ARMED[1],
+                      icon_color=C["success"], bg=C["success"],
+                      fg=C["success"], cursor="hand2", command=cmd)
+
+    def _disarm_save(self, btn) -> None:
+        btn.configure(text=self.SAVE_IDLE[0], icon=self.SAVE_IDLE[1],
+                      icon_color=_GLASS_MUTED, bg=C["border"],
+                      fg=C["success"], cursor="", command=None)
 
     @staticmethod
     def _autowrap(lbl: tk.Label, pad: int = 4) -> tk.Label:

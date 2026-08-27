@@ -65,7 +65,7 @@ class SourceInvariantTests(unittest.TestCase):
 
     def test_the_pages_are_not_in_the_tab_bar(self):
         src = inspect.getsource(AppWindow._build_dashboard)
-        tab_bar = src.split("for name, label in")[1].split("]")[0]
+        tab_bar = src.split("for name, label, glyph in")[1].split("]")[0]
         self.assertNotIn("vocabulary", tab_bar)
         self.assertNotIn("snippets", tab_bar)
 
@@ -105,8 +105,8 @@ def tearDownModule():
 
 
 def _shared_root():
-    """One Tk root for the module — see test_impact_panel for why a second
-    root in the same process breaks on ui_render's cached ImageTk objects."""
+    """One Tk root for the module — see test_impact_panel for why it is per
+    module rather than per session."""
     global _SHARED_ROOT
     import tkinter as tk
     if _SHARED_ROOT is not None and _SHARED_ROOT.winfo_exists():
@@ -152,9 +152,20 @@ class SharedSearchBarTests(unittest.TestCase):
             self.entry.insert("end", ch)
             self.entry.event_generate("<KeyRelease>")
 
-    def _settle(self):
-        # The callback is debounced by 90ms; drain the after queue.
-        self.root.after(140, self.root.quit)
+    def _settle(self, expect=1, timeout=3.0):
+        """Drain the after queue until the debounced callback has fired.
+
+        It used to sleep a flat 140ms for a 90ms debounce, which is a race:
+        under any real load the callback landed after the window shut and the
+        test read an empty list. Poll for the result instead, then keep
+        spinning briefly so a SECOND (unwanted) fire is still caught.
+        """
+        import time as _time
+        deadline = _time.monotonic() + timeout
+        while expect and len(self.seen) < expect and _time.monotonic() < deadline:
+            self.root.after(20, self.root.quit)
+            self.root.mainloop()
+        self.root.after(150, self.root.quit)
         self.root.mainloop()
 
     def test_history_uses_the_shared_control(self):
