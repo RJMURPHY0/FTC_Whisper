@@ -483,6 +483,24 @@ class AuthManager:
         """Last email that successfully signed in (for prefilling the form)."""
         return _read_last_email()
 
+    @property
+    def access_token(self) -> str:
+        """Current Supabase access token, for calling sibling FTC apps as this
+        user. Read live from the client rather than cached: the session
+        refreshes on its own, and a token captured once goes stale within the
+        hour. Empty string when signed out or the session cannot be read, which
+        callers must treat as "do not send", never as "send unauthenticated".
+        """
+        client = self._client
+        if not client:
+            return ""
+        try:
+            session = client.auth.get_session()
+            return (getattr(session, "access_token", "") or "") if session else ""
+        except Exception as exc:
+            print(f"[Auth] access_token unavailable (non-fatal): {exc}")
+            return ""
+
     def try_restore_session(self, wait_seconds: float = 15.0) -> bool:
         """Called at startup — returns True if a valid saved session exists."""
         return self._load_saved_session(wait_seconds)

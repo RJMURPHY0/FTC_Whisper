@@ -216,6 +216,24 @@ FUZZY_LEN_LO = 0.5          # span/term length ratio bounds
 FUZZY_LEN_HI = 1.7
 FUZZY_MAX_WINDOW = 3        # a mishearing spans at most this many words
 
+# ── Managed (CRM-derived) terms: a stricter tier ─────────────────────────────
+#
+# An entry the user typed is one they opted into: they accepted it would rewrite
+# near-misses, and they can delete it when it misbehaves. A term synced from a
+# CRM has been reviewed by nobody, and there can be hundreds of them, so it has
+# to clear a higher bar before it may change what someone said.
+#
+# The bar applies to SINGLE-WORD managed terms only, because that is where the
+# whole risk lives: real CRM data holds names like "Michaels", "Wincanton" and
+# "Storm" that sit one phonetic slip away from ordinary speech. A multi-word
+# managed term ("Bright Link Solutions") is already heavily constrained — the
+# span has to match across two or three consecutive words — so restricting the
+# window for those would only break the names that are safest to correct.
+MANAGED_MIN_TERM_LEN = 5    # single-word managed terms; shorter ones are dropped
+MANAGED_JW = 0.86           # vs FUZZY_JW 0.70 — near-identical or nothing
+MANAGED_LEN_LO = 0.7        # tighter than FUZZY_LEN_* so a short word cannot
+MANAGED_LEN_HI = 1.4        # reach a long company name
+
 # Ordinary English words. A span made entirely of these is never rewritten, even
 # on a phonetic-code collision. Not exhaustive by design — the metaphone gate is
 # the primary firewall; this is the belt-and-braces list of words a fuzzy rule is
@@ -310,6 +328,58 @@ def _phonetic_match(term_codes: tuple, cand_codes: tuple) -> bool:
     return tp == cp or tp == cs or (bool(cp) and cp == ts)
 
 
+# Legal and trading suffixes. A CRM holds the REGISTERED name ("Fosseway Freight
+# Ltd"); people say the trading name ("Fosseway Freight"). Without a stripped
+# variant the spoken form matches nothing, because the suffix changes the
+# phonetic code — and matching it to the full term would be worse, since it
+# would append a suffix to words the user never said.
+_LEGAL_SUFFIXES = (
+    "ltd", "limited", "llp", "llc", "plc", "inc", "incorporated", "corp",
+    "corporation", "co", "company", "gmbh", "bv", "nv", "sa", "ag", "pty",
+    "group", "holdings", "international",
+)
+
+
+def managed_variants(raw: str) -> list:
+    """The forms of a CRM name worth correcting towards, longest first.
+
+    Always the name as stored. Plus the name with trailing legal suffixes
+    removed, when that leaves something substantial enough to be worth matching
+    (2+ words, or one word of real length) — "Fosseway Freight Ltd" also yields
+    "Fosseway Freight", but "Ltd" alone never becomes a term.
+
+    A trailing descriptor after a colon is dropped too: real rows look like
+    "Boast International Ltd: Uk & International Freight Forwarder", and nobody
+    dictates the tagline.
+    """
+    name = " ".join((raw or "").split())
+    if not name:
+        return []
+    out = []
+    seen = set()
+
+    def _add(v: str) -> None:
+        v = " ".join(v.split()).strip(" ,;:-&")
+        low = v.lower()
+        if not v or low in seen:
+            return
+        # One word must be long enough to be distinctive; two or more words are
+        # constrained enough by the span match.
+        if " " not in v and len(v) < MANAGED_MIN_TERM_LEN:
+            return
+        seen.add(low)
+        out.append(v)
+
+    _add(name)
+    head = name.split(":", 1)[0]
+    _add(head)
+    words = head.split()
+    while len(words) > 1 and words[-1].lower().strip(".,") in _LEGAL_SUFFIXES:
+        words = words[:-1]
+        _add(" ".join(words))
+    return out
+
+
 def apply_vocabulary_fuzzy(text: str, entries) -> str:
     """Phonetic safety net: rewrite spans that SOUND like a vocabulary term but
     were not listed as an explicit mishearing. Conservative by construction (see
@@ -328,15 +398,31 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
     for e in _live(entries):
         term = (e.get("term") or "").strip()
         low = term.lower()
-        if len(term) < FUZZY_MIN_TERM_LEN or low in seen:
+        # `managed` marks a term synced from a CRM rather than typed by the
+        # user. Only a SINGLE-WORD managed term takes the strict tier — see the
+        # constants above for why multi-word ones do not need it.
+        strict = bool(e.get("managed")) and " " not in term
+        min_len = MANAGED_MIN_TERM_LEN if strict else FUZZY_MIN_TERM_LEN
+        if len(term) < min_len or low in seen:
             continue
+        # A single-word managed term that IS ordinary English is refused
+        # outright. The span check further down only asks whether the text being
+        # replaced is common, which does not help here: a real CRM holds
+        # companies called "Shell" and "Next", and "shall" is not itself a
+        # common-listed word, so without this it would clear the strict floor
+        # (jw("shall","shell") ~= 0.88) and rewrite ordinary speech. A term the
+        # user typed by hand is exempt: they chose it, so they meant it.
+        if strict and low in _COMMON_WORDS:
+            continue
+        # Callers put the user's own entries first, so a hand-typed term always
+        # claims the name before a managed one with the same spelling can.
         seen.add(low)
         try:
             codes = dm(term)
         except Exception:
             continue
         if codes and codes[0]:
-            terms.append((term, low, codes))
+            terms.append((term, low, codes, strict))
     if not terms:
         return text
 
@@ -347,7 +433,7 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
     # The costly part is Double Metaphone, so pay it once per word and prefilter
     # cheaply. Every term's primary phoneme starts with one of these characters;
     # a window whose first word does not can never match, so it skips the encode.
-    term_first = {c[0] for _t, _l, codes in terms for c in codes if c}
+    term_first = {c[0] for _t, _l, codes, _s in terms for c in codes if c}
     word_dm = []
     for t in tokens:
         try:
@@ -399,7 +485,7 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
             cand_key = cand_low.replace(" ", "")
             best = None
             best_jw = 0.0
-            for term, low, codes in terms:
+            for term, low, codes, strict in terms:
                 if cand_low == low:          # already correct — leave casing to others
                     best = None
                     break
@@ -407,10 +493,13 @@ def apply_vocabulary_fuzzy(text: str, entries) -> str:
                     continue
                 term_key = low.replace(" ", "")
                 lr = len(cand_key) / float(len(term_key) or 1)
-                if not (FUZZY_LEN_LO <= lr <= FUZZY_LEN_HI):
+                len_lo, len_hi = ((MANAGED_LEN_LO, MANAGED_LEN_HI) if strict
+                                  else (FUZZY_LEN_LO, FUZZY_LEN_HI))
+                if not (len_lo <= lr <= len_hi):
                     continue
                 jw = _jaro_winkler(cand_key, term_key)
-                if jw >= FUZZY_JW and jw > best_jw:
+                floor = MANAGED_JW if strict else FUZZY_JW
+                if jw >= floor and jw > best_jw:
                     best, best_jw = term, jw
             if best is not None:
                 start, end = span_tokens[0].start(), span_tokens[-1].end()

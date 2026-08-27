@@ -16,6 +16,18 @@ if TYPE_CHECKING:
 
 _MODEL_SAMPLE_RATE = 16000
 
+
+def _report_echo(text: str) -> None:
+    """Fleet-log a discarded prompt echo. Shares hallucination.py's sink, which
+    app.py already wires — a suppressed echo is the same class of event as a
+    suppressed repetition loop: the engine returned words nobody said. Silent
+    and non-raising: this sits on the transcription path."""
+    try:
+        hallucination.report("transcribe_prompt_echo",
+                             {"words": len(text.split()), "sample": text[:200]})
+    except Exception:
+        pass
+
 # Cached once — avoids repeated failed `import torch` on CPU-only machines
 _DEVICE_CACHE: str = ""
 
@@ -175,15 +187,26 @@ class Transcriber:
         text = "".join(s.text for s in segments)
         text = self._post_process(text)
         # Prompt-echo guard: on unclear audio whisper sometimes emits part of
-        # the initial_prompt (i.e. a PREVIOUS dictation) verbatim instead of
-        # what was said. A long exact repeat of the rolling context is echo,
-        # not coincidence — 8+ words so a genuinely re-dictated short phrase
-        # ("Kind regards, Ryan") is never suppressed.
-        if context_words and len(text.split()) >= 8:
+        # its prompt verbatim instead of what was said. A long exact repeat of
+        # the prompt is echo, not coincidence — 8+ words so a genuinely
+        # re-dictated short phrase ("Kind regards, Ryan") is never suppressed.
+        #
+        # BOTH prompt sources are checked. faster-whisper does not keep hotwords
+        # in a separate hint channel: `get_prompt` encodes them under `sot_prev`,
+        # the same token slot as the rolling context, so a hotword term can be
+        # echoed exactly like a previous dictation can. Checking only
+        # context_words left that half unguarded, which is how CRM company names
+        # reached transcripts as fluent sentences about businesses the user had
+        # never mentioned. Managed terms no longer reach this prompt at all (see
+        # app._get_prompt_hotwords) — this is the belt to that braces, and it
+        # also covers the user's own vocabulary, which legitimately stays.
+        prompt_sources = " ".join(p for p in (context_words, hotwords_str) if p)
+        if prompt_sources and len(text.split()) >= 8:
             norm = lambda s: re.sub(
                 r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", s.lower())).strip()
-            if norm(text) and norm(text) in norm(context_words):
+            if norm(text) and norm(text) in norm(prompt_sources):
                 print(f"[Transcriber] Discarding prompt echo: '{text}'")
+                _report_echo(text)
                 return ""
         print(f"[Transcriber] '{text}'")
         return text

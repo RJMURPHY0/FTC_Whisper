@@ -44,9 +44,10 @@ from ai_refiner import AIRefiner
 from supabase_client import SupabaseLogger
 from stats import StatsStore
 from auth import AuthManager
+from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.6.71"
+APP_VERSION = "1.6.72"
 
 
 class _RECT(ctypes.Structure):
@@ -178,6 +179,14 @@ class WhisperFlowApp:
         self.db = SupabaseLogger(url=config.supabase_url, key=config.supabase_key)
         self.stats = StatsStore(db=self.db)
 
+        # Opt-in voice training for FTC Transcribe. Constructed always, sends
+        # nothing until the user turns it on: consent lives on the server and
+        # the trainer refuses to upload while it is unknown.
+        self.voice_trainer = VoiceTrainer(
+            token_provider=lambda: auth.access_token,
+            device_label="desktop",
+        )
+
         # ── UI components ──────────────────────────────────────────────
         self.app_window = AppWindow(
             auth=auth,
@@ -197,6 +206,7 @@ class WhisperFlowApp:
             refine_hotkey=config.refine_hotkey,
             config=config,
             get_input_devices=self._get_input_devices_blocking,
+            voice_trainer=self.voice_trainer,
             recorder=None,          # attached by _init_core once built
             transcriber=None,
             version=APP_VERSION,
@@ -261,8 +271,13 @@ class WhisperFlowApp:
         self._dictation_seq = 0
         # Per-dictation local audio persistence (history playback/retry)
         self._audio_writer = None
-        # CRM contact/company names merged into hotwords (see _load_estate_vocab)
+        # CRM contact/company names (see _load_estate_vocab). The list is the
+        # real store; the comma-joined string exists only for Parakeet's casing
+        # pass, which takes one. They are NOT interchangeable: real CRM rows
+        # contain commas ("Forklifts Group West, Manteca"), so re-splitting the
+        # string invents terms that were never in the CRM.
         self._estate_vocab = ""
+        self._estate_terms: list = []
         # Model change requested while recording — applied when idle again
         self._pending_model_change: str | None = None
         # Auto-update: restart only after a stretch of inactivity. Seeded with
@@ -460,7 +475,11 @@ class WhisperFlowApp:
         finishes with the word-count-guarded LLM context fix. No rolling
         context — it belongs to the current session, not an old recording.
         Serialised internally by each engine's _transcribe_lock."""
+        # Each engine gets the list that is safe for it: Parakeet the full set
+        # (casing fix only), whisper the user's own terms alone (its hotwords
+        # become decoder prompt). See _get_prompt_hotwords.
         hw = self._get_hotwords()
+        prompt_hw = self._get_prompt_hotwords()
         candidates = []
         if self._use_parakeet():
             try:
@@ -471,7 +490,7 @@ class WhisperFlowApp:
         if self.transcriber is not None:
             try:
                 candidates.append(self.transcriber.transcribe(
-                    audio, rate, hotwords_str=hw).strip())
+                    audio, rate, hotwords_str=prompt_hw).strip())
             except Exception as e:
                 print(f"[App] Retry whisper pass failed: {e}")
         candidates = [c for c in candidates if c]
@@ -559,6 +578,11 @@ class WhisperFlowApp:
             threading.Thread(
                 target=self._sync_user_libraries, daemon=True, name="library-sync"
             ).start()
+
+        # Voice-training consent, so a change made in FTC Transcribe shows up
+        # here. Fetched rather than assumed: this app never decides on its own
+        # that it may upload the user's voice.
+        self.voice_trainer.refresh_consent(callback=self._on_voice_consent)
 
         if self.ai_refiner.is_available:
             print("[App] AI refinement enabled.")
@@ -1032,6 +1056,15 @@ class WhisperFlowApp:
         if report:
             report(status)
 
+    def _on_voice_consent(self, enabled) -> None:
+        """Push the server's answer into the Settings toggle. `enabled` is None
+        when the server could not be reached, and the switch then stays in its
+        unknown state rather than claiming the user opted out."""
+        try:
+            self.app_window.set_voice_training_state(enabled)
+        except Exception as e:
+            print(f"[VoiceTraining] could not update settings UI: {e}")
+
     def _on_settings_change(self, key: str, value) -> None:
         """Called when the user saves a setting in the Settings panel."""
         print(f"[App] Setting changed: {key} = {value!r}")
@@ -1393,7 +1426,10 @@ class WhisperFlowApp:
             self.feedback.recording_stopped()
 
             _ctx = self._get_context_words()
-            _hw = self._get_hotwords()
+            # Whisper only: the managed/CRM set must never reach a decoder
+            # prompt (see _get_prompt_hotwords). Parakeet's own call sites keep
+            # the full list, where it can only fix casing.
+            _hw = self._get_prompt_hotwords()
 
             if session is not None:
                 # ── Parakeet path: committed prefix + tail-only final pass ──
@@ -1755,6 +1791,13 @@ class WhisperFlowApp:
             _created_at = _dt.datetime.now(_dt.timezone.utc).isoformat()
             if audio_writer is not None:
                 audio_writer.finish(_created_at)
+                # Offer the clip to voice training. Silent no-op unless the
+                # user has switched it on: the trainer checks consent itself
+                # rather than trusting this call site to remember to.
+                try:
+                    self.voice_trainer.offer(_created_at, excerpt=transcribed_text)
+                except Exception as e:
+                    print(f"[VoiceTraining] offer failed (non-fatal): {e}")
             threading.Thread(
                 target=self.db.log_transcription,
                 args=(transcribed_text,),
@@ -2044,12 +2087,19 @@ class WhisperFlowApp:
             from text_expansion import (apply_snippets, apply_vocabulary,
                                          apply_vocabulary_fuzzy)
             vocab = self._user_entries("vocabulary")
+            # Exact mishearing pairs are a user-only concept: managed entries
+            # carry no sounds_like, so including them here would only cost
+            # regex branches.
             fixed = apply_vocabulary(text, vocab)
-            # Phonetic safety net for close mishearings the user hasn't listed
-            # ("vercell" -> "Vercel"). Additive, bounded, off by nothing on the
-            # transcription/injection path; a kill switch in case it ever misfires.
+            # Phonetic safety net for close mishearings nobody listed
+            # ("vercell" -> "Vercel"). Additive, bounded, and off the
+            # transcription/injection path entirely; a kill switch each in case
+            # either tier misfires.
             if getattr(self.config, "vocab_fuzzy", True):
-                fixed = apply_vocabulary_fuzzy(fixed, vocab)
+                # User entries FIRST: the precompute dedups case-insensitively
+                # and keeps the first spelling it sees, so a hand-typed term
+                # always beats a managed one that collides with it.
+                fixed = apply_vocabulary_fuzzy(fixed, vocab + self._managed_entries())
             fixed = apply_snippets(fixed, self._user_entries("snippets"))
         except Exception as exc:
             print(f"[App] User libraries failed (non-fatal): {exc}")
@@ -2058,18 +2108,90 @@ class WhisperFlowApp:
             print(f"[App] User libraries: '{text}' -> '{fixed}'")
         return fixed
 
-    def _get_hotwords(self) -> str:
+    def _managed_entries(self) -> list:
+        """CRM-derived terms shaped as vocabulary entries for the phonetic
+        corrector, tagged `managed` so it applies the strict tier.
+
+        This is where managed terms earn their keep. Correction is the only
+        place they can safely act: the corrector rewrites a span that already
+        exists in the transcript, so the worst case is a wrong correction of
+        something the user did say. Putting the same terms in a decoder prompt
+        risks the strictly worse failure of inventing a sentence nobody said,
+        which is why _get_prompt_hotwords keeps them out.
+
+        No sounds_like: the phonetic net derives the near-misses itself, which
+        is also why the CRM side never needs to supply mishearing pairs.
+        Reads the in-memory list, so the dictation path never waits on a
+        network call."""
+        if not getattr(self.config, "managed_vocab", True):
+            return []
+        try:
+            from text_expansion import managed_variants
+            out, seen = [], set()
+            for raw in (getattr(self, "_estate_terms", None) or []):
+                if not isinstance(raw, str) or not raw.strip():
+                    continue
+                for term in managed_variants(raw):
+                    low = term.lower()
+                    if low in seen:
+                        continue
+                    seen.add(low)
+                    out.append({"term": term, "sounds_like": [],
+                                "managed": True})
+            return out
+        except Exception as exc:
+            print(f"[App] Managed vocabulary unavailable (non-fatal): {exc}")
+            return []
+
+    def _own_hotwords(self) -> str:
+        """The user's OWN vocabulary terms plus the legacy comma-separated
+        field. Terms only, never their mishearings — feeding "pipe drive" to an
+        engine biases it towards the very output the entry exists to correct."""
         custom = (getattr(self.config, "custom_vocabulary", "") or "").strip()
-        estate = getattr(self, "_estate_vocab", "") or ""
-        # The user's vocabulary TERMS (never their mishearings) — boosting the
-        # term is what stops the engine producing the wrong form in the first
-        # place; the corrections above are only the safety net.
         try:
             from text_expansion import vocabulary_hotwords
             own = vocabulary_hotwords(self._user_entries("vocabulary"))
         except Exception:
             own = ""
-        return ", ".join(p for p in (own, custom, estate) if p)
+        return ", ".join(p for p in (own, custom) if p)
+
+    def _get_hotwords(self) -> str:
+        """Terms for PARAKEET, which has no prompt of any kind. `hotwords_str`
+        drives exactly one thing there: a case-insensitive whole-word casing fix
+        applied to text the model already produced (`asr_engine._post_process`).
+        A term in this list can therefore only ever correct the CASING of a word
+        that was genuinely spoken; it can never put a new word into a
+        transcript. That is precisely why the managed/CRM set is safe here and
+        is NOT safe in `_get_prompt_hotwords` — see that docstring before moving
+        anything between the two.
+
+        Built from the same variant list the corrector uses, so the trading name
+        ("Fosseway Freight") gets cased as well as the registered one. The two
+        halves divide the work: this fixes a name the engine spelt correctly but
+        lower-cased, the corrector fixes one it misheard."""
+        managed = ", ".join(e["term"] for e in self._managed_entries())
+        return ", ".join(p for p in (self._own_hotwords(), managed) if p)
+
+    def _get_prompt_hotwords(self) -> str:
+        """Terms for WHISPER's `hotwords=` parameter. EXCLUDES the managed/CRM
+        set, deliberately.
+
+        faster-whisper does not treat hotwords as a separate hint channel: it
+        encodes them into the decoder prompt under `sot_prev`, the same token
+        slot as previous-transcript context (`get_prompt` in its transcribe.py).
+        Whisper therefore cannot distinguish "term to watch for" from "text that
+        was just spoken", and on unclear or quiet audio it emits prompt content
+        back as though it had been dictated. With ~150 arbitrary CRM business
+        names in that prompt, the failure surfaces as a fluent transcript about
+        a company the user has never mentioned.
+
+        The user's own vocabulary stays: it is small, hand-reviewed and made of
+        words they actually say, biasing genuinely helps whisper produce them,
+        and the echo guard in `transcriber._run` covers the residual risk.
+        Managed terms lose nothing by leaving — they still reach Parakeet's
+        casing pass above, and the phonetic corrector in `_apply_user_libraries`
+        is where they do their real work, correcting only spans that exist."""
+        return self._own_hotwords()
 
     def _load_estate_vocab(self) -> None:
         """Names the user actually dictates — their CRM contacts and companies
@@ -2085,7 +2207,8 @@ class WhisperFlowApp:
                 with open(cache_path, "r", encoding="utf-8") as f:
                     cached = _json.load(f)
                 if isinstance(cached, list) and cached:
-                    self._estate_vocab = ", ".join(cached)
+                    self._estate_terms = [str(t) for t in cached]
+                    self._estate_vocab = ", ".join(self._estate_terms)
             except Exception:
                 pass
         try:
@@ -2094,6 +2217,7 @@ class WhisperFlowApp:
             print(f"[App] Estate vocab fetch failed (non-fatal): {e}")
             return
         if terms:
+            self._estate_terms = list(terms)
             self._estate_vocab = ", ".join(terms)
             print(f"[App] Estate vocab: {len(terms)} CRM terms loaded")
             try:
@@ -2300,7 +2424,7 @@ class WhisperFlowApp:
                     text = self.fast_transcriber.transcribe(
                         audio, rate,
                         context_words=self._get_context_words(),
-                        hotwords_str=self._get_hotwords(),
+                        hotwords_str=self._get_prompt_hotwords(),
                         blocking=False,  # never queue — skip the tick if model busy
                     ).strip()
                     if text:

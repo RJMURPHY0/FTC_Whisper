@@ -108,6 +108,7 @@ class Config:
     vocabulary: dict = field(default_factory=dict)
     snippets: dict = field(default_factory=dict)
     vocab_fuzzy: bool = True  # Phonetic safety net: auto-correct close mishearings of a vocabulary term ("vercell" -> "Vercel") the user hasn't listed. Kill switch only; the exact sounds_like path is unaffected when off
+    managed_vocab: bool = True  # Correct names synced from the CRM (contacts, companies) as well as the user's own vocabulary. Separate switch from vocab_fuzzy because the two fail for unrelated reasons: a bad CRM sync must not cost the user the safety net on their own words
     supabase_url: str = ""  # Optional — enables transcription logging
     supabase_key: str = ""  # Publishable (anon) key
     supabase_email: str = ""  # Account email for silent background auth

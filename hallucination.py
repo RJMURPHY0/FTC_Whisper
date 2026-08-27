@@ -80,6 +80,22 @@ def _report(detail: dict) -> None:
         pass
 
 
+def report(event_type: str, detail: dict) -> None:
+    """Send an arbitrary ASR-quality event to the same sink.
+
+    Repetition loops are only one way an engine can return something the user
+    did not say; whisper prompt echo is another, and it is detected in
+    transcriber.py rather than here. Both belong in one fleet log, and the sink
+    app.py installs is already generic, so this exposes it instead of adding a
+    second wiring point that could be left unwired. Never raises."""
+    if _reporter is None:
+        return
+    try:
+        _reporter(event_type, detail)
+    except Exception:
+        pass
+
+
 def _norm(token: str) -> str:
     """Comparison key for a token: punctuation and case carry no information
     about whether the decoder is looping ("no," == "no." == "No")."""

@@ -917,9 +917,11 @@ class AppWindow:
         get_input_devices: Callable = None,
         recorder=None,
         transcriber=None,
+        voice_trainer=None,
         version: str = "",
     ):
         self._version                 = version
+        self._voice_trainer           = voice_trainer
         self._auth                    = auth
         self._on_authenticated        = on_authenticated
         self._on_sign_out             = on_sign_out
@@ -5842,6 +5844,49 @@ class AppWindow:
             lambda _e: self._settings_auth_btn.configure(
                 fg=C["error"] if self._auth.user_email else C["accent"]))
 
+        # ── Voice training ────────────────────────────────────────────────────
+        # Deliberately under Account, not Dictation: this is a decision about
+        # where the user's voice goes, not a preference about how typing works.
+        _section("mic", "Voice Training")
+        vt_card = self._card(parent, margin=(0, 4))
+
+        vt_row = tk.Frame(vt_card, bg=C["surface"]); vt_row.pack(fill="x")
+        _card_icon(vt_row, "mic")
+
+        # Starts OFF and disabled: the real answer lives on the account and
+        # arrives from the server a moment later. Showing "off" before we know
+        # is honest; showing "on" would not be.
+        self._voice_pill = TogglePill(vt_row, value=False, bg=C["surface"],
+                                      command=self._on_voice_training_toggle)
+        self._voice_pill.pack(side="right")
+
+        vt_col = tk.Frame(vt_row, bg=C["surface"])
+        vt_col.pack(side="left", fill="x", expand=True)
+        tk.Label(vt_col, text="Train my voice for FTC Transcribe",
+                 fg=C["text"], bg=C["surface"],
+                 font=("Segoe UI", 9), anchor="w").pack(anchor="w")
+        vt_desc = tk.Label(
+            vt_col,
+            text=("Your dictation audio stays on this computer and is never "
+                  "uploaded. Turn this on and short snippets of your own voice "
+                  "are sent to FTC Transcribe, so it can recognise you in "
+                  "meetings without you recording anything. Same switch in both "
+                  "apps. Turn it off any time."),
+            fg=C["subtext"], bg=C["surface"], font=("Segoe UI", 8),
+            anchor="w", justify="left", wraplength=260)
+        vt_desc.pack(fill="x")
+        self._autowrap(vt_desc)
+
+        vt_actions = tk.Frame(vt_card, bg=C["surface"])
+        vt_actions.pack(fill="x", pady=(8, 0))
+        self._voice_status = tk.Label(vt_actions, text="Checking…",
+                                      fg=C["subtext"], bg=C["surface"],
+                                      font=("Segoe UI", 8), anchor="w")
+        self._voice_status.pack(side="left", fill="x", expand=True)
+        self._voice_import_btn = self._surface_btn(
+            vt_actions, "Import my past dictations", self._on_voice_backfill)
+        self._voice_import_btn.pack(side="right")
+
         # ── Save button ───────────────────────────────────────────────────────
         save_wrap = tk.Frame(parent, bg=C["bg"])
         save_wrap.pack(fill="x", padx=20, pady=(12, 8))
@@ -5865,6 +5910,74 @@ class AppWindow:
 
         save_btn = self._surface_btn(save_wrap, "Save Settings", _save)
         save_btn.pack(side="right")
+
+    # ── Voice training ───────────────────────────────────────────────────────
+
+    def set_voice_training_state(self, enabled) -> None:
+        """Reflect the account's consent in the toggle. Thread-safe: the answer
+        arrives on a network thread. `enabled` is None when the server could not
+        be reached, and the switch is then left alone rather than being flipped
+        to a value nobody chose."""
+        if not self._root:
+            return
+        def _apply():
+            pill = getattr(self, "_voice_pill", None)
+            status = getattr(self, "_voice_status", None)
+            if pill is None:
+                return
+            if enabled is None:
+                if status is not None:
+                    status.configure(text="Could not reach FTC Transcribe.",
+                                     fg=C["subtext"])
+                return
+            pill.set(bool(enabled))
+            if status is not None:
+                status.configure(
+                    text=("On. Snippets of your voice train FTC Transcribe."
+                          if enabled else
+                          "Off. Your dictation audio never leaves this computer."),
+                    fg=C["success"] if enabled else C["subtext"])
+        try:
+            self._root.after(0, _apply)
+        except Exception:
+            pass
+
+    def _on_voice_training_toggle(self, value: bool) -> None:
+        trainer = self._voice_trainer
+        if trainer is None:
+            return
+        if getattr(self, "_voice_status", None) is not None:
+            self._voice_status.configure(text="Saving…", fg=C["subtext"])
+
+        def _done(ok: bool):
+            if ok:
+                self.set_voice_training_state(value)
+            else:
+                # The account did not accept the change, so the switch must not
+                # keep claiming it did.
+                self.set_voice_training_state(None)
+                if self._root:
+                    self._root.after(
+                        0, lambda: self._voice_pill.set(not value))
+        trainer.set_consent(value, callback=_done)
+
+    def _on_voice_backfill(self, _e=None) -> None:
+        """Teach FTC Transcribe from dictations already saved on this machine."""
+        trainer = self._voice_trainer
+        if trainer is None:
+            return
+        if not trainer.enabled:
+            self._voice_status.configure(
+                text="Switch voice training on first.", fg=C["error"])
+            return
+
+        def _progress(msg: str):
+            if self._root:
+                self._root.after(
+                    0, lambda: self._voice_status.configure(
+                        text=msg, fg=C["subtext"]))
+        self._voice_status.configure(text="Starting…", fg=C["subtext"])
+        trainer.backfill(progress=_progress)
 
     # ── Custom Vocabulary / Snippets pages ───────────────────────────────────
     #
