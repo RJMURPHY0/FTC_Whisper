@@ -47,7 +47,7 @@ from auth import AuthManager
 from voice_training import VoiceTrainer
 from app_window import AppWindow
 
-APP_VERSION = "1.6.73"
+APP_VERSION = "1.6.74"
 
 
 class _RECT(ctypes.Structure):
@@ -873,6 +873,7 @@ class WhisperFlowApp:
         needs no migration."""
         try:
             import hallucination
+            import disfluency
 
             def _report(event_type: str, detail: dict) -> None:
                 try:
@@ -881,6 +882,7 @@ class WhisperFlowApp:
                     pass
 
             hallucination.set_reporter(_report)
+            disfluency.set_reporter(_report)
         except Exception as e:
             print(f"[App] hallucination reporter wiring failed (non-fatal): {e}")
 

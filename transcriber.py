@@ -10,6 +10,7 @@ import numpy as np
 from typing import TYPE_CHECKING, Optional
 
 import hallucination
+import disfluency
 
 if TYPE_CHECKING:
     from faster_whisper import WhisperModel
@@ -247,6 +248,9 @@ class Transcriber:
         text = hallucination.clean(text, source=f"whisper:{self.model_size}")
         if not text:
             return ""
+        # False-start stutters ("rec recent" -> "recent", "the the" -> "the"),
+        # same single point every whisper path flows through.
+        text = disfluency.destutter(text, source=f"whisper:{self.model_size}")
         for artifact in self._PHRASE_ARTIFACTS:
             t = text.strip()
             if t == artifact:

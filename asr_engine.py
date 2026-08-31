@@ -25,6 +25,7 @@ from typing import Callable, Optional
 import numpy as np
 
 import hallucination
+import disfluency
 
 _MODEL_SAMPLE_RATE = 16000
 
@@ -424,6 +425,11 @@ class ParakeetTranscriber:
         text = hallucination.clean(text, source="parakeet")
         if not text:
             return ""
+
+        # False-start stutters ("push all most rec recent" -> "recent", "the the"
+        # -> "the"). Same placement as the loop guard, so committed chunks, live
+        # captions and the batch path all collapse the same disfluency.
+        text = disfluency.destutter(text, source="parakeet")
 
         # Pure non-word fillers only — never strip real words. Swallow one
         # adjacent comma so "So, um, I think" -> "So, I think" (not "So,, I").
