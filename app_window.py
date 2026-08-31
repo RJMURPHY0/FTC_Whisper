@@ -893,6 +893,54 @@ class RoundedButton(tk.Canvas):
     config = configure
 
 
+class SurfaceButton(RoundedButton):
+    """A RoundedButton that owns its hover fill and can be armed or disarmed
+    after construction.
+
+    Two things call sites kept getting wrong on the bare RoundedButton: `bg=`
+    now sets the RESTING fill, so a state change made while the pointer is
+    over the button ("Change Hotkey" -> "Cancel") still shows once the
+    pointer leaves; and `command=None` disarms it, so a Save button goes
+    inert WITHOUT any call site unbinding -- unbind(seq) drops EVERY handler
+    for that sequence on Python < 3.12, and CI builds on 3.11.
+    """
+
+    def __init__(self, parent, text="", command=None, *, hover=None, **kw):
+        self._hovered = False
+        super().__init__(parent, text=text, command=command, **kw)
+        self._rest_fill = self._fill
+        self._hover_fill = hover if hover is not None else C["accent"]
+        # Bound unconditionally (RoundedButton only binds when a command was
+        # passed) so a later configure(command=...) needs no new binding.
+        self.bind("<Button-1>", self._on_click)
+        self.bind("<Enter>", lambda _e: self._set_hover(True))
+        self.bind("<Leave>", lambda _e: self._set_hover(False))
+
+    def _on_click(self, _e=None):
+        if self._command is not None:
+            self._command()
+
+    def _set_hover(self, on):
+        self._hovered = on
+        if self._command is None:
+            return          # a disarmed button offers no hover
+        RoundedButton.configure(
+            self, bg=self._hover_fill if on else self._rest_fill)
+
+    def configure(self, cnf=None, **kw):
+        if "command" in kw:
+            self._command = kw.pop("command")
+            if self._command is None and self._hovered:
+                kw.setdefault("bg", self._rest_fill)
+        for k in ("bg", "background"):
+            if k in kw:
+                self._rest_fill = kw[k]
+                if self._hovered and self._command is not None:
+                    kw[k] = self._hover_fill
+        RoundedButton.configure(self, cnf, **kw)
+    config = configure
+
+
 # The CRM's dark `--muted-foreground` (hsl 0 0% 55%) -- the resting ink on a
 # glass button. C["subtext"] is the app's hint grey and reads too dim here.
 _GLASS_MUTED = "#8c8c8c"
@@ -3802,19 +3850,18 @@ class AppWindow:
         self._hotkey_record_msg.pack(fill="x", pady=(0, 3))
         self._autowrap(self._hotkey_record_msg)
 
-        # Full width, stacked. "Change Hotkey" spelt out does not fit beside
-        # a Save button in a ~155px column at any font this UI uses, and the
-        # label is worth more than the row.
+        # Stacked, each sized to its label. "Change Hotkey" spelt out does
+        # not fit beside a Save button in a ~155px column at any font this UI
+        # uses, and the label is worth more than the row.
         self._record_btn = self._hotkey_btn(
-            col_hf, "Change Hotkey", self._toggle_hotkey_recording,
-            icon="pen", icon_color=C["accent"])
-        self._record_btn.pack(fill="x")
+            col_hf, "Change Hotkey", self._toggle_hotkey_recording)
+        self._record_btn.pack(anchor="w")
 
-        # No command until a new combo is captured -- a GlassButton with no
+        # No command until a new combo is captured -- a SurfaceButton with no
         # command is inert and doesn't offer a hover, which is the whole
         # disarmed state.
         self._save_btn = self._save_btn_new(col_hf)
-        self._save_btn.pack(fill="x", pady=(1, 0))
+        self._save_btn.pack(anchor="w", pady=(5, 0))
 
         self._micro_label(col_ptt, "PUSH-TO-TALK",
                           self._HELP_PTT).pack(fill="x")
@@ -3835,11 +3882,11 @@ class AppWindow:
 
         self._ptt_record_btn = self._hotkey_btn(
             col_ptt, "Change Hotkey" if self._ptt_hotkey else "Set Hotkey",
-            self._toggle_ptt_recording, icon="pen", icon_color=C["accent"])
-        self._ptt_record_btn.pack(fill="x")
+            self._toggle_ptt_recording)
+        self._ptt_record_btn.pack(anchor="w")
 
         self._ptt_save_btn = self._save_btn_new(col_ptt)
-        self._ptt_save_btn.pack(fill="x", pady=(1, 0))
+        self._ptt_save_btn.pack(anchor="w", pady=(5, 0))
 
         # ── Refine selection hotkey ───────────────────────────────────────────────
         card2 = self._card(parent, inner_pad=(18, 8), margin=(0, 4))
@@ -3865,21 +3912,17 @@ class AppWindow:
         self._autowrap(self._refine_record_msg)
 
         # The refine card is full width, so its pair sits side by side --
-        # two stacked full-width buttons across a 344px card would read as a
-        # form, not as a control.
+        # two stacked buttons across a 344px card would read as a form, not
+        # as a control.
         btn_row2 = tk.Frame(card2, bg=C["surface"])
         btn_row2.pack(fill="x")
-        btn_row2.columnconfigure(0, weight=1, uniform="rb")
-        btn_row2.columnconfigure(1, weight=1, uniform="rb")
 
         self._refine_record_btn = self._hotkey_btn(
-            btn_row2, "Change Hotkey", self._toggle_refine_hotkey_recording,
-            icon="pen", icon_color=C["accent"])
-        self._refine_record_btn.grid(row=0, column=0, sticky="ew",
-                                     padx=(0, 3))
+            btn_row2, "Change Hotkey", self._toggle_refine_hotkey_recording)
+        self._refine_record_btn.pack(side="left", padx=(0, 8))
 
         self._refine_save_btn = self._save_btn_new(btn_row2)
-        self._refine_save_btn.grid(row=0, column=1, sticky="ew", padx=(3, 0))
+        self._refine_save_btn.pack(side="left")
 
     # Help text is one short line of plain words. It is the first thing a new
     # user reads, so it says what the key does and stops there.
@@ -3932,8 +3975,8 @@ class AppWindow:
         self._recording_hotkey = True
         self._pending_hotkey = None
         self._suspend_global_hotkeys()
-        self._record_btn.configure(text="Cancel", bg=C["error"], fg=C["text"],
-                                   icon="", icon_color=None)
+        self._record_btn.configure(text="Cancel", bg=C["error"],
+                                   fg=C["text"])
         self._hotkey_record_msg.configure(
             text="Press your new key or combination… (Escape to cancel)",
             fg=C["accent"],
@@ -4132,9 +4175,9 @@ class AppWindow:
         self._root.unbind("<KeyPress>")
         self._root.unbind("<KeyRelease>")
         self._resume_global_hotkeys()
-        self._record_btn.configure(text="Change Hotkey", bg=C["surface"],
-                                   fg=C["text"], cursor="hand2",
-                                   icon="pen", icon_color=C["accent"])
+        self._record_btn.configure(text="Change Hotkey",
+                                   bg=C["surface_hover"], fg=C["text"],
+                                   cursor="hand2")
 
         conflict = self._combo_conflict(self._pending_hotkey or "", "main")
         if conflict and not cancelled:
@@ -4231,8 +4274,7 @@ class AppWindow:
         self._pending_ptt_hotkey = None
         self._suspend_global_hotkeys()
         self._ptt_record_btn.configure(text="Cancel", bg=C["error"],
-                                       fg=C["text"], icon="",
-                                       icon_color=None)
+                                       fg=C["text"])
         self._ptt_record_msg.configure(
             text="Press your new key or combination… (Escape to cancel)",
             fg=C["accent"],
@@ -4265,8 +4307,7 @@ class AppWindow:
         self._resume_global_hotkeys()
         self._ptt_record_btn.configure(
             text="Change Hotkey" if self._ptt_hotkey else "Set Hotkey",
-            bg=C["surface"], fg=C["text"], cursor="hand2",
-            icon="pen", icon_color=C["accent"])
+            bg=C["surface_hover"], fg=C["text"], cursor="hand2")
 
         conflict = self._combo_conflict(self._pending_ptt_hotkey or "", "ptt")
         if conflict and not cancelled:
@@ -4348,8 +4389,7 @@ class AppWindow:
         self._pending_refine_hotkey = None
         self._suspend_global_hotkeys()
         self._refine_record_btn.configure(text="Cancel", bg=C["error"],
-                                          fg=C["text"], icon="",
-                                          icon_color=None)
+                                          fg=C["text"])
         self._refine_record_msg.configure(
             text="Press your new key or combination… (Escape to cancel)",
             fg=C["accent"],
@@ -4381,8 +4421,8 @@ class AppWindow:
         self._root.unbind("<KeyRelease>")
         self._resume_global_hotkeys()
         self._refine_record_btn.configure(
-            text="Change Hotkey", bg=C["surface"], fg=C["text"],
-            cursor="hand2", icon="pen", icon_color=C["accent"])
+            text="Change Hotkey", bg=C["surface_hover"], fg=C["text"],
+            cursor="hand2")
 
         conflict = self._combo_conflict(self._pending_refine_hotkey or "", "refine")
         if conflict and not cancelled:
@@ -7728,26 +7768,26 @@ class AppWindow:
 
     # ── Widget helpers ────────────────────────────────────────────────────────
 
-    def _surface_btn(self, parent, text, cmd) -> RoundedButton:
-        btn = RoundedButton(
-            parent, text=text, command=cmd,
-            fg=C["text"], fill=C["surface_hover"],
-            font=("Segoe UI", 10), padx=16, pady=8,
-        )
-        btn.bind("<Enter>", lambda _e: btn.configure(bg=C["accent"], fg=C["text"]))
-        btn.bind("<Leave>", lambda _e: btn.configure(bg=C["surface_hover"], fg=C["text"]))
-        return btn
+    def _surface_btn(self, parent, text, cmd, **kw) -> SurfaceButton:
+        """The app's plain button: a flat rounded rectangle sized to its
+        label, accent on hover. Hover lives in the widget, so a call site
+        must never bind <Enter>/<Leave> on one -- a widget-level bind
+        REPLACES the widget's own handler."""
+        kw.setdefault("fg", C["text"])
+        kw.setdefault("fill", C["surface_hover"])
+        kw.setdefault("font", ("Segoe UI", 10))
+        kw.setdefault("padx", 16)
+        kw.setdefault("pady", 8)
+        return SurfaceButton(parent, text=text, command=cmd, **kw)
 
-    def _hotkey_btn(self, parent, text, cmd=None, icon="",
-                    icon_color=None, **kw) -> GlassButton:
-        """A full-width shortcut button. The pair stacks rather than sharing a
-        row: the label has to say "Change Hotkey" in full, and two labelled
-        buttons side by side do not fit a hotkey column at this window width.
+    def _hotkey_btn(self, parent, text, cmd=None, **kw) -> SurfaceButton:
+        """The Hotkey tab's shortcut buttons. Deliberately the plain button,
+        not the glass one: the glass treatment belongs to the keycaps above
+        them, and two glass slabs stacked in a 161px column read as one.
+        Sized to its label, so the pair sits left-aligned in the column
+        rather than stretching across it.
         """
-        btn = self._glass_btn(parent, text, cmd, icon=icon,
-                              icon_color=icon_color, **kw)
-        btn.stretch()
-        return btn
+        return self._surface_btn(parent, text, cmd, **kw)
 
     def _glass_btn(self, parent, text, cmd=None, icon="",
                    icon_color=None, **kw) -> GlassButton:
@@ -7764,29 +7804,27 @@ class AppWindow:
                            icon_size=13, icon_color=icon_color, **kw)
 
     # The Save button has two faces. Disarmed it is a statement of fact --
-    # a grey tick reading "Saved" -- because there is nothing to save; armed
-    # it is a green "Save" you can press. Same widget, so the row never
-    # reflows between them.
-    SAVE_IDLE  = ("Saved", "check")
-    SAVE_ARMED = ("Save", "save")
+    # a grey "Saved" -- because there is nothing to save; armed it is an
+    # accent "Save" you can press. Same widget, and both labels measure
+    # narrower than the column, so the row never reflows between them.
+    SAVE_IDLE  = "Saved"
+    SAVE_ARMED = "Save"
 
-    def _save_btn_new(self, parent) -> GlassButton:
-        btn = self._glass_btn(parent, self.SAVE_IDLE[0], icon=self.SAVE_IDLE[1],
-                              icon_color=_GLASS_MUTED,
-                              fg=C["success"], subfg=_GLASS_MUTED,
-                              font=("Segoe UI", 9, "bold"))
-        btn.stretch()
-        return btn
+    def _save_btn_new(self, parent) -> SurfaceButton:
+        return self._surface_btn(
+            parent, self.SAVE_IDLE, None,
+            fg=C["subtext"], fill=C["border"],
+            font=("Segoe UI", 10, "bold"), hover=C["accent_hover"],
+            cursor="",
+        )
 
     def _arm_save(self, btn, cmd) -> None:
-        btn.configure(text=self.SAVE_ARMED[0], icon=self.SAVE_ARMED[1],
-                      icon_color=C["success"], bg=C["success"],
-                      fg=C["success"], cursor="hand2", command=cmd)
+        btn.configure(text=self.SAVE_ARMED, bg=C["accent"], fg=C["text"],
+                      cursor="hand2", command=cmd)
 
     def _disarm_save(self, btn) -> None:
-        btn.configure(text=self.SAVE_IDLE[0], icon=self.SAVE_IDLE[1],
-                      icon_color=_GLASS_MUTED, bg=C["border"],
-                      fg=C["success"], cursor="", command=None)
+        btn.configure(text=self.SAVE_IDLE, bg=C["border"], fg=C["subtext"],
+                      cursor="", command=None)
 
     @staticmethod
     def _autowrap(lbl: tk.Label, pad: int = 4) -> tk.Label:

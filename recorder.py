@@ -33,6 +33,52 @@ _PREROLL_SEED_SECONDS = 0.8   # pre-hotkey audio prepended to a recording: cover
                               # syllable landed together under load; 0.6 still
                               # occasionally clipped the first word or two, so
                               # the margin is 0.8 (the ring keeps 1.5s).
+                              # This is the CEILING, not the amount actually
+                              # used — _seed_cut_index() below trims it back to
+                              # the audio that belongs to this dictation.
+
+# The seed's whole job is to cover the gap between the user deciding to speak
+# and the hotkey arriving. It must never carry speech the user finished BEFORE
+# they asked to dictate: a warm mic that hears the room is fine, a warm mic that
+# types the room is not (measured: "Hello, my name is Ryan" spoken before the
+# press, then ALT+V, then "Whisperflow" — all five leading words fitted inside
+# 0.8s of seed and were injected).
+_SEED_FRAME_SECONDS = 0.02    # analysis frame for the seed's speech/pause map
+_SEED_GAP_SECONDS = 0.15      # a pause at least this long ends a run of speech.
+                              # Above the ~50-100ms gaps inside connected speech,
+                              # so a single word is never split in two.
+_SEED_ONSET_PAD = 0.10        # lead-in kept in front of a run that is being
+                              # kept. An unvoiced onset (/h/, /t/, /s/, /f/)
+                              # carries almost no energy, so the level test puts
+                              # the run's start just after it — measured, that
+                              # turned "Host all recent changes" into "Post all
+                              # recent changes" and "testing" into "test him".
+                              # Padding into the pause in front costs nothing:
+                              # it is silence by definition, and never reaches
+                              # back into older speech.
+_SEED_FILL_GAIN = 0.25        # room tone is laid in at a quarter of the floor.
+                              # A/B'd over 60 real dictations: at the full floor
+                              # the fill is loud enough to be decoded itself
+                              # ("I in Whisper Flow"), and exact digital zeros
+                              # are equally bad in the other direction — the
+                              # abrupt nothing shifted neighbouring words
+                              # ("testing" -> "test him"). A quarter of the room
+                              # floor was the only setting that left every
+                              # untouched dictation untouched.
+
+# Own generator, so the room-tone fill never perturbs global numpy state the
+# rest of the app may be relying on. Only ever drawn from on the press path,
+# which is single-threaded.
+_SEED_RNG = np.random.default_rng(1729)
+_SEED_RUN_MAX = 0.45          # the run of speech still going when the key was
+                              # pressed is kept WHOLE if it is no longer than
+                              # this (a word or two begun a beat early — the
+                              # reason the seed exists), and dropped WHOLE if it
+                              # is longer (the user was already talking). Never
+                              # cut part-way through: a half word is worse than
+                              # either, and measured as such — trimming inside
+                              # one turned "Host all recent changes" into
+                              # "Post all recent changes".
 
 # A healthy input stream delivers a callback every blocksize/rate seconds
 # (~21-64ms). If none arrived for this long the stream is considered dead —
@@ -84,6 +130,75 @@ _PROBE_MARGIN = 4.0           # candidate must beat the primary by this factor
 _PROBE_SUSTAIN_SECONDS = 0.3  # candidate must stay above the floor this long —
                               # a single 20ms transient (chair squeak, cough,
                               # AGC hiss) must never count as speech evidence
+
+
+def _seed_cut_index(seed: np.ndarray, rate: int, noise_floor: float) -> int:
+    """Where the pre-roll seed should start, in samples.
+
+    `seed` is mono pre-hotkey audio, oldest first, ending at the moment of the
+    press. Only one thing in it can belong to this dictation: a run of speech
+    still going when the key landed. So the run touching the press is measured
+    and kept whole if it is short (a word begun a beat early) or dropped whole
+    if it is long (the user was already talking, and none of it was dictated).
+    Everything older than that run goes either way.
+
+    Returns 0 — keep the whole window — when the seed holds no speech at all,
+    which is the ordinary case: silence costs nothing and is what protects a
+    quiet first syllable the level test would miss.
+    """
+    n = int(seed.shape[0])
+    frame = max(1, int(rate * _SEED_FRAME_SECONDS))
+    count = n // frame
+    if count < 2:
+        return 0
+    block = seed[:count * frame].reshape(count, frame).astype(np.float32)
+    rms = np.sqrt(np.mean(block * block, axis=1))
+    # The same speech sits at -28 dB on a close mic and -50 dB on a far-field
+    # one, so the bar can never be a fixed number. It comes from the room floor
+    # the warm stream has been measuring all along, NOT from this window's own
+    # quiet level: a window that is wall-to-wall speech has no floor in it, and
+    # a percentile taken over speech reads ~10 dB under the peak and calls the
+    # whole utterance a pause.
+    peak = float(rms.max())
+    threshold = max(noise_floor * 2.5, peak * 0.10, 3e-4)
+    voiced = rms > threshold
+
+    gap_frames = max(1, int(round(_SEED_GAP_SECONDS / _SEED_FRAME_SECONDS)))
+    run_max = max(1, int(round(_SEED_RUN_MAX / _SEED_FRAME_SECONDS)))
+
+    # Walk back from the press to the start of the run of speech touching it.
+    # A dip shorter than a real pause is inside a word, not the end of one.
+    i = count - 1
+    trailing_silence = 0
+    while i >= 0 and not voiced[i]:
+        i -= 1
+        trailing_silence += 1
+    if trailing_silence >= gap_frames:
+        # The user was NOT speaking when they pressed, so nothing here was
+        # dictated. Keep the pause (silence is free, and a quiet onset the
+        # level test missed lives in it); drop any speech older than it.
+        return 0 if i < 0 else (i + 1) * frame
+    run_end = count if trailing_silence == 0 else count - trailing_silence
+    while i >= 0:
+        if voiced[i]:
+            i -= 1
+            continue
+        j = i
+        while j >= 0 and not voiced[j]:
+            j -= 1
+        if (i - j) >= gap_frames:
+            break
+        i = j          # a dip inside speech, not the end of the run
+    run_start = i + 1
+    if (run_end - run_start) > run_max:
+        return count * frame   # already talking: none of this was dictated
+    # Reach back over the pause for the onset the level test could not see,
+    # stopping dead at any older speech.
+    pad = max(0, int(round(_SEED_ONSET_PAD / _SEED_FRAME_SECONDS)))
+    limit = run_start
+    while limit > 0 and (run_start - limit) < pad and not voiced[limit - 1]:
+        limit -= 1
+    return limit * frame
 
 
 class Recorder:
@@ -174,6 +289,10 @@ class Recorder:
         # the fleet log so those events are visible instead of anecdotal.
         self._last_warm_reopened = False
         self.last_start_recovery: Optional[dict] = None
+        # Milliseconds of pre-hotkey audio that survived the seed trim.
+        # Diagnostic only: a fleet report of first-word loss wants to
+        # know how much lead-in the recording actually had.
+        self.last_seed_ms: int = 0
         # Start of the current unbroken run of bit-exact-silent callbacks, or
         # 0.0 when the last buffer carried signal. See _SILENT_STREAM_SECONDS.
         self._silent_run_started_ts: float = 0.0
@@ -238,6 +357,49 @@ class Recorder:
     # Stream callbacks
     # ------------------------------------------------------------------
 
+    def _trim_seed(self, chunks: list, seed_max: int) -> list:
+        """Silence the part of the pre-roll that was spoken before the hotkey.
+
+        The warm mic is always listening, so the ring routinely holds whatever
+        the user said in the seconds before they asked to dictate. Prepending
+        that verbatim is how "Hello, my name is Ryan" ended up in front of the
+        word actually dictated. `_seed_cut_index` decides where this dictation
+        starts; everything older is muted to the room floor.
+
+        MUTED, not deleted, and that is load-bearing: shortening the clip moves
+        the first real word closer to the start of the audio and the transducer
+        decodes its opening phoneme differently — measured, deleting the same
+        region turned "Host all recent changes" into "Post all recent changes".
+        Overwriting keeps every sample where it was, so the only thing that
+        changes is the content nobody dictated. Failure is non-fatal: the seed
+        falls back untouched, which is the pre-1.6.73 behaviour.
+        """
+        if not chunks:
+            return chunks
+        try:
+            flat = np.concatenate(chunks, axis=0)
+            window = flat[-seed_max:] if seed_max and flat.shape[0] > seed_max else flat
+            mono = window[:, 0] if window.ndim > 1 else window
+            cut = _seed_cut_index(np.ascontiguousarray(mono),
+                                  self.active_sample_rate,
+                                  self._noise_floor)
+            if cut <= 0:
+                return chunks
+            muted = np.array(window, dtype=window.dtype, copy=True)
+            # REPLACED with room tone, not attenuated: turning the speech down
+            # leaves its envelope and formants intact, and the transducer is
+            # good enough at quiet audio to read them straight back — measured,
+            # 34 dB down still transcribed as "Hello, my name is Ryan". Noise at
+            # the room's own level carries no structure to decode, and is what
+            # the microphone would have heard had nobody been speaking.
+            level = max(min(self._noise_floor, 0.01), 1e-5) * _SEED_FILL_GAIN
+            tone = _SEED_RNG.standard_normal(muted[:cut].shape) * level
+            muted[:cut] = tone.astype(muted.dtype, copy=False)
+            return [muted]
+        except Exception as e:
+            print(f"[Recorder] Seed trim skipped: {e}")
+            return chunks
+
     def _audio_callback(
         self, indata: np.ndarray, _frames: int, _time_info, status
     ) -> None:
@@ -271,16 +433,20 @@ class Recorder:
                     self._silent_run_started_ts = now
             if self._aux_active:
                 self._aux_chunks.append(data)
+            # Adaptive floor: drops fast onto quiet, creeps up slowly, so a
+            # noisy room raises the bar instead of counting as speech. Tracked
+            # while IDLE as well as while recording, because the seed trim
+            # (_seed_cut_index) needs the room's floor to tell "the user paused"
+            # from "the user is still talking" — and a window that is entirely
+            # speech carries no floor of its own to measure.
+            if rms < self._noise_floor:
+                self._noise_floor = max(
+                    1e-5, 0.8 * self._noise_floor + 0.2 * rms)
+            else:
+                self._noise_floor = min(self._noise_floor * 1.005, 0.02)
             if self._recording:
                 self._chunks.append(data)
                 self._chunks_samples += n
-                # Adaptive floor: drops fast onto quiet, creeps up slowly, so
-                # a noisy room raises the bar instead of counting as speech.
-                if rms < self._noise_floor:
-                    self._noise_floor = max(
-                        1e-5, 0.8 * self._noise_floor + 0.2 * rms)
-                else:
-                    self._noise_floor = min(self._noise_floor * 1.005, 0.02)
                 if rms > max(0.0025, self._noise_floor * 2.5):
                     self._voiced_samples += n
             elif self._warm_enabled:
@@ -588,6 +754,7 @@ class Recorder:
         # warm stream + pre-roll seed = nothing lost); set whenever the stream
         # had to be (re)opened, i.e. whenever first words were at risk.
         self.last_start_recovery = None
+        self.last_seed_ms = 0
         self._last_warm_reopened = False
         press_ts = time.monotonic()
 
@@ -617,10 +784,14 @@ class Recorder:
                         seeded += chunk.shape[0]
                         if seeded >= seed_max:
                             break
-                    for chunk in reversed(seed_chunks):
+                    seed_chunks.reverse()
+                    seed = self._trim_seed(seed_chunks, seed_max)
+                    for chunk in seed:
                         self._chunks.append(chunk)
                         self._chunks_samples += chunk.shape[0]
                 seed_samples = self._chunks_samples
+                self.last_seed_ms = int(seed_samples * 1000
+                                        / max(1, self.active_sample_rate))
                 self._preroll.clear()
                 self._preroll_samples = 0
                 self._last_rms = 0.0
@@ -654,7 +825,8 @@ class Recorder:
                     }
                 print(
                     f"[Recorder] Recording started instantly (warm, "
-                    f"{self._active_device_name or 'default input'}, {self.active_sample_rate} Hz)."
+                    f"{self._active_device_name or 'default input'}, "
+                    f"{self.active_sample_rate} Hz, seed {self.last_seed_ms}ms)."
                 )
                 return
             print("[Recorder] Warm stream produced no audio after start — "

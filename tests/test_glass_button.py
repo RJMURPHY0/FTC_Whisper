@@ -143,10 +143,16 @@ class GlassWiringTests(unittest.TestCase):
         start = self.src.index("def _build_hotkey_tab")
         self.tab = self.src[start:self.src.index("def _hotkey_help_text")]
 
-    def test_the_three_shortcut_buttons_are_glass(self):
+    def test_the_three_shortcut_buttons_are_the_plain_button(self):
+        # The glass treatment belongs to the keycaps above them; the buttons
+        # themselves are the app's ordinary rounded rectangle.
         self.assertEqual(self.tab.count("self._hotkey_btn("), 3,
                          "hands-free, push-to-talk and refine")
-        self.assertNotIn("self._surface_btn(", self.tab)
+        self.assertNotIn("GlassButton", self.tab)
+        self.assertNotIn("_glass_btn", self.tab)
+        body = self.src[self.src.index("def _hotkey_btn"):]
+        body = body[:body.index(chr(10) + "    # ")]
+        self.assertIn("_surface_btn", body)
 
     def test_no_call_site_binds_enter_or_leave_on_a_save_button(self):
         # A widget-level bind REPLACES the widget's handler, so this would
@@ -157,9 +163,9 @@ class GlassWiringTests(unittest.TestCase):
                 "%s must be driven by command=/configure(), not binds" % name)
 
     def test_every_save_button_is_armed_through_the_one_helper(self):
-        # Text, icon, colour and command are ONE state ("Saved" grey and inert
-        # vs "Save" green and clickable). Configuring a save button in place
-        # is how those drift apart, so no call site may do it.
+        # Text, colour, cursor and command are ONE state ("Saved" grey and
+        # inert vs "Save" accent and clickable). Configuring a save button in
+        # place is how those drift apart, so no call site may do it.
         for name in ("_save_btn", "_ptt_save_btn", "_refine_save_btn"):
             self.assertNotRegex(
                 self.src, r"self\.%s\.configure\(" % name,
@@ -170,15 +176,32 @@ class GlassWiringTests(unittest.TestCase):
     def test_the_two_save_faces_differ_in_more_than_colour(self):
         import app_window as aw
         self.assertNotEqual(aw.AppWindow.SAVE_IDLE, aw.AppWindow.SAVE_ARMED)
-        self.assertEqual(aw.AppWindow.SAVE_IDLE[0], "Saved")
-        self.assertEqual(aw.AppWindow.SAVE_ARMED[0], "Save")
+        self.assertEqual(aw.AppWindow.SAVE_IDLE, "Saved")
+        self.assertEqual(aw.AppWindow.SAVE_ARMED, "Save")
         arm = self.src[self.src.index("def _arm_save"):]
         arm = arm[:arm.index("def _disarm_save")]
-        for part in ("text=", "icon=", "icon_color=", "bg=", "command="):
+        for part in ("text=", "bg=", "fg=", "cursor=", "command="):
             self.assertIn(part, arm, "_arm_save must set %s" % part)
         dis = self.src[self.src.index("def _disarm_save"):]
         dis = dis[:dis.index(chr(10) + "    def ", 10)]
         self.assertIn("command=None", dis)
+
+    def test_a_disarmed_save_button_needs_no_unbind(self):
+        # unbind(seq) drops EVERY handler for that sequence on Python < 3.12
+        # and CI builds on 3.11, so disarming is command=None, never unbind.
+        body = self.src[self.src.index("class SurfaceButton"):]
+        body = body[:body.index(chr(10) + "class ")]
+        self.assertNotIn(".unbind(", body)
+        self.assertIn("if self._command is not None:", body)
+
+    def test_a_state_change_mid_hover_survives_the_pointer_leaving(self):
+        # "Change Hotkey" -> "Cancel" happens on a click, i.e. always with
+        # the pointer ON the button. bg= must set the RESTING fill or the
+        # red is lost the moment the pointer moves away.
+        body = self.src[self.src.index("class SurfaceButton"):]
+        body = body[:body.index(chr(10) + "class ")]
+        cfg = body[body.index("def configure"):]
+        self.assertIn("self._rest_fill = kw[k]", cfg)
 
 
 class RefineOpensThePanelTests(unittest.TestCase):
@@ -287,41 +310,50 @@ class HotkeyTabLayoutTests(unittest.TestCase):
         start = self.src.index("def _build_hotkey_tab")
         self.tab = self.src[start:self.src.index("def _hotkey_help_text")]
 
-    def test_the_dictation_pairs_stack_full_width(self):
-        # "Change Hotkey" in full does not fit beside a Save button in a
-        # hotkey column, so the pair stacks and each button fills the column.
+    def test_the_dictation_pairs_stack_left_aligned(self):
+        # The pair stacks in its column and each button is sized to its own
+        # label -- a full-width button in a 161px column reads as a form row.
         for name in ("_record_btn", "_save_btn",
                      "_ptt_record_btn", "_ptt_save_btn"):
-            self.assertRegex(self.tab, r"self\.%s\.pack\(fill=\"x\"" % name,
-                             "%s must fill its column" % name)
+            self.assertRegex(self.tab, r"self\.%s\.pack\(anchor=\"w\"" % name,
+                             "%s must sit left-aligned in its column" % name)
         cols = self.tab[self.tab.index("col_hf = tk.Frame"):
                         self.tab.index("# ── Refine selection")]
         self.assertNotIn('side="left"', cols,
                          "the dictation columns stack, they do not share rows")
 
-    def test_the_refine_pair_shares_its_row_evenly(self):
-        # The refine card is full width; two stacked full-width buttons there
-        # would read as a form rather than as a control.
+    def test_the_refine_pair_shares_its_row(self):
+        # The refine card is full width; two stacked buttons there would read
+        # as a form rather than as a control.
         refine = self.tab[self.tab.index("btn_row2"):]
-        self.assertIn('uniform="rb"', refine)
-        self.assertEqual(refine.count('sticky="ew"'), 2)
+        self.assertEqual(refine.count('side="left"'), 2)
 
-    def test_the_change_buttons_carry_the_pencil(self):
-        self.assertEqual(self.tab.count('icon="pen"'), 3)
+    def test_the_shortcut_buttons_carry_no_icon(self):
+        # The plain button draws text only, so an icon= would be silently
+        # dropped rather than shown.
+        self.assertNotIn('icon="pen"', self.tab)
+        for name in ("_record_btn", "_ptt_record_btn", "_refine_record_btn",
+                     "_save_btn", "_ptt_save_btn", "_refine_save_btn"):
+            self.assertNotRegex(
+                self.src, r"self\.%s\.configure\([^)]*icon" % name,
+                "%s has no icon to configure" % name)
 
-    def test_save_shows_a_tick_at_rest_and_a_disk_once_armed(self):
-        import app_window as aw
-        self.assertEqual(aw.AppWindow.SAVE_IDLE[1], "check")
-        self.assertEqual(aw.AppWindow.SAVE_ARMED[1], "save")
-
-    def test_a_cancel_button_drops_the_pencil(self):
-        # "Cancel" with an edit pencil on it reads as the wrong action.
+    def test_a_cancel_button_turns_red_and_restores_the_resting_fill(self):
+        # Cancel is the destructive face of the same button; leaving the
+        # record state must put back the fill the button rests on, not the
+        # card surface it sits against.
         for name in ("_record_btn", "_ptt_record_btn", "_refine_record_btn"):
             m = re.search(
                 r'self\.%s\.configure\(\s*text="Cancel".*?\)' % name,
                 self.src, re.S)
             self.assertIsNotNone(m, "no Cancel branch for %s" % name)
-            self.assertIn('icon=""', m.group(0))
+            self.assertIn('bg=C["error"]', m.group(0))
+            back = re.search(
+                r'self\.%s\.configure\((?![^)]*Cancel)[^)]*cursor="hand2"[^)]*\)'
+                % name, self.src, re.S)
+            self.assertIsNotNone(back, "no restore branch for %s" % name)
+            self.assertIn('bg=C["surface_hover"]', back.group(0),
+                          "%s must go back to the fill it rests on" % name)
 
     def test_the_card_header_has_a_rule_under_it(self):
         self.assertIn('tk.Frame(card, bg=C["border"], height=1)', self.tab)
@@ -447,8 +479,7 @@ holder = aw.AppWindow.__new__(aw.AppWindow)
 frame = tk.Frame(root, bg=aw.C["surface"])
 out["buttons"] = {}
 for label in ("Change Hotkey", "Set Hotkey", "Cancel", "Saved", "Save"):
-    b = aw.AppWindow._glass_btn(holder, frame, label, icon="pen",
-                                icon_color=aw.C["accent"])
+    b = aw.AppWindow._hotkey_btn(holder, frame, label)
     out["buttons"][label] = int(b["width"])
 out["save_btn"] = int(aw.AppWindow._save_btn_new(holder, frame)["width"])
 
